@@ -4,6 +4,7 @@ import type {
   McpServer,
   SessionUpdate,
   ToolCallContent,
+  ToolCallLocation,
   ToolKind
 } from '@agentclientprotocol/sdk'
 import { RequestError } from '@agentclientprotocol/sdk'
@@ -35,6 +36,30 @@ type QueuedTurn = {
   images: unknown[]
   resolve: (reason: StopReason) => void
   reject: (err: unknown) => void
+}
+
+function findUniqueLineNumber(text: string, needle: string): number | undefined {
+  if (!needle) return undefined
+
+  const first = text.indexOf(needle)
+  if (first < 0) return undefined
+
+  const second = text.indexOf(needle, first + needle.length)
+  if (second >= 0) return undefined
+
+  let line = 1
+  for (let i = 0; i < first; i += 1) {
+    if (text.charCodeAt(i) === 10) line += 1
+  }
+  return line
+}
+
+function toToolCallLocations(args: unknown, cwd: string, line?: number): ToolCallLocation[] | undefined {
+  const path = typeof (args as { path?: unknown } | null | undefined)?.path === 'string' ? (args as { path: string }).path : undefined
+  if (!path) return undefined
+
+  const resolvedPath = isAbsolute(path) ? path : resolvePath(cwd, path)
+  return [{ path: resolvedPath, ...(typeof line === 'number' ? { line } : {}) }]
 }
 
 export class SessionManager {
@@ -395,6 +420,7 @@ export class PiAcpSession {
                     }
                   })()
 
+            const locations = toToolCallLocations(rawInput, this.cwd)
             const existingStatus = this.currentToolCalls.get(toolCallId)
             // IMPORTANT: never downgrade status (e.g. if we already marked in_progress via tool_execution_start).
             const status = existingStatus ?? 'pending'
@@ -407,6 +433,7 @@ export class PiAcpSession {
                 title: toolName,
                 kind: toToolKind(toolName),
                 status,
+                locations,
                 rawInput
               })
             } else {
@@ -416,6 +443,7 @@ export class PiAcpSession {
                 sessionUpdate: 'tool_call_update',
                 toolCallId,
                 status,
+                locations,
                 rawInput
               })
             }
@@ -432,6 +460,7 @@ export class PiAcpSession {
         const toolCallId = String((ev as any).toolCallId ?? crypto.randomUUID())
         const toolName = String((ev as any).toolName ?? 'tool')
         const args = (ev as any).args
+        let line: number | undefined
 
         // Capture pre-edit file contents so we can emit a structured ACP diff on completion.
         if (toolName === 'edit') {
@@ -441,11 +470,16 @@ export class PiAcpSession {
               const abs = isAbsolute(p) ? p : resolvePath(this.cwd, p)
               const oldText = readFileSync(abs, 'utf8')
               this.editSnapshots.set(toolCallId, { path: p, oldText })
+
+              const needle = typeof args?.oldText === 'string' ? args.oldText : ''
+              line = findUniqueLineNumber(oldText, needle)
             } catch {
               // Ignore snapshot failures; we'll fall back to plain text output.
             }
           }
         }
+
+        const locations = toToolCallLocations(args, this.cwd, line)
 
         // If we already surfaced the tool call while the model streamed it, just transition.
         if (!this.currentToolCalls.has(toolCallId)) {
@@ -456,6 +490,7 @@ export class PiAcpSession {
             title: toolName,
             kind: toToolKind(toolName),
             status: 'in_progress',
+            locations,
             rawInput: args
           })
         } else {
@@ -464,6 +499,7 @@ export class PiAcpSession {
             sessionUpdate: 'tool_call_update',
             toolCallId,
             status: 'in_progress',
+            locations,
             rawInput: args
           })
         }
