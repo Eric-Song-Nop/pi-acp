@@ -51,7 +51,7 @@ test('PiAcpAgent: quietStartup=true disables startup info generation/emission', 
         setStartupInfoCalled = true
       },
       sendStartupInfoIfPending() {
-        throw new Error('should not be scheduled when startup info is disabled')
+        // may be called when an update notice is available
       }
     }
 
@@ -60,12 +60,19 @@ test('PiAcpAgent: quietStartup=true disables startup info generation/emission', 
 
     const res = await agent.newSession({ cwd: process.cwd(), mcpServers: [] } as any)
 
-    assert.equal(res?._meta?.piAcp?.startupInfo, null)
-    assert.equal(setStartupInfoCalled, false)
+    const startupInfo = res?._meta?.piAcp?.startupInfo ?? null
 
-    // Only available_commands_update should be scheduled.
-    // (Startup info will only be scheduled if an update notice exists, which we don't assume in tests.)
-    assert.equal(timeouts.length, 1)
+    // When quietStartup=true the full prelude is suppressed. However, an update notice
+    // (if one exists) is still surfaced because it's high-signal and actionable.
+    // The test must tolerate both cases since the live npm check may or may not find an update.
+    if (startupInfo) {
+      assert.match(startupInfo, /New version available/)
+      assert.equal(setStartupInfoCalled, true)
+      assert.equal(timeouts.length, 2)
+    } else {
+      assert.equal(setStartupInfoCalled, false)
+      assert.equal(timeouts.length, 1)
+    }
   } finally {
     ;(globalThis as any).setTimeout = realSetTimeout
     if (prevAgentDir == null) delete process.env.PI_CODING_AGENT_DIR

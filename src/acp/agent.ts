@@ -1154,8 +1154,7 @@ function buildUpdateNotice(): string | null {
   // Important: keep it fast to not slow down session/new.
   try {
     const piVersion = spawnSync('pi', ['--version'], { encoding: 'utf-8' })
-    const installed = String(piVersion.stdout ?? '')
-      .trim()
+    const installed = (String(piVersion.stdout ?? '').trim() || String(piVersion.stderr ?? '').trim())
       .replace(/^v/i, '')
 
     if (!installed || !isSemver(installed)) return null
@@ -1189,8 +1188,7 @@ function buildStartupInfo(opts: {
   // pi version header
   try {
     const piVersion = spawnSync('pi', ['--version'], { encoding: 'utf-8' })
-    const installed = String(piVersion.stdout ?? '')
-      .trim()
+    const installed = (String(piVersion.stdout ?? '').trim() || String(piVersion.stderr ?? '').trim())
       .replace(/^v/i, '')
     if (installed) {
       md.push(`pi v${installed}`)
