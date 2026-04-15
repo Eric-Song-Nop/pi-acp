@@ -138,7 +138,7 @@ export class PiAcpAgent implements ACPAgent {
         promptCapabilities: {
           image: true,
           audio: false,
-          embeddedContext: false
+          embeddedContext: true
         },
         sessionCapabilities: {
           // **UNSTABLE** ACP capability used by Zed's codex-acp adapter.
