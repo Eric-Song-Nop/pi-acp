@@ -12,15 +12,12 @@ agent.stdout.on('data', d => {
     if (!line.trim()) continue
     try {
       const msg = JSON.parse(line)
-      if (msg.method === 'session/update') {
-        const up = msg.params?.update
-        if (up?.sessionUpdate === 'agent_message_chunk' && up?.content?.type === 'text') {
-          const t = String(up.content.text)
-          if (t.includes('[Context]') && t.includes('[Skills]') && t.includes('[Extensions]')) {
-            console.log('OK: got startup info in agent_message_chunk')
-            agent.kill('SIGTERM')
-            process.exit(0)
-          }
+      if (msg.id === 2) {
+        const startupInfo = msg.result?._meta?.piAcp?.startupInfo
+        if (typeof startupInfo === 'string' && startupInfo.trim()) {
+          console.log('OK: got startup info in session/new _meta')
+          agent.kill('SIGTERM')
+          process.exit(0)
         }
       }
     } catch {
@@ -41,34 +38,8 @@ send({
   params: { cwd: process.cwd(), mcpServers: [] }
 })
 
-// Trigger first prompt so startup info flushes in the first turn
 setTimeout(() => {
-  send({
-    jsonrpc: '2.0',
-    id: 3,
-    method: 'session/prompt',
-    params: { sessionId: 'dummy', prompt: [{ type: 'text', text: 'hi' }] }
-  })
-}, 200)
-
-// Replace dummy session id once we see session/new response
-agent.stdout.on('data', d => {
-  const s = d.toString('utf8')
-  const m = s.match(/"id":2,[^\n]*"result":\{[^}]*"sessionId":"([^"]+)"/)
-  if (m) {
-    const sid = m[1]
-    // resend prompt with real session id
-    send({
-      jsonrpc: '2.0',
-      id: 4,
-      method: 'session/prompt',
-      params: { sessionId: sid, prompt: [{ type: 'text', text: 'hi' }] }
-    })
-  }
-})
-
-setTimeout(() => {
-  console.error('FAIL: did not observe startup info')
+  console.error('FAIL: did not observe startup info in session/new _meta')
   agent.kill('SIGTERM')
   process.exit(1)
 }, 5000)

@@ -52,6 +52,11 @@ type PiRpcCommand =
   // Commands
   | { type: 'get_commands'; id?: string }
 
+export type PiRpcExtensionUiResponse =
+  | { type: 'extension_ui_response'; id: string; value: string }
+  | { type: 'extension_ui_response'; id: string; confirmed: boolean }
+  | { type: 'extension_ui_response'; id: string; cancelled: true }
+
 type PiRpcResponse = {
   type: 'response'
   id?: string
@@ -312,6 +317,10 @@ export class PiRpcProcess {
     const res = await this.request({ type: 'get_commands' })
     if (!res.success) throw new Error(`pi get_commands failed: ${res.error ?? JSON.stringify(res.data)}`)
     return res.data
+  }
+
+  sendExtensionUiResponse(response: PiRpcExtensionUiResponse): void {
+    this.child.stdin.write(JSON.stringify(response) + '\n')
   }
 
   private request(cmd: PiRpcCommand): Promise<PiRpcResponse> {

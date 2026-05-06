@@ -34,3 +34,31 @@ test('PiAcpSession: expands /command before sending to pi', async () => {
   assert.equal(proc.prompts.length, 1)
   assert.equal(proc.prompts[0]!.message, 'Expanded world')
 })
+
+test('PiAcpSession: does not expand a file command that is shadowed by an extension command', async () => {
+  const conn = new FakeAgentSideConnection()
+  const proc = new FakePiRpcProcess()
+
+  const session = new PiAcpSession({
+    sessionId: 's1',
+    cwd: process.cwd(),
+    mcpServers: [],
+    proc: proc as any,
+    conn: asAgentConn(conn),
+    fileCommands: [
+      {
+        name: 'hello',
+        description: '(user)',
+        content: 'Expanded $1',
+        source: '(user)'
+      }
+    ]
+  })
+  session.setPiCommands([{ name: 'hello', source: 'extension' }])
+
+  const reason = await session.prompt('/hello world')
+
+  assert.equal(reason, 'end_turn')
+  assert.equal(proc.prompts.length, 1)
+  assert.equal(proc.prompts[0]!.message, '/hello world')
+})

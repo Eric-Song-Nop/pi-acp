@@ -11,16 +11,22 @@ import { RequestError } from '@agentclientprotocol/sdk'
 import { maybeAuthRequiredError } from './auth-required.js'
 import { readFileSync } from 'node:fs'
 import { isAbsolute, resolve as resolvePath } from 'node:path'
-import { PiRpcProcess, PiRpcSpawnError, type PiRpcEvent } from '../pi-rpc/process.js'
+import { PiRpcProcess, PiRpcSpawnError, type PiRpcEvent, type PiRpcExtensionUiResponse } from '../pi-rpc/process.js'
 import { SessionStore } from './session-store.js'
 import { toolResultToText } from './translate/pi-tools.js'
 import { expandSlashCommand, type FileSlashCommand } from './slash-commands.js'
+import {
+  extensionCommandNamesFromPiCommands,
+  piCommandsRawFromGetCommands,
+  type PiRpcCommandInfo
+} from './pi-commands.js'
 
 type SessionCreateParams = {
   cwd: string
   mcpServers: McpServer[]
   conn: AgentSideConnection
   fileCommands?: import('./slash-commands.js').FileSlashCommand[]
+  supportsAskUserQuestion?: boolean
   piCommand?: string
 }
 
@@ -29,14 +35,44 @@ export type StopReason = 'end_turn' | 'cancelled' | 'error'
 type PendingTurn = {
   resolve: (reason: StopReason) => void
   reject: (err: unknown) => void
+  knownExtensionCommand: boolean
 }
 
 type QueuedTurn = {
   message: string
   images: unknown[]
+  knownExtensionCommand: boolean
   resolve: (reason: StopReason) => void
   reject: (err: unknown) => void
 }
+
+type ExtensionUiDialogMethod = 'select' | 'confirm' | 'input' | 'editor'
+
+const extensionUiDialogMethods = new Set<string>(['select', 'confirm', 'input', 'editor'])
+
+type RequestPermissionOutcome =
+  | { outcome: 'cancelled' }
+  | { outcome: 'selected'; optionId: string; _meta?: Record<string, unknown> | null }
+  | { outcome?: unknown; optionId?: unknown; _meta?: unknown }
+
+type RequestPermissionOptionKind = 'allow_once' | 'reject_once'
+
+type RequestPermissionFn = (params: {
+  sessionId: string
+  toolCall: {
+    toolCallId: string
+    title: string
+    status: 'pending'
+    kind: 'other'
+    rawInput?: Record<string, unknown>
+  }
+  options: Array<{
+    optionId: string
+    name: string
+    kind: RequestPermissionOptionKind
+  }>
+  _meta?: Record<string, unknown>
+}) => Promise<{ outcome?: RequestPermissionOutcome; _meta?: Record<string, unknown> | null }>
 
 function findUniqueLineNumber(text: string, needle: string): number | undefined {
   if (!needle) return undefined
@@ -63,6 +99,99 @@ function toToolCallLocations(args: unknown, cwd: string, line?: number): ToolCal
 
   const resolvedPath = isAbsolute(path) ? path : resolvePath(cwd, path)
   return [{ path: resolvedPath, ...(typeof line === 'number' ? { line } : {}) }]
+}
+
+function extractLeadingSlashCommandName(text: string): string | null {
+  if (!text.startsWith('/')) return null
+
+  const spaceIndex = text.search(/\s/)
+  const name = spaceIndex === -1 ? text.slice(1) : text.slice(1, spaceIndex)
+  return name.trim() || null
+}
+
+function customMessageToDisplayText(message: unknown): string | null {
+  const msg = message as {
+    role?: unknown
+    display?: unknown
+    customType?: unknown
+    content?: unknown
+  }
+  if (msg?.role !== 'custom' || msg.display !== true) return null
+
+  const customType = typeof msg.customType === 'string' && msg.customType ? msg.customType : 'custom'
+  const content = msg.content
+
+  if (typeof content === 'string') return `[${customType}] ${content}`
+
+  if (Array.isArray(content)) {
+    const text = content
+      .map(block => {
+        const b = block as { type?: unknown; text?: unknown }
+        return b.type === 'text' && typeof b.text === 'string' ? b.text : ''
+      })
+      .filter(Boolean)
+      .join('\n')
+
+    if (text) return `[${customType}] ${text}`
+  }
+
+  return null
+}
+
+function selectedPermissionOptionId(outcome: RequestPermissionOutcome): string | null {
+  return outcome.outcome === 'selected' && typeof outcome.optionId === 'string' ? outcome.optionId : null
+}
+
+function recordFromUnknown(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === 'object' && !Array.isArray(value) ? (value as Record<string, unknown>) : null
+}
+
+function nestedRecord(value: Record<string, unknown> | null, key: string): Record<string, unknown> | null {
+  return recordFromUnknown(value?.[key])
+}
+
+function askUserQuestionMetaFrom(value: unknown): Record<string, unknown> | null {
+  return nestedRecord(nestedRecord(recordFromUnknown(value), 'claudeCode'), 'askUserQuestion')
+}
+
+function askUserQuestionPayloadFromResponse(response: unknown): Record<string, unknown> | null {
+  const responseRecord = recordFromUnknown(response)
+  const outcomeRecord = recordFromUnknown(responseRecord?.outcome)
+
+  return askUserQuestionMetaFrom(outcomeRecord?._meta) ?? askUserQuestionMetaFrom(responseRecord?._meta)
+}
+
+function normalizeAnswerValue(value: unknown): string | null {
+  if (typeof value === 'string') {
+    const answer = value.trim()
+    return answer ? answer : null
+  }
+
+  if (Array.isArray(value) && value.every(entry => typeof entry === 'string')) {
+    const answer = value
+      .map(entry => entry.trim())
+      .filter(Boolean)
+      .join(', ')
+    return answer ? answer : null
+  }
+
+  return null
+}
+
+function askUserQuestionAnswer(response: unknown, question: string, header: string): string | null {
+  const payload = askUserQuestionPayloadFromResponse(response)
+  if (!payload) return null
+
+  const answers = recordFromUnknown(payload.answers)
+  if (answers) {
+    return (
+      normalizeAnswerValue(answers[question]) ??
+      normalizeAnswerValue(answers[header]) ??
+      normalizeAnswerValue(answers['0'])
+    )
+  }
+
+  return normalizeAnswerValue(payload.answer)
 }
 
 export class SessionManager {
@@ -138,7 +267,9 @@ export class SessionManager {
       mcpServers: params.mcpServers,
       proc,
       conn: params.conn,
-      fileCommands: params.fileCommands ?? []
+      store: this.store,
+      fileCommands: params.fileCommands ?? [],
+      supportsAskUserQuestion: params.supportsAskUserQuestion === true
     })
 
     this.sessions.set(sessionId, session)
@@ -165,7 +296,9 @@ export class SessionManager {
       mcpServers: params.mcpServers,
       proc: params.proc,
       conn: params.conn,
-      fileCommands: params.fileCommands ?? []
+      store: this.store,
+      fileCommands: params.fileCommands ?? [],
+      supportsAskUserQuestion: params.supportsAskUserQuestion === true
     })
 
     this.sessions.set(sessionId, session)
@@ -184,7 +317,14 @@ export class PiAcpSession {
 
   readonly proc: PiRpcProcess
   private readonly conn: AgentSideConnection
+  private readonly store?: SessionStore
   private readonly fileCommands: FileSlashCommand[]
+  private readonly supportsAskUserQuestion: boolean
+  private extensionCommandNames = new Set<string>()
+  private piCommandsLoaded = false
+  private readonly extensionStatuses = new Map<string, string>()
+  private readonly extensionWidgets = new Map<string, { lines: string[]; placement?: string }>()
+  private readonly pendingExtensionUiRequests = new Set<string>()
 
   // Used to map abort semantics to ACP stopReason.
   // Applies to the currently running turn.
@@ -217,14 +357,18 @@ export class PiAcpSession {
     mcpServers: McpServer[]
     proc: PiRpcProcess
     conn: AgentSideConnection
+    store?: SessionStore
     fileCommands?: FileSlashCommand[]
+    supportsAskUserQuestion?: boolean
   }) {
     this.sessionId = opts.sessionId
     this.cwd = opts.cwd
     this.mcpServers = opts.mcpServers
     this.proc = opts.proc
     this.conn = opts.conn
+    this.store = opts.store
     this.fileCommands = opts.fileCommands ?? []
+    this.supportsAskUserQuestion = opts.supportsAskUserQuestion === true
 
     this.proc.onEvent(ev => this.handlePiEvent(ev))
   }
@@ -260,16 +404,27 @@ export class PiAcpSession {
     })
   }
 
+  setPiCommands(commands: PiRpcCommandInfo[]): void {
+    this.piCommandsLoaded = true
+    this.extensionCommandNames = extensionCommandNamesFromPiCommands(commands)
+  }
+
   async prompt(message: string, images: unknown[] = []): Promise<StopReason> {
     // Keep a prompt-path fallback because some clients may ignore the best-effort
     // pre-prompt notification sent right after session/new.
     this.sendStartupInfoOnFirstPromptIfPending()
 
-    // pi RPC mode disables slash command expansion, so we do it here.
-    const expandedMessage = expandSlashCommand(message, this.fileCommands)
+    const commandName = extractLeadingSlashCommandName(message)
+    if (commandName && !this.piCommandsLoaded) await this.refreshPiCommands()
+
+    const knownExtensionCommand = commandName ? this.extensionCommandNames.has(commandName) : false
+
+    // pi RPC mode disables file prompt-template expansion, so we do it here.
+    // Extension commands must stay intact so pi's extension runner can execute them.
+    const expandedMessage = knownExtensionCommand ? message : expandSlashCommand(message, this.fileCommands)
 
     const turnPromise = new Promise<StopReason>((resolve, reject) => {
-      const queued: QueuedTurn = { message: expandedMessage, images, resolve, reject }
+      const queued: QueuedTurn = { message: expandedMessage, images, knownExtensionCommand, resolve, reject }
 
       // If a turn is already running, enqueue.
       if (this.pendingTurn) {
@@ -302,9 +457,412 @@ export class PiAcpSession {
     return turnPromise
   }
 
+  private async refreshPiCommands(): Promise<void> {
+    try {
+      const commands = await this.proc.getCommands()
+      this.setPiCommands(piCommandsRawFromGetCommands(commands))
+    } catch {
+      this.piCommandsLoaded = true
+    }
+  }
+
+  private async refreshAfterExtensionCommand(): Promise<void> {
+    await Promise.allSettled([this.refreshPiCommands(), this.refreshPiSessionState()])
+  }
+
+  private async refreshPiSessionState(): Promise<void> {
+    try {
+      const state = (await this.proc.getState()) as { sessionId?: unknown; sessionFile?: unknown }
+      const piSessionId = typeof state?.sessionId === 'string' ? state.sessionId : null
+      const piSessionFile = typeof state?.sessionFile === 'string' ? state.sessionFile : null
+
+      if (piSessionId && piSessionFile) {
+        this.store?.upsert({ sessionId: piSessionId, cwd: this.cwd, sessionFile: piSessionFile })
+      }
+
+      if (piSessionId || piSessionFile) {
+        this.emit({
+          sessionUpdate: 'session_info_update',
+          _meta: { piAcp: { piSessionId, piSessionFile } }
+        })
+      }
+    } catch {
+      // Session refresh is best-effort after extension-side session changes.
+    }
+  }
+
+  private cancelPendingExtensionUiRequests(): void {
+    const ids = [...this.pendingExtensionUiRequests]
+    this.pendingExtensionUiRequests.clear()
+
+    for (const id of ids) {
+      this.sendExtensionUiResponse({ type: 'extension_ui_response', id, cancelled: true })
+    }
+  }
+
+  private sendExtensionUiResponse(response: PiRpcExtensionUiResponse): void {
+    try {
+      this.proc.sendExtensionUiResponse(response)
+    } catch {
+      // If the subprocess is already gone, the prompt/cancel path will surface that separately.
+    }
+  }
+
+  private handleExtensionUiRequest(ev: PiRpcEvent): void {
+    const id = typeof (ev as { id?: unknown }).id === 'string' ? (ev as { id: string }).id : ''
+    const method = typeof (ev as { method?: unknown }).method === 'string' ? (ev as { method: string }).method : ''
+    if (!id || !method) return
+
+    if (extensionUiDialogMethods.has(method)) {
+      void this.handleExtensionUiDialog(ev, id, method as ExtensionUiDialogMethod)
+      return
+    }
+
+    this.forwardExtensionUiNotification(ev)
+    this.handleExtensionUiFireAndForget(ev, method)
+  }
+
+  private async handleExtensionUiDialog(ev: PiRpcEvent, id: string, method: ExtensionUiDialogMethod): Promise<void> {
+    this.pendingExtensionUiRequests.add(id)
+
+    try {
+      const response = await this.requestExtensionUiFromAcpClient(ev, id, method)
+      if (!this.pendingExtensionUiRequests.delete(id)) return
+      this.sendExtensionUiResponse(response)
+    } catch {
+      if (!this.pendingExtensionUiRequests.delete(id)) return
+      this.sendExtensionUiResponse(this.fallbackExtensionUiResponse(id, method))
+      this.emit({
+        sessionUpdate: 'agent_message_chunk',
+        content: {
+          type: 'text',
+          text: this.extensionUiFallbackNotice(method)
+        } satisfies ContentBlock
+      })
+    }
+  }
+
+  private extensionUiFallbackNotice(method: ExtensionUiDialogMethod): string {
+    if (method === 'editor' || method === 'input') {
+      return `Extension requested ${method} text input, but ACP has no standard free-form text input request; the request was cancelled. Send the text as a follow-up message instead.`
+    }
+
+    return `Extension requested ${method} input, but the ACP client did not handle it; the request was cancelled.`
+  }
+
+  private async requestExtensionUiFromAcpClient(
+    ev: PiRpcEvent,
+    id: string,
+    method: ExtensionUiDialogMethod
+  ): Promise<PiRpcExtensionUiResponse> {
+    if (method === 'select') {
+      const response = this.supportsAskUserQuestion
+        ? await this.requestExtensionSelectViaAskUserQuestion(ev, id)
+        : await this.requestExtensionSelectViaStandardAcp(ev, id)
+      if (response) return response
+      throw new Error('ACP client select UI is unavailable')
+    }
+
+    const standardResponse = await this.requestExtensionConfirmViaStandardAcp(ev, id, method)
+    if (standardResponse) return standardResponse
+
+    const extMethod = (
+      this.conn as unknown as {
+        extMethod?: (method: string, params: Record<string, unknown>) => Promise<Record<string, unknown>>
+      }
+    ).extMethod
+
+    if (typeof extMethod !== 'function') throw new Error('ACP client extension UI is unavailable')
+
+    const response = await extMethod.call(this.conn, 'pi/extension_ui', {
+      sessionId: this.sessionId,
+      request: ev
+    })
+
+    const cancelled = response.cancelled === true
+    if (cancelled) return { type: 'extension_ui_response', id, cancelled: true }
+
+    if (method === 'confirm') {
+      return { type: 'extension_ui_response', id, confirmed: response.confirmed === true }
+    }
+
+    if (typeof response.value === 'string') {
+      return { type: 'extension_ui_response', id, value: response.value }
+    }
+
+    return this.fallbackExtensionUiResponse(id, method)
+  }
+
+  private async requestExtensionSelectViaAskUserQuestion(
+    ev: PiRpcEvent,
+    id: string
+  ): Promise<PiRpcExtensionUiResponse> {
+    const requestPermission = (this.conn as unknown as { requestPermission?: RequestPermissionFn }).requestPermission
+    if (typeof requestPermission !== 'function') throw new Error('ACP client question UI is unavailable')
+
+    const title = typeof (ev as { title?: unknown }).title === 'string' ? (ev as { title: string }).title : 'Select'
+    const optionsRaw = (ev as { options?: unknown }).options
+    const options = Array.isArray(optionsRaw)
+      ? optionsRaw.filter((option): option is string => typeof option === 'string')
+      : []
+    if (options.length === 0) return { type: 'extension_ui_response', id, cancelled: true }
+
+    const questions = [
+      {
+        question: title,
+        header: title,
+        options: options.map(option => ({ label: option, description: option })),
+        multiSelect: false
+      }
+    ]
+
+    const response = await requestPermission.call(this.conn, {
+      sessionId: this.sessionId,
+      toolCall: {
+        toolCallId: `extension-ui:${id}`,
+        title,
+        status: 'pending',
+        kind: 'other',
+        rawInput: { method: 'select', title, options }
+      },
+      options: [
+        { optionId: 'answer', name: 'Submit answer', kind: 'allow_once' },
+        { optionId: 'cancel', name: 'Cancel', kind: 'reject_once' }
+      ],
+      _meta: {
+        claudeCode: {
+          requestType: 'askUserQuestion',
+          askUserQuestion: {
+            version: 1,
+            allowCustomAnswer: true,
+            questions
+          }
+        },
+        piAcp: { extensionUiRequest: ev }
+      }
+    })
+
+    const outcome = response.outcome
+    if (outcome?.outcome === 'cancelled') return { type: 'extension_ui_response', id, cancelled: true }
+    if (outcome?.outcome !== 'selected' || outcome.optionId !== 'answer') {
+      return { type: 'extension_ui_response', id, cancelled: true }
+    }
+
+    const value = askUserQuestionAnswer(response, title, title)
+    return value ? { type: 'extension_ui_response', id, value } : { type: 'extension_ui_response', id, cancelled: true }
+  }
+
+  private async requestExtensionSelectViaStandardAcp(
+    ev: PiRpcEvent,
+    id: string
+  ): Promise<PiRpcExtensionUiResponse | null> {
+    const requestPermission = (this.conn as unknown as { requestPermission?: RequestPermissionFn }).requestPermission
+    if (typeof requestPermission !== 'function') return null
+
+    try {
+      const title = typeof (ev as { title?: unknown }).title === 'string' ? (ev as { title: string }).title : 'Select'
+      const optionsRaw = (ev as { options?: unknown }).options
+      const options = Array.isArray(optionsRaw)
+        ? optionsRaw.filter((option): option is string => typeof option === 'string')
+        : []
+      if (options.length === 0) return { type: 'extension_ui_response', id, cancelled: true }
+
+      const response = await requestPermission.call(this.conn, {
+        sessionId: this.sessionId,
+        toolCall: {
+          toolCallId: `extension-ui:${id}`,
+          title,
+          status: 'pending',
+          kind: 'other',
+          rawInput: { method: 'select', title, options }
+        },
+        options: options.map((name, index): { optionId: string; name: string; kind: RequestPermissionOptionKind } => ({
+          optionId: String(index),
+          name,
+          kind: index === 0 ? 'allow_once' : 'reject_once'
+        })),
+        _meta: { piAcp: { extensionUiRequest: ev } }
+      })
+
+      const outcome = response.outcome
+      if (outcome?.outcome === 'cancelled') return { type: 'extension_ui_response', id, cancelled: true }
+
+      const selectedOptionId = outcome ? selectedPermissionOptionId(outcome) : null
+      const selectedIndex = selectedOptionId ? Number.parseInt(selectedOptionId, 10) : Number.NaN
+      const value = Number.isInteger(selectedIndex) ? options[selectedIndex] : undefined
+      return value
+        ? { type: 'extension_ui_response', id, value }
+        : { type: 'extension_ui_response', id, cancelled: true }
+    } catch {
+      return null
+    }
+  }
+
+  private async requestExtensionConfirmViaStandardAcp(
+    ev: PiRpcEvent,
+    id: string,
+    method: ExtensionUiDialogMethod
+  ): Promise<PiRpcExtensionUiResponse | null> {
+    if (method !== 'confirm') return null
+
+    const requestPermission = (this.conn as unknown as { requestPermission?: RequestPermissionFn }).requestPermission
+    if (typeof requestPermission !== 'function') return null
+
+    try {
+      const title = typeof (ev as { title?: unknown }).title === 'string' ? (ev as { title: string }).title : 'Confirm'
+      const message =
+        typeof (ev as { message?: unknown }).message === 'string' ? (ev as { message: string }).message : ''
+      const response = await requestPermission.call(this.conn, {
+        sessionId: this.sessionId,
+        toolCall: {
+          toolCallId: `extension-ui:${id}`,
+          title,
+          status: 'pending',
+          kind: 'other',
+          rawInput: { method, title, message }
+        },
+        options: [
+          { optionId: 'yes', name: 'Yes', kind: 'allow_once' },
+          { optionId: 'no', name: 'No', kind: 'reject_once' }
+        ],
+        _meta: { piAcp: { extensionUiRequest: ev } }
+      })
+
+      const outcome = response.outcome
+      if (outcome?.outcome === 'cancelled') return { type: 'extension_ui_response', id, cancelled: true }
+      return { type: 'extension_ui_response', id, confirmed: outcome ? selectedPermissionOptionId(outcome) === 'yes' : false }
+    } catch {
+      return null
+    }
+  }
+
+  private fallbackExtensionUiResponse(id: string, method: ExtensionUiDialogMethod): PiRpcExtensionUiResponse {
+    if (method === 'confirm') return { type: 'extension_ui_response', id, confirmed: false }
+    return { type: 'extension_ui_response', id, cancelled: true }
+  }
+
+  private forwardExtensionUiNotification(ev: PiRpcEvent): void {
+    const extNotification = (
+      this.conn as unknown as {
+        extNotification?: (method: string, params: Record<string, unknown>) => Promise<void>
+      }
+    ).extNotification
+
+    if (typeof extNotification !== 'function') return
+
+    void extNotification
+      .call(this.conn, 'pi/extension_ui', {
+        sessionId: this.sessionId,
+        request: ev
+      })
+      .catch(() => {
+        // Custom ACP notifications are best-effort.
+      })
+  }
+
+  private handleExtensionUiFireAndForget(ev: PiRpcEvent, method: string): void {
+    switch (method) {
+      case 'notify': {
+        const message =
+          typeof (ev as { message?: unknown }).message === 'string' ? (ev as { message: string }).message : ''
+        if (!message) break
+
+        const notifyType =
+          typeof (ev as { notifyType?: unknown }).notifyType === 'string'
+            ? (ev as { notifyType: string }).notifyType
+            : 'info'
+        const label =
+          notifyType === 'error' ? 'Extension error' : notifyType === 'warning' ? 'Extension warning' : 'Extension'
+
+        this.emit({
+          sessionUpdate: 'agent_message_chunk',
+          content: { type: 'text', text: `${label}: ${message}` } satisfies ContentBlock
+        })
+        break
+      }
+
+      case 'setStatus': {
+        const key =
+          typeof (ev as { statusKey?: unknown }).statusKey === 'string' ? (ev as { statusKey: string }).statusKey : ''
+        const text =
+          typeof (ev as { statusText?: unknown }).statusText === 'string'
+            ? (ev as { statusText: string }).statusText
+            : undefined
+        if (!key) break
+
+        if (text === undefined) this.extensionStatuses.delete(key)
+        else this.extensionStatuses.set(key, text)
+
+        this.emitExtensionUiState()
+        break
+      }
+
+      case 'setWidget': {
+        const key =
+          typeof (ev as { widgetKey?: unknown }).widgetKey === 'string' ? (ev as { widgetKey: string }).widgetKey : ''
+        const linesRaw = (ev as { widgetLines?: unknown }).widgetLines
+        const lines = Array.isArray(linesRaw)
+          ? linesRaw.filter((line): line is string => typeof line === 'string')
+          : undefined
+        const placement =
+          typeof (ev as { widgetPlacement?: unknown }).widgetPlacement === 'string'
+            ? (ev as { widgetPlacement: string }).widgetPlacement
+            : undefined
+        if (!key) break
+
+        if (!lines) this.extensionWidgets.delete(key)
+        else this.extensionWidgets.set(key, { lines, placement })
+
+        this.emitExtensionUiState()
+        break
+      }
+
+      case 'setTitle': {
+        const title = typeof (ev as { title?: unknown }).title === 'string' ? (ev as { title: string }).title : ''
+        if (!title) break
+        this.emit({
+          sessionUpdate: 'session_info_update',
+          _meta: { piAcp: { extensionTitle: title } }
+        })
+        break
+      }
+
+      case 'set_editor_text': {
+        const text = typeof (ev as { text?: unknown }).text === 'string' ? (ev as { text: string }).text : ''
+        this.emit({
+          sessionUpdate: 'session_info_update',
+          _meta: { piAcp: { requestedEditorText: text } }
+        })
+        if (text) {
+          this.emit({
+            sessionUpdate: 'agent_message_chunk',
+            content: { type: 'text', text: `Extension requested editor text:\n${text}` } satisfies ContentBlock
+          })
+        }
+        break
+      }
+
+      default:
+        break
+    }
+  }
+
+  private emitExtensionUiState(): void {
+    this.emit({
+      sessionUpdate: 'session_info_update',
+      _meta: {
+        piAcp: {
+          extensionStatuses: Object.fromEntries(this.extensionStatuses),
+          extensionWidgets: Object.fromEntries(this.extensionWidgets)
+        }
+      }
+    })
+  }
+
   async cancel(): Promise<void> {
     // Cancel current and clear any queued prompts.
     this.cancelRequested = true
+    this.cancelPendingExtensionUiRequests()
 
     if (this.turnQueue.length) {
       const queued = this.turnQueue.splice(0, this.turnQueue.length)
@@ -351,7 +909,7 @@ export class PiAcpSession {
     this.cancelRequested = false
     this.inAgentLoop = false
 
-    this.pendingTurn = { resolve: t.resolve, reject: t.reject }
+    this.pendingTurn = { resolve: t.resolve, reject: t.reject, knownExtensionCommand: t.knownExtensionCommand }
 
     // Publish queue depth (0 because we're starting the turn now).
     this.emit({
@@ -359,40 +917,115 @@ export class PiAcpSession {
       _meta: { piAcp: { queueDepth: this.turnQueue.length, running: true } }
     })
 
-    // Kick off pi, but completion is determined by pi events, not the RPC response.
+    // Kick off pi. Normal prompts complete on `agent_end`; extension commands that do
+    // not trigger an agent loop complete when the RPC prompt command returns.
     // Important: pi may emit multiple `turn_end` events (e.g. when the model requests tools).
-    // The full prompt is finished when we see `agent_end`.
-    this.proc.prompt(t.message, t.images).catch(err => {
-      // If the subprocess errors before we get an `agent_end`, treat as error unless cancelled.
-      // Also ensure we flush any already-enqueued updates first.
-      void this.flushEmits().finally(() => {
-        // If this looks like an auth/config issue, surface AUTH_REQUIRED so clients can offer terminal login.
-        const authErr = maybeAuthRequiredError(err)
-        if (authErr) {
-          this.pendingTurn?.reject(authErr)
-        } else {
-          const reason: StopReason = this.cancelRequested ? 'cancelled' : 'error'
-          this.pendingTurn?.resolve(reason)
-        }
+    this.proc
+      .prompt(t.message, t.images)
+      .then(() => {
+        if (!t.knownExtensionCommand || this.inAgentLoop || !this.pendingTurn) return
 
-        this.pendingTurn = null
-        this.inAgentLoop = false
+        const reason: StopReason = this.cancelRequested ? 'cancelled' : 'end_turn'
+        this.completeTurnAndMaybeStartNext(reason)
+      })
+      .catch(err => {
+        // If the subprocess errors before we get an `agent_end`, treat as error unless cancelled.
+        // Also ensure we flush any already-enqueued updates first.
+        void this.flushEmits().finally(() => {
+          // If this looks like an auth/config issue, surface AUTH_REQUIRED so clients can offer terminal login.
+          const authErr = maybeAuthRequiredError(err)
+          if (authErr) {
+            this.pendingTurn?.reject(authErr)
+          } else {
+            const reason: StopReason = this.cancelRequested ? 'cancelled' : 'error'
+            this.pendingTurn?.resolve(reason)
+          }
 
-        // If the prompt failed, do not automatically proceed—pi may be unhealthy.
-        // But we still clear the queueDepth metadata.
+          this.pendingTurn = null
+          this.inAgentLoop = false
+
+          // If the prompt failed, do not automatically proceed—pi may be unhealthy.
+          // But we still clear the queueDepth metadata.
+          this.emit({
+            sessionUpdate: 'session_info_update',
+            _meta: { piAcp: { queueDepth: this.turnQueue.length, running: false } }
+          })
+        })
+        void err
+      })
+  }
+
+  private completeTurnAndMaybeStartNext(reason: StopReason): void {
+    void (async () => {
+      await this.flushEmits()
+
+      const pending = this.pendingTurn
+      if (!pending) return
+
+      if (pending.knownExtensionCommand) {
+        await this.refreshAfterExtensionCommand()
+        await this.flushEmits()
+      }
+
+      pending.resolve(reason)
+      this.pendingTurn = null
+      this.inAgentLoop = false
+
+      const next = this.turnQueue.shift()
+      if (next) {
+        this.emit({
+          sessionUpdate: 'agent_message_chunk',
+          content: { type: 'text', text: `Starting queued message. (${this.turnQueue.length} remaining)` }
+        })
+        this.startTurn(next)
+      } else {
         this.emit({
           sessionUpdate: 'session_info_update',
-          _meta: { piAcp: { queueDepth: this.turnQueue.length, running: false } }
+          _meta: { piAcp: { queueDepth: 0, running: false } }
         })
-      })
-      void err
-    })
+      }
+    })()
   }
 
   private handlePiEvent(ev: PiRpcEvent) {
     const type = String((ev as any).type ?? '')
 
     switch (type) {
+      case 'extension_ui_request': {
+        this.handleExtensionUiRequest(ev)
+        break
+      }
+
+      case 'extension_error': {
+        const extensionPath =
+          typeof (ev as { extensionPath?: unknown }).extensionPath === 'string'
+            ? (ev as { extensionPath: string }).extensionPath
+            : 'extension'
+        const event = typeof (ev as { event?: unknown }).event === 'string' ? (ev as { event: string }).event : 'event'
+        const error =
+          typeof (ev as { error?: unknown }).error === 'string' ? (ev as { error: string }).error : 'unknown error'
+
+        this.emit({
+          sessionUpdate: 'agent_message_chunk',
+          content: {
+            type: 'text',
+            text: `Extension error in ${extensionPath} (${event}): ${error}`
+          } satisfies ContentBlock
+        })
+        break
+      }
+
+      case 'message_end': {
+        const text = customMessageToDisplayText((ev as { message?: unknown }).message)
+        if (text) {
+          this.emit({
+            sessionUpdate: 'agent_message_chunk',
+            content: { type: 'text', text } satisfies ContentBlock
+          })
+        }
+        break
+      }
+
       case 'message_update': {
         const ame = (ev as any).assistantMessageEvent
 
@@ -648,27 +1281,7 @@ export class PiAcpSession {
       case 'agent_end': {
         // Ensure all updates derived from pi events are delivered before we resolve
         // the ACP `session/prompt` request.
-        void this.flushEmits().finally(() => {
-          const reason: StopReason = this.cancelRequested ? 'cancelled' : 'end_turn'
-          this.pendingTurn?.resolve(reason)
-          this.pendingTurn = null
-          this.inAgentLoop = false
-
-          // Start next queued prompt, if any.
-          const next = this.turnQueue.shift()
-          if (next) {
-            this.emit({
-              sessionUpdate: 'agent_message_chunk',
-              content: { type: 'text', text: `Starting queued message. (${this.turnQueue.length} remaining)` }
-            })
-            this.startTurn(next)
-          } else {
-            this.emit({
-              sessionUpdate: 'session_info_update',
-              _meta: { piAcp: { queueDepth: 0, running: false } }
-            })
-          }
-        })
+        this.completeTurnAndMaybeStartNext(this.cancelRequested ? 'cancelled' : 'end_turn')
         break
       }
 

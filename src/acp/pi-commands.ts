@@ -4,6 +4,7 @@ export type PiRpcCommandInfo = {
   name?: unknown
   description?: unknown
   source?: unknown
+  sourceInfo?: unknown
   location?: unknown
   path?: unknown
 }
@@ -27,10 +28,10 @@ export function toAvailableCommandsFromPiGetCommands(
   raw: PiRpcCommandInfo[]
 } {
   const enableSkillCommands = opts?.enableSkillCommands ?? true
-  const includeExtensionCommands = opts?.includeExtensionCommands ?? false
+  const includeExtensionCommands = opts?.includeExtensionCommands ?? true
 
   const root: any = data
-  const commandsRaw: PiRpcCommandInfo[] = Array.isArray(root?.commands) ? root.commands : Array.isArray(root?.data?.commands) ? root.data.commands : []
+  const commandsRaw = piCommandsRawFromGetCommands(root)
 
   const out: AvailableCommand[] = []
 
@@ -47,9 +48,34 @@ export function toAvailableCommandsFromPiGetCommands(
 
     out.push({
       name,
-      description: desc || describeFallback(c)
+      description: desc || describeFallback(c),
+      _meta: {
+        piAcp: {
+          source: source || null,
+          sourceInfo: c.sourceInfo ?? null,
+          location: typeof c.location === 'string' ? c.location : null,
+          path: typeof c.path === 'string' ? c.path : null
+        }
+      }
     })
   }
 
   return { commands: out, raw: commandsRaw }
+}
+
+export function piCommandsRawFromGetCommands(data: unknown): PiRpcCommandInfo[] {
+  const root: any = data
+  return Array.isArray(root?.commands) ? root.commands : Array.isArray(root?.data?.commands) ? root.data.commands : []
+}
+
+export function extensionCommandNamesFromPiCommands(commands: PiRpcCommandInfo[]): Set<string> {
+  const names = new Set<string>()
+
+  for (const c of commands) {
+    if (c.source !== 'extension') continue
+    const name = typeof c.name === 'string' ? c.name.trim() : ''
+    if (name) names.add(name)
+  }
+
+  return names
 }

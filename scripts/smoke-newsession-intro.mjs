@@ -17,19 +17,13 @@ p.stdout.on('data', d => {
 
     if (msg.id === 2) {
       sid = msg.result?.sessionId
-      console.log('session/new response _meta.piAcp.startupInfo present:', Boolean(msg.result?._meta?.piAcp?.startupInfo))
-    }
-
-    if (msg.method === 'session/update') {
-      const up = msg.params?.update
-      if (up?.sessionUpdate === 'agent_message_chunk' && up?.content?.type === 'text') {
-        const t = String(up.content.text)
-        if (t.includes('[Context]') && t.includes('[Skills]') && t.includes('[Extensions]')) {
-          gotIntro = true
-          console.log('OK: got intro via session/update (before any prompt)')
-          p.kill('SIGTERM')
-          process.exit(0)
-        }
+      const startupInfo = msg.result?._meta?.piAcp?.startupInfo
+      console.log('session/new response _meta.piAcp.startupInfo present:', Boolean(startupInfo))
+      if (typeof startupInfo === 'string' && startupInfo.trim()) {
+        gotIntro = true
+        console.log('OK: got startup info via session/new _meta')
+        p.kill('SIGTERM')
+        process.exit(0)
       }
     }
   }
@@ -44,7 +38,7 @@ send({ jsonrpc: '2.0', id: 2, method: 'session/new', params: { cwd: process.cwd(
 
 setTimeout(() => {
   if (!gotIntro) {
-    console.error('Did not receive intro before prompt. sessionId=', sid)
+    console.error('Did not receive startup info in session/new _meta. sessionId=', sid)
     p.kill('SIGTERM')
     process.exit(1)
   }

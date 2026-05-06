@@ -34,6 +34,262 @@ test('PiAcpSession: emits agent_message_chunk for text_delta', async () => {
   })
 })
 
+test('PiAcpSession: completes a known extension command without agent_end after prompt response', async () => {
+  const conn = new FakeAgentSideConnection()
+  const proc = new FakePiRpcProcess()
+
+  const session = new PiAcpSession({
+    sessionId: 's1',
+    cwd: process.cwd(),
+    mcpServers: [],
+    proc: proc as any,
+    conn: asAgentConn(conn),
+    fileCommands: []
+  })
+  session.setPiCommands([{ name: 'ext', source: 'extension' }])
+
+  const reason = await session.prompt('/ext arg')
+
+  assert.equal(reason, 'end_turn')
+  assert.equal(proc.prompts.length, 1)
+  assert.equal(proc.prompts[0]!.message, '/ext arg')
+})
+
+test('PiAcpSession: normal prompts still wait for agent_end after prompt response', async () => {
+  const conn = new FakeAgentSideConnection()
+  const proc = new FakePiRpcProcess()
+
+  const session = new PiAcpSession({
+    sessionId: 's1',
+    cwd: process.cwd(),
+    mcpServers: [],
+    proc: proc as any,
+    conn: asAgentConn(conn),
+    fileCommands: []
+  })
+
+  let settled = false
+  const prompt = session.prompt('hello').then(reason => {
+    settled = true
+    return reason
+  })
+
+  await new Promise(r => setTimeout(r, 0))
+  assert.equal(settled, false)
+
+  proc.emit({ type: 'agent_start' })
+  proc.emit({ type: 'agent_end' })
+
+  assert.equal(await prompt, 'end_turn')
+  assert.equal(settled, true)
+})
+
+test('PiAcpSession: bridges extension confirm requests through ACP extMethod', async () => {
+  const conn = new FakeAgentSideConnection()
+  conn.extMethodHandler = async (method, params) => {
+    assert.equal(method, 'pi/extension_ui')
+    assert.equal((params.request as any).method, 'confirm')
+    return { confirmed: true }
+  }
+  const proc = new FakePiRpcProcess()
+
+  new PiAcpSession({
+    sessionId: 's1',
+    cwd: process.cwd(),
+    mcpServers: [],
+    proc: proc as any,
+    conn: asAgentConn(conn),
+    fileCommands: []
+  })
+
+  proc.emit({ type: 'extension_ui_request', id: 'ui1', method: 'confirm', title: 'Run?', message: 'Confirm?' })
+  await new Promise(r => setTimeout(r, 0))
+
+  assert.deepEqual(proc.extensionUiResponses, [{ type: 'extension_ui_response', id: 'ui1', confirmed: true }])
+  assert.equal(conn.extNotifications.length, 0)
+})
+
+test('PiAcpSession: bridges extension select requests through ACP AskUserQuestion metadata', async () => {
+  const conn = new FakeAgentSideConnection()
+  conn.requestPermissionHandler = async params => {
+    assert.equal(params.sessionId, 's1')
+    assert.equal((params.toolCall as any).title, 'Plan mode - what next?')
+    assert.deepEqual(
+      (params.options as any[]).map(o => o.optionId),
+      ['answer', 'cancel']
+    )
+    assert.deepEqual(
+      (params._meta as any)?.claudeCode,
+      {
+        requestType: 'askUserQuestion',
+        askUserQuestion: {
+          version: 1,
+          allowCustomAnswer: true,
+          questions: [
+            {
+              question: 'Plan mode - what next?',
+              header: 'Plan mode - what next?',
+              options: [
+                { label: 'Execute the plan', description: 'Execute the plan' },
+                { label: 'Stay in plan mode', description: 'Stay in plan mode' },
+                { label: 'Refine the plan', description: 'Refine the plan' }
+              ],
+              multiSelect: false
+            }
+          ]
+        }
+      }
+    )
+    return {
+      outcome: {
+        outcome: 'selected',
+        optionId: 'answer',
+        _meta: { claudeCode: { askUserQuestion: { answer: 'Stay in plan mode' } } }
+      }
+    }
+  }
+  const proc = new FakePiRpcProcess()
+
+  new PiAcpSession({
+    sessionId: 's1',
+    cwd: process.cwd(),
+    mcpServers: [],
+    proc: proc as any,
+    conn: asAgentConn(conn),
+    fileCommands: [],
+    supportsAskUserQuestion: true
+  })
+
+  proc.emit({
+    type: 'extension_ui_request',
+    id: 'ui1',
+    method: 'select',
+    title: 'Plan mode - what next?',
+    options: ['Execute the plan', 'Stay in plan mode', 'Refine the plan']
+  })
+  await new Promise(r => setTimeout(r, 0))
+
+  assert.deepEqual(proc.extensionUiResponses, [
+    { type: 'extension_ui_response', id: 'ui1', value: 'Stay in plan mode' }
+  ])
+  assert.equal(conn.extNotifications.length, 0)
+})
+
+test('PiAcpSession: does not treat plain permission optionId as extension select answer', async () => {
+  const conn = new FakeAgentSideConnection()
+  conn.requestPermissionHandler = async () => ({ outcome: { outcome: 'selected', optionId: '1' } })
+  const proc = new FakePiRpcProcess()
+
+  new PiAcpSession({
+    sessionId: 's1',
+    cwd: process.cwd(),
+    mcpServers: [],
+    proc: proc as any,
+    conn: asAgentConn(conn),
+    fileCommands: [],
+    supportsAskUserQuestion: true
+  })
+
+  proc.emit({
+    type: 'extension_ui_request',
+    id: 'ui1',
+    method: 'select',
+    title: 'Plan mode - what next?',
+    options: ['Execute the plan', 'Stay in plan mode', 'Refine the plan']
+  })
+  await new Promise(r => setTimeout(r, 0))
+
+  assert.deepEqual(proc.extensionUiResponses, [{ type: 'extension_ui_response', id: 'ui1', cancelled: true }])
+})
+
+test('PiAcpSession: falls back to plain requestPermission when AskUserQuestion is unsupported', async () => {
+  const conn = new FakeAgentSideConnection()
+  conn.requestPermissionHandler = async params => {
+    assert.equal(params.sessionId, 's1')
+    assert.equal((params.toolCall as any).title, 'Plan mode - what next?')
+    assert.equal((params._meta as any)?.claudeCode, undefined)
+    assert.deepEqual(
+      (params.options as any[]).map(o => o.name),
+      ['Execute the plan', 'Stay in plan mode', 'Refine the plan']
+    )
+    return { outcome: { outcome: 'selected', optionId: '1' } }
+  }
+  const proc = new FakePiRpcProcess()
+
+  new PiAcpSession({
+    sessionId: 's1',
+    cwd: process.cwd(),
+    mcpServers: [],
+    proc: proc as any,
+    conn: asAgentConn(conn),
+    fileCommands: []
+  })
+
+  proc.emit({
+    type: 'extension_ui_request',
+    id: 'ui1',
+    method: 'select',
+    title: 'Plan mode - what next?',
+    options: ['Execute the plan', 'Stay in plan mode', 'Refine the plan']
+  })
+  await new Promise(r => setTimeout(r, 0))
+
+  assert.deepEqual(proc.extensionUiResponses, [
+    { type: 'extension_ui_response', id: 'ui1', value: 'Stay in plan mode' }
+  ])
+})
+
+test('PiAcpSession: cancels extension input requests when ACP extMethod fails', async () => {
+  const conn = new FakeAgentSideConnection()
+  const proc = new FakePiRpcProcess()
+
+  new PiAcpSession({
+    sessionId: 's1',
+    cwd: process.cwd(),
+    mcpServers: [],
+    proc: proc as any,
+    conn: asAgentConn(conn),
+    fileCommands: []
+  })
+
+  proc.emit({ type: 'extension_ui_request', id: 'ui1', method: 'input', title: 'Name' })
+  await new Promise(r => setTimeout(r, 0))
+
+  assert.deepEqual(proc.extensionUiResponses, [{ type: 'extension_ui_response', id: 'ui1', cancelled: true }])
+  assert.equal(conn.updates.at(-1)?.update.sessionUpdate, 'agent_message_chunk')
+})
+
+test('PiAcpSession: surfaces extension custom display messages', async () => {
+  const conn = new FakeAgentSideConnection()
+  const proc = new FakePiRpcProcess()
+
+  new PiAcpSession({
+    sessionId: 's1',
+    cwd: process.cwd(),
+    mcpServers: [],
+    proc: proc as any,
+    conn: asAgentConn(conn),
+    fileCommands: []
+  })
+
+  proc.emit({
+    type: 'message_end',
+    message: {
+      role: 'custom',
+      customType: 'demo',
+      display: true,
+      content: [{ type: 'text', text: 'custom text' }]
+    }
+  })
+
+  await new Promise(r => setTimeout(r, 0))
+
+  assert.deepEqual(conn.updates[0]!.update, {
+    sessionUpdate: 'agent_message_chunk',
+    content: { type: 'text', text: '[demo] custom text' }
+  })
+})
+
 test('PiAcpSession: emits agent_thought_chunk for thinking_delta', async () => {
   const conn = new FakeAgentSideConnection()
   const proc = new FakePiRpcProcess()
@@ -608,6 +864,8 @@ test('PiAcpSession: expands /command before sending to pi', async () => {
   })
 
   const p = session.prompt('/hello world')
+  await new Promise(r => setTimeout(r, 0))
+
   assert.equal(proc.prompts.length, 1)
   assert.equal(proc.prompts[0]!.message, 'Say hello to world')
 
