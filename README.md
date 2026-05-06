@@ -18,7 +18,7 @@ This fork focuses on making `pi-acp` work better with pi extension workflows in 
 - Refreshes command/session state after extension commands so editor state stays aligned with pi.
 - Returns startup info through `session/new` metadata instead of injecting it into the conversation stream.
 - Streams pi thinking deltas as ACP `agent_thought_chunk`.
-- Tightens auth-required handling so `pi-acp` can return ACP auth errors before spawning `pi` when no auth is configured.
+- Tightens auth-required handling so `pi-acp` can return ACP auth errors for pi auth/model startup failures.
 - Updates smoke tests around startup info and new-session behavior.
 
 `pi-acp` communicates **ACP JSON-RPC 2.0 over stdio** to an ACP client (e.g. Zed editor) and spawns `pi --mode rpc`, bridging requests/events between the two.
