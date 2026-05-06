@@ -2,6 +2,18 @@
 
 ACP ([Agent Client Protocol](https://agentclientprotocol.com/overview/introduction)) adapter for [`pi`](https://github.com/earendil-works/pi) coding agent (fka shitty coding agent).
 
+## This Fork
+
+This fork focuses on making `pi-acp` work better with pi extension workflows in ACP clients:
+
+- Discovers pi extension commands from RPC `get_commands` and exposes them as ACP slash commands.
+- Preserves extension slash commands instead of expanding same-named file prompts.
+- Bridges blocking extension UI requests so extension-driven flows can continue in editor clients.
+- Uses Claude Code-style AskUserQuestion metadata for select dialogs when the ACP client advertises support.
+- Falls back to standard ACP `requestPermission` selection for clients without AskUserQuestion support.
+- Surfaces extension status, widgets, titles, notifications, and custom display messages through ACP session updates.
+- Refreshes command/session state after extension commands so editor state stays aligned with pi.
+
 `pi-acp` communicates **ACP JSON-RPC 2.0 over stdio** to an ACP client (e.g. Zed editor) and spawns `pi --mode rpc`, bridging requests/events between the two.
 
 ## Status
