@@ -63,8 +63,9 @@ type RequestPermissionFn = (params: {
     toolCallId: string
     title: string
     status: 'pending'
-    kind: 'other'
-    rawInput?: Record<string, unknown>
+    kind: ToolKind
+    content?: ToolCallContent[]
+    rawInput?: unknown
   }
   options: Array<{
     optionId: string
@@ -192,6 +193,49 @@ function askUserQuestionAnswer(response: unknown, question: string, header: stri
   }
 
   return normalizeAnswerValue(payload.answer)
+}
+
+type AskUserQuestionOption = {
+  label: string
+  description: string
+}
+
+type AskUserQuestion = {
+  question: string
+  header: string
+  options: AskUserQuestionOption[]
+  multiSelect: boolean
+}
+
+type AskUserQuestionInput = {
+  questions: AskUserQuestion[]
+}
+
+function selectAskUserQuestionInput(title: string, options: string[]): AskUserQuestionInput {
+  return {
+    questions: [
+      {
+        question: title,
+        header: title,
+        options: options.map(option => ({ label: option, description: option })),
+        multiSelect: false
+      }
+    ]
+  }
+}
+
+function askUserQuestionToolContent(input: AskUserQuestionInput): ToolCallContent[] {
+  const text = input.questions
+    .map((question, index) => {
+      const optionText = question.options.map(option => `- ${option.label}: ${option.description}`).join('\n')
+      const mode = question.multiSelect ? 'Multiple selections allowed' : 'Choose one option'
+      return [`${index + 1}. ${question.question}`, mode, optionText, 'Custom answer is supported.']
+        .filter(Boolean)
+        .join('\n')
+    })
+    .join('\n\n')
+
+  return text ? [{ type: 'content', content: { type: 'text', text } }] : []
 }
 
 export class SessionManager {
@@ -607,14 +651,7 @@ export class PiAcpSession {
       : []
     if (options.length === 0) return { type: 'extension_ui_response', id, cancelled: true }
 
-    const questions = [
-      {
-        question: title,
-        header: title,
-        options: options.map(option => ({ label: option, description: option })),
-        multiSelect: false
-      }
-    ]
+    const input = selectAskUserQuestionInput(title, options)
 
     const response = await requestPermission.call(this.conn, {
       sessionId: this.sessionId,
@@ -622,8 +659,9 @@ export class PiAcpSession {
         toolCallId: `extension-ui:${id}`,
         title,
         status: 'pending',
-        kind: 'other',
-        rawInput: { method: 'select', title, options }
+        kind: 'think',
+        content: askUserQuestionToolContent(input),
+        rawInput: input
       },
       options: [
         { optionId: 'answer', name: 'Submit answer', kind: 'allow_once' },
@@ -635,7 +673,7 @@ export class PiAcpSession {
           askUserQuestion: {
             version: 1,
             allowCustomAnswer: true,
-            questions
+            questions: input.questions
           }
         },
         piAcp: { extensionUiRequest: ev }

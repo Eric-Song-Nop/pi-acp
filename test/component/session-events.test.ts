@@ -111,9 +111,41 @@ test('PiAcpSession: bridges extension confirm requests through ACP extMethod', a
 
 test('PiAcpSession: bridges extension select requests through ACP AskUserQuestion metadata', async () => {
   const conn = new FakeAgentSideConnection()
+  const expectedInput = {
+    questions: [
+      {
+        question: 'Plan mode - what next?',
+        header: 'Plan mode - what next?',
+        options: [
+          { label: 'Execute the plan', description: 'Execute the plan' },
+          { label: 'Stay in plan mode', description: 'Stay in plan mode' },
+          { label: 'Refine the plan', description: 'Refine the plan' }
+        ],
+        multiSelect: false
+      }
+    ]
+  }
   conn.requestPermissionHandler = async params => {
     assert.equal(params.sessionId, 's1')
     assert.equal((params.toolCall as any).title, 'Plan mode - what next?')
+    assert.equal((params.toolCall as any).kind, 'think')
+    assert.deepEqual((params.toolCall as any).rawInput, expectedInput)
+    assert.deepEqual((params.toolCall as any).content, [
+      {
+        type: 'content',
+        content: {
+          type: 'text',
+          text: [
+            '1. Plan mode - what next?',
+            'Choose one option',
+            '- Execute the plan: Execute the plan',
+            '- Stay in plan mode: Stay in plan mode',
+            '- Refine the plan: Refine the plan',
+            'Custom answer is supported.'
+          ].join('\n')
+        }
+      }
+    ])
     assert.deepEqual(
       (params.options as any[]).map(o => o.optionId),
       ['answer', 'cancel']
@@ -125,18 +157,7 @@ test('PiAcpSession: bridges extension select requests through ACP AskUserQuestio
         askUserQuestion: {
           version: 1,
           allowCustomAnswer: true,
-          questions: [
-            {
-              question: 'Plan mode - what next?',
-              header: 'Plan mode - what next?',
-              options: [
-                { label: 'Execute the plan', description: 'Execute the plan' },
-                { label: 'Stay in plan mode', description: 'Stay in plan mode' },
-                { label: 'Refine the plan', description: 'Refine the plan' }
-              ],
-              multiSelect: false
-            }
-          ]
+          questions: expectedInput.questions
         }
       }
     )
@@ -200,6 +221,44 @@ test('PiAcpSession: does not treat plain permission optionId as extension select
   await new Promise(r => setTimeout(r, 0))
 
   assert.deepEqual(proc.extensionUiResponses, [{ type: 'extension_ui_response', id: 'ui1', cancelled: true }])
+})
+
+test('PiAcpSession: accepts AskUserQuestion answers from response metadata', async () => {
+  const conn = new FakeAgentSideConnection()
+  conn.requestPermissionHandler = async () => ({
+    outcome: { outcome: 'selected', optionId: 'answer' },
+    _meta: {
+      claudeCode: {
+        askUserQuestion: {
+          answers: {
+            'Plan mode - what next?': 'Refine the plan'
+          }
+        }
+      }
+    }
+  })
+  const proc = new FakePiRpcProcess()
+
+  new PiAcpSession({
+    sessionId: 's1',
+    cwd: process.cwd(),
+    mcpServers: [],
+    proc: proc as any,
+    conn: asAgentConn(conn),
+    fileCommands: [],
+    supportsAskUserQuestion: true
+  })
+
+  proc.emit({
+    type: 'extension_ui_request',
+    id: 'ui1',
+    method: 'select',
+    title: 'Plan mode - what next?',
+    options: ['Execute the plan', 'Stay in plan mode', 'Refine the plan']
+  })
+  await new Promise(r => setTimeout(r, 0))
+
+  assert.deepEqual(proc.extensionUiResponses, [{ type: 'extension_ui_response', id: 'ui1', value: 'Refine the plan' }])
 })
 
 test('PiAcpSession: falls back to plain requestPermission when AskUserQuestion is unsupported', async () => {
