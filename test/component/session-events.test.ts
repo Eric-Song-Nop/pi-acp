@@ -453,6 +453,49 @@ test('PiAcpSession: prompt resolves end_turn on agent_end', async () => {
   assert.equal(reason, 'end_turn')
 })
 
+test('PiAcpSession: re-emits startup info as the first chunk of the first prompt', async () => {
+  const conn = new FakeAgentSideConnection()
+  const proc = new FakePiRpcProcess()
+
+  const session = new PiAcpSession({
+    sessionId: 's1',
+    cwd: process.cwd(),
+    mcpServers: [],
+    proc: proc as any,
+    conn: asAgentConn(conn),
+    fileCommands: []
+  })
+
+  const notice = 'New version available: v0.74.0 (installed v0.73.1).'
+
+  session.setStartupInfo(notice)
+  session.sendStartupInfoIfPending()
+  await new Promise(r => setTimeout(r, 0))
+
+  const p = session.prompt('hello')
+  await new Promise(r => setTimeout(r, 0))
+
+  assert.equal(proc.prompts.length, 1)
+  assert.equal(proc.prompts[0]!.message, 'hello')
+  assert.equal(conn.updates[0]!.update.sessionUpdate, 'agent_message_chunk')
+  assert.deepEqual(conn.updates[0]!.update, {
+    sessionUpdate: 'agent_message_chunk',
+    content: { type: 'text', text: notice }
+  })
+  assert.equal(conn.updates[1]!.update.sessionUpdate, 'agent_message_chunk')
+  assert.deepEqual(conn.updates[1]!.update, {
+    sessionUpdate: 'agent_message_chunk',
+    content: { type: 'text', text: notice }
+  })
+
+  proc.emit({ type: 'agent_start' })
+  proc.emit({ type: 'turn_end' })
+  proc.emit({ type: 'agent_end' })
+
+  const reason = await p
+  assert.equal(reason, 'end_turn')
+})
+
 test('PiAcpSession: cancel flips stopReason to cancelled', async () => {
   const conn = new FakeAgentSideConnection()
   const proc = new FakePiRpcProcess()

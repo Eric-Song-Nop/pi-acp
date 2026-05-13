@@ -176,7 +176,8 @@ export class PiAcpSession {
   readonly mcpServers: McpServer[]
 
   private startupInfo: string | null = null
-  private startupInfoSent = false
+  private startupInfoSentOutOfTurn = false
+  private startupInfoSentInPrompt = false
 
   readonly proc: PiRpcProcess
   private readonly conn: AgentSideConnection
@@ -227,6 +228,8 @@ export class PiAcpSession {
 
   setStartupInfo(text: string) {
     this.startupInfo = text
+    this.startupInfoSentOutOfTurn = false
+    this.startupInfoSentInPrompt = false
   }
 
   /**
@@ -235,8 +238,18 @@ export class PiAcpSession {
    * callers can invoke this shortly after session/new returns.
    */
   sendStartupInfoIfPending(): void {
-    if (this.startupInfoSent || !this.startupInfo) return
-    this.startupInfoSent = true
+    if (this.startupInfoSentOutOfTurn || !this.startupInfo) return
+    this.startupInfoSentOutOfTurn = true
+
+    this.emit({
+      sessionUpdate: 'agent_message_chunk',
+      content: { type: 'text', text: this.startupInfo }
+    })
+  }
+
+  private sendStartupInfoOnFirstPromptIfPending(): void {
+    if (this.startupInfoSentInPrompt || !this.startupInfo) return
+    this.startupInfoSentInPrompt = true
 
     this.emit({
       sessionUpdate: 'agent_message_chunk',
@@ -245,6 +258,9 @@ export class PiAcpSession {
   }
 
   async prompt(message: string, images: unknown[] = []): Promise<StopReason> {
+    // Keep a prompt-path fallback because some clients may ignore the best-effort
+    // pre-prompt notification sent right after session/new.
+    this.sendStartupInfoOnFirstPromptIfPending()
 
     // pi RPC mode disables slash command expansion, so we do it here.
     const expandedMessage = expandSlashCommand(message, this.fileCommands)
