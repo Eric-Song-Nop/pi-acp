@@ -16,7 +16,6 @@ This fork focuses on making `pi-acp` work better with pi extension workflows in 
 - Falls back to standard ACP `requestPermission` selection for clients without AskUserQuestion support.
 - Surfaces extension status, widgets, titles, notifications, and custom display messages through ACP session updates.
 - Refreshes command/session state after extension commands so editor state stays aligned with pi.
-- Returns startup info through `session/new` metadata instead of injecting it into the conversation stream.
 - Streams pi thinking deltas as ACP `agent_thought_chunk`.
 - Tightens auth-required handling so `pi-acp` can return ACP auth errors for pi auth/model startup failures.
 - Updates smoke tests around startup info and new-session behavior.
@@ -46,7 +45,7 @@ Expect some minor breaking changes.
   - Supports skill commands (if enabled in pi settings, they appear as `/skill:skill-name` in the ACP client)
   - Supports pi extension commands through pi RPC's headless extension UI protocol
 - Skills are loaded by pi directly and are available in ACP sessions
-- `pi-acp` returns startup info (pi version, context, skills, prompts, extensions - similar to `pi` in the terminal) in `session/new` response metadata at `_meta.piAcp.startupInfo`. It does not emit this block into the ACP conversation stream. You can suppress the full block by setting `quietStartup: true` in pi settings (`~/.pi/agent/settings.json` or `<project>/.pi/settings.json`). When `quietStartup` is enabled, `_meta.piAcp.startupInfo` may still contain a 'New version available' message if the installed pi version is outdated.
+- (Zed) `pi-acp` emits “startup info” block into the session (pi version, context, skills, prompts, extensions - similar to `pi` in the terminal). You can disable it by setting `quietStartup: true` in pi settings (`~/.pi/agent/settings.json` or `<project>/.pi/settings.json`). When `quietStartup` is enabled, `pi-acp` will still emit a 'New version available' message if the installed pi version is outdated.
 - (Zed) Session history is supported in Zed starting with [`v0.225.0`](https://zed.dev/releases/preview/0.225.0). Session loading / history maps to pi's session files. Sessions can be resumed both in `pi` and in the ACP client.
 
 ## Prerequisites

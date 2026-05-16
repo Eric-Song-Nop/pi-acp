@@ -297,6 +297,10 @@ export class PiAcpAgent implements ACPAgent {
           updateNotice
         })
 
+    if (preludeText) {
+      session.setStartupInfo(preludeText)
+    }
+
     // Policy: within a single ACP connection (one client window), keep only one live pi subprocess.
     // This avoids leaking subprocesses when clients start new sessions but don't explicitly close old ones.
     // It does NOT affect other client windows because they run in separate agent processes.
@@ -314,6 +318,10 @@ export class PiAcpAgent implements ACPAgent {
         }
       }
     }
+
+    // Try to send it immediately after session/new returns; if the client ignores it,
+    // it will still be emitted as the first chunk of the first prompt.
+    if (preludeText) setTimeout(() => session.sendStartupInfoIfPending(), 0)
 
     // Advertise slash commands (ACP: available_commands_update)
     // Important: some clients (e.g. Zed) will ignore notifications for an unknown sessionId.

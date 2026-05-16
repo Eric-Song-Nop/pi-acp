@@ -10,7 +10,7 @@ class FakeSessions {
   }
 }
 
-test('PiAcpAgent: returns startup info in session/new metadata without emitting a message', async () => {
+test('PiAcpAgent: returns startup info metadata and schedules session emission', async () => {
   const prevAgentDir = process.env.PI_CODING_AGENT_DIR
 
   const { mkdtempSync, writeFileSync } = await import('node:fs')
@@ -33,6 +33,8 @@ test('PiAcpAgent: returns startup info in session/new metadata without emitting 
 
   try {
     const conn = new FakeAgentSideConnection()
+    let startupInfoSet: string | null = null
+    let sendStartupInfoCalled = false
     const session = {
       sessionId: 's1',
       cwd,
@@ -46,6 +48,12 @@ test('PiAcpAgent: returns startup info in session/new metadata without emitting 
             model: { provider: 'test', id: 'model' }
           }
         }
+      },
+      setStartupInfo(text: string) {
+        startupInfoSet = text
+      },
+      sendStartupInfoIfPending() {
+        sendStartupInfoCalled = true
       }
     }
 
@@ -58,8 +66,11 @@ test('PiAcpAgent: returns startup info in session/new metadata without emitting 
     assert.ok(typeof startupInfo === 'string')
     assert.match(startupInfo, /## Context/)
     assert.match(startupInfo, new RegExp(contextPath.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')))
+    assert.equal(startupInfoSet, startupInfo)
     assert.equal(conn.updates.length, 0)
-    assert.equal(timeouts.length, 1)
+    assert.equal(timeouts.length, 2)
+    ;(timeouts[0] as () => void)()
+    assert.equal(sendStartupInfoCalled, true)
   } finally {
     ;(globalThis as any).setTimeout = realSetTimeout
     if (prevAgentDir == null) delete process.env.PI_CODING_AGENT_DIR
@@ -90,6 +101,7 @@ test('PiAcpAgent: quietStartup=true suppresses full startup info in session/new 
   try {
     const conn = new FakeAgentSideConnection()
 
+    let setStartupInfoCalled = false
     const session = {
       sessionId: 's1',
       cwd: process.cwd(),
@@ -103,6 +115,12 @@ test('PiAcpAgent: quietStartup=true suppresses full startup info in session/new 
             model: { provider: 'test', id: 'model' }
           }
         }
+      },
+      setStartupInfo(_text: string) {
+        setStartupInfoCalled = true
+      },
+      sendStartupInfoIfPending() {
+        // May be called when an update notice is available.
       }
     }
 
@@ -118,9 +136,12 @@ test('PiAcpAgent: quietStartup=true suppresses full startup info in session/new 
     // The test must tolerate both cases since the live npm check may or may not find an update.
     if (startupInfo) {
       assert.match(startupInfo, /New version available/)
+      assert.equal(setStartupInfoCalled, true)
+      assert.equal(timeouts.length, 2)
+    } else {
+      assert.equal(setStartupInfoCalled, false)
+      assert.equal(timeouts.length, 1)
     }
-
-    assert.equal(timeouts.length, 1)
   } finally {
     ;(globalThis as any).setTimeout = realSetTimeout
     if (prevAgentDir == null) delete process.env.PI_CODING_AGENT_DIR
