@@ -11,6 +11,8 @@ import {
   COMMAND_INTERACTIONS,
   COMMAND_SOURCE_ID_MAX_LENGTH,
   COMMAND_SOURCES,
+  EXPERIMENTAL_COMMAND_WARNING_CODE,
+  EXPERIMENTAL_COMMAND_WARNING_MESSAGE,
   commandCompatibilitySchema,
   defaultCommandExposure,
   toSafeCommandMetadata
@@ -142,10 +144,22 @@ test('schema enforces compatibility exposure policy', () => {
     warning: 'Compatibility is unknown and this command is experimental'
   })
 
-  assert.equal(
-    toSafeCommandMetadata(experimentalUnknown).warning,
-    'Compatibility is unknown and this command is experimental'
-  )
+  assert.deepEqual(toSafeCommandMetadata(experimentalUnknown).warning, {
+    code: EXPERIMENTAL_COMMAND_WARNING_CODE,
+    message: EXPERIMENTAL_COMMAND_WARNING_MESSAGE
+  })
+
+  const manifestWarningWithPrivateDetails = commandCompatibilitySchema.parse({
+    ...experimentalUnknown,
+    warning: 'Unverified extension at /Users/alice/.pi/agent/extensions/private.ts'
+  })
+  const safeMetadata = toSafeCommandMetadata(manifestWarningWithPrivateDetails)
+  assert.deepEqual(safeMetadata.warning, {
+    code: EXPERIMENTAL_COMMAND_WARNING_CODE,
+    message: EXPERIMENTAL_COMMAND_WARNING_MESSAGE
+  })
+  assert.equal(JSON.stringify(safeMetadata).includes('/Users/alice'), false)
+
   expectInvalid({
     ...experimentalUnknown,
     warning: '\u200b'
@@ -284,7 +298,7 @@ test('JSON Schema compiles strictly under draft 2020 and matches Zod invariants'
       valid: false
     },
     {
-      label: 'default-ignorable warnings are not visible',
+      label: 'blank default-ignorable warnings are not visible',
       candidate: {
         ...stableCommand,
         compatibility: 'unknown',
@@ -308,6 +322,42 @@ test('JSON Schema compiles strictly under draft 2020 and matches Zod invariants'
       valid: false
     },
     {
+      label: 'zero-width spaces remain forbidden in visible text',
+      candidate: {
+        ...stableCommand,
+        compatibility: 'unknown',
+        execution: 'unknown',
+        exposure: 'experimental',
+        evidence: [],
+        warning: 'Compatibility\u200bunknown'
+      },
+      valid: false
+    },
+    {
+      label: 'contextual Unicode alone is not visible text',
+      candidate: {
+        ...stableCommand,
+        compatibility: 'unknown',
+        execution: 'unknown',
+        exposure: 'experimental',
+        evidence: [],
+        warning: '\u200d\ufe0f'
+      },
+      valid: false
+    },
+    {
+      label: 'bidi overrides remain forbidden in visible text',
+      candidate: {
+        ...stableCommand,
+        compatibility: 'unknown',
+        execution: 'unknown',
+        exposure: 'experimental',
+        evidence: [],
+        warning: 'Compatibility \u202eunknown'
+      },
+      valid: false
+    },
+    {
       label: 'visible experimental warning is valid',
       candidate: {
         ...stableCommand,
@@ -316,6 +366,42 @@ test('JSON Schema compiles strictly under draft 2020 and matches Zod invariants'
         exposure: 'experimental',
         evidence: [],
         warning: 'Compatibility is unknown'
+      },
+      valid: true
+    },
+    {
+      label: 'emoji variation selectors are valid with visible content',
+      candidate: {
+        ...stableCommand,
+        compatibility: 'unknown',
+        execution: 'unknown',
+        exposure: 'experimental',
+        evidence: [],
+        warning: '⚠️ Compatibility unknown'
+      },
+      valid: true
+    },
+    {
+      label: 'emoji joiners are valid with visible content',
+      candidate: {
+        ...stableCommand,
+        compatibility: 'unknown',
+        execution: 'unknown',
+        exposure: 'experimental',
+        evidence: [],
+        warning: '👩‍💻 Compatibility unknown'
+      },
+      valid: true
+    },
+    {
+      label: 'script joiners are valid with visible content',
+      candidate: {
+        ...stableCommand,
+        compatibility: 'unknown',
+        execution: 'unknown',
+        exposure: 'experimental',
+        evidence: [],
+        warning: 'می‌روم…'
       },
       valid: true
     },

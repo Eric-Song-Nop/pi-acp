@@ -39,11 +39,28 @@ export const COMMAND_ID_MAX_LENGTH = COMMAND_SOURCE_ID_MAX_LENGTH + 1 + COMMAND_
 const COMMAND_NAME_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/
 const OPAQUE_SOURCE_ID_PATTERN = /^[a-z][a-z0-9-]*:[a-z0-9][a-z0-9._-]{0,127}$/
 const STABLE_COMMAND_ID_PATTERN = /^[a-z][a-z0-9-]*(?::[a-z0-9][a-z0-9._-]*){2,}$/
-const NON_RENDERING_TEXT_PATTERN = /[\p{C}\p{Default_Ignorable_Code_Point}\u2028\u2029\u2800]/u
+const FORBIDDEN_TEXT_CODE_POINT_PATTERN = /[\p{Cc}\p{Cs}\p{Co}\p{Cn}\p{Zl}\p{Zp}\p{Bidi_Control}\u2800\u3164]/u
+const FORMAT_CODE_POINT_PATTERN = /\p{Cf}/u
+const DEFAULT_IGNORABLE_CODE_POINT_PATTERN = /\p{Default_Ignorable_Code_Point}/u
+const CONTEXTUAL_JOINER_PATTERN = /[\u200c\u200d]/u
+const VARIATION_SELECTOR_PATTERN = /\p{Variation_Selector}/u
 const VISIBLE_CODE_POINT_PATTERN = /[\p{L}\p{N}\p{P}\p{S}]/u
 
+function isAllowedContextualCodePoint(codePoint: string): boolean {
+  return CONTEXTUAL_JOINER_PATTERN.test(codePoint) || VARIATION_SELECTOR_PATTERN.test(codePoint)
+}
+
 function isVisibleText(value: string): boolean {
-  return !NON_RENDERING_TEXT_PATTERN.test(value) && VISIBLE_CODE_POINT_PATTERN.test(value)
+  if (!VISIBLE_CODE_POINT_PATTERN.test(value)) return false
+
+  return Array.from(value).every(codePoint => {
+    if (FORBIDDEN_TEXT_CODE_POINT_PATTERN.test(codePoint)) return false
+
+    const allowedContextualCodePoint = isAllowedContextualCodePoint(codePoint)
+    if (FORMAT_CODE_POINT_PATTERN.test(codePoint) && !allowedContextualCodePoint) return false
+    if (DEFAULT_IGNORABLE_CODE_POINT_PATTERN.test(codePoint) && !allowedContextualCodePoint) return false
+    return true
+  })
 }
 
 function visibleText(maxLength: number) {
@@ -52,7 +69,7 @@ function visibleText(maxLength: number) {
     .min(1)
     .refine(value => Array.from(value).length <= maxLength, `must contain at most ${maxLength} Unicode code points`)
     .refine(value => value === value.trim(), 'must not contain leading or trailing whitespace')
-    .refine(isVisibleText, 'must contain visible text without control or formatting characters')
+    .refine(isVisibleText, 'must contain visible text without control, bidi, or spoofing characters')
 }
 
 const commandEvidenceSchema = z
@@ -207,18 +224,21 @@ export const commandCompatibilitySchema = commandCompatibilityObjectSchema.super
 
 export type CommandCompatibility = z.infer<typeof commandCompatibilitySchema>
 
+export const EXPERIMENTAL_COMMAND_WARNING_CODE = 'compatibility-unverified' as const
+export const EXPERIMENTAL_COMMAND_WARNING_MESSAGE =
+  'Compatibility has not been verified; this command is experimental.' as const
+
+export type SafeCommandWarning = {
+  code: typeof EXPERIMENTAL_COMMAND_WARNING_CODE
+  message: typeof EXPERIMENTAL_COMMAND_WARNING_MESSAGE
+}
+
 export type SafeCommandMetadata = Pick<
   CommandCompatibility,
-  | 'schemaVersion'
-  | 'id'
-  | 'source'
-  | 'sourceId'
-  | 'compatibility'
-  | 'execution'
-  | 'exposure'
-  | 'interactions'
-  | 'warning'
->
+  'schemaVersion' | 'id' | 'source' | 'sourceId' | 'compatibility' | 'execution' | 'exposure' | 'interactions'
+> & {
+  warning?: SafeCommandWarning
+}
 
 export function defaultCommandExposure(
   compatibility: CommandCompatibilityTier,
@@ -241,6 +261,11 @@ export function toSafeCommandMetadata(command: CommandCompatibility): SafeComman
     interactions: [...command.interactions]
   }
 
-  if (command.warning) metadata.warning = command.warning
+  if (command.compatibility === 'unknown' && command.exposure === 'experimental') {
+    metadata.warning = {
+      code: EXPERIMENTAL_COMMAND_WARNING_CODE,
+      message: EXPERIMENTAL_COMMAND_WARNING_MESSAGE
+    }
+  }
   return metadata
 }

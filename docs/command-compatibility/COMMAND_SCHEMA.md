@@ -32,7 +32,8 @@ that source ID with a normalized command segment, for example
 - `tui-only` commands are always `hidden`.
 - `unknown` commands cannot be `stable`. If a feature flag exposes one as
   `experimental`, it must carry genuinely visible, bounded `warning` text that
-  survives in the `_meta.piAcp` wire projection.
+  results in an adapter-controlled structured warning in the `_meta.piAcp` wire
+  projection. Manifest warning text is never copied to the wire.
 - A `stable` command must use a headless tier, a known execution lifecycle, and
   include durable evidence.
 - `rpc-native` may only require `notify`.
@@ -43,8 +44,13 @@ that source ID with a normalized command segment, for example
 - `custom-tui` always classifies the command as `tui-only`.
 - Interaction entries are unique.
 - Raw absolute paths and diagnostic details stay internal. ACP metadata receives
-  only the safe ID, source, tiers, exposure, interaction names, and any required
-  experimental warning.
+  only the safe ID, source, tiers, exposure, interaction names, and the required
+  adapter-owned experimental warning code/template.
+
+Visible text rejects controls, bidirectional controls, blank filler characters,
+and non-contextual default-ignorable characters. Unicode joiners and variation
+selectors remain valid when the string also contains real visible content, so
+ordinary emoji and scripts that use ZWJ or ZWNJ are not rejected.
 
 The default policy is deliberately conservative:
 
@@ -82,7 +88,10 @@ An explicit feature flag may elevate `unknown` to `experimental`, but never to
 
 The compatibility object is not itself an ACP wire message. Runtime catalog
 code must call `toSafeCommandMetadata()` and place the result under a
-namespaced `_meta.piAcp` field. The JSON Schema companion is compiled in strict
+namespaced `_meta.piAcp` field. For an experimental unknown command, the
+projector emits `{ code: "compatibility-unverified", message: "Compatibility
+has not been verified; this command is experimental." }`; it never forwards the
+free-form manifest warning. The JSON Schema companion is compiled in strict
 draft-2020 mode and exercised against the same invariant cases as the
 authoritative Zod schema; only the documented source-derived prefix checks
 remain Zod-only.

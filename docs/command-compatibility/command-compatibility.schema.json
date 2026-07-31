@@ -100,13 +100,13 @@
       "type": "string",
       "minLength": 1,
       "maxLength": 512,
-      "pattern": "^(?=\\S)(?=[\\s\\S]*[\\p{L}\\p{N}\\p{P}\\p{S}])(?![\\s\\S]*[\\p{C}\\p{Default_Ignorable_Code_Point}\\u2028\\u2029\\u2800])[\\s\\S]*\\S$"
+      "pattern": "^(?=\\S)(?=[\\s\\S]*[\\p{L}\\p{N}\\p{P}\\p{S}])(?![\\s\\S]*[\\p{Cc}\\p{Cs}\\p{Co}\\p{Cn}\\p{Zl}\\p{Zp}\\p{Bidi_Control}\\u2800\\u3164])(?![\\s\\S]*(?:(?![\\u200C\\u200D])\\p{Cf}))(?![\\s\\S]*(?:(?![\\u200C\\u200D\\p{Variation_Selector}])\\p{Default_Ignorable_Code_Point}))[\\s\\S]*\\S$"
     },
     "visibleText256": {
       "type": "string",
       "minLength": 1,
       "maxLength": 256,
-      "pattern": "^(?=\\S)(?=[\\s\\S]*[\\p{L}\\p{N}\\p{P}\\p{S}])(?![\\s\\S]*[\\p{C}\\p{Default_Ignorable_Code_Point}\\u2028\\u2029\\u2800])[\\s\\S]*\\S$"
+      "pattern": "^(?=\\S)(?=[\\s\\S]*[\\p{L}\\p{N}\\p{P}\\p{S}])(?![\\s\\S]*[\\p{Cc}\\p{Cs}\\p{Co}\\p{Cn}\\p{Zl}\\p{Zp}\\p{Bidi_Control}\\u2800\\u3164])(?![\\s\\S]*(?:(?![\\u200C\\u200D])\\p{Cf}))(?![\\s\\S]*(?:(?![\\u200C\\u200D\\p{Variation_Selector}])\\p{Default_Ignorable_Code_Point}))[\\s\\S]*\\S$"
     },
     "evidence": {
       "type": "object",
