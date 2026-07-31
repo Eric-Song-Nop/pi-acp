@@ -32,9 +32,15 @@ case "${gate}" in
     node --import tsx --test test/unit/*.test.ts test/component/*.test.ts
     ;;
   build)
-    build_output="${TMPDIR}/pi-acp-build"
-    mkdir -p "${build_output}"
-    node node_modules/tsup/dist/cli-default.js --out-dir "${build_output}"
+    build_root="${TMPDIR}/pi-acp-build-workspace"
+    build_output="${build_root}/dist"
+    mkdir -p "${build_root}"
+    cp -a package.json tsconfig.json tsup.config.ts src "${build_root}/"
+    ln -s /workspace/node_modules "${build_root}/node_modules"
+    (
+      cd "${build_root}"
+      node /workspace/node_modules/tsup/dist/cli-default.js --out-dir "${build_output}"
+    )
     test -s "${build_output}/index.js"
     test -s "${build_output}/index.js.map"
     ;;
