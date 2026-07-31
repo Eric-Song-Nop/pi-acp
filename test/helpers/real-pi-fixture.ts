@@ -85,6 +85,7 @@ export type RealPiFixtureReceipt = {
   schemaVersion: 1
   checkpoint: 'C0.6'
   fixtureId: 'pi-extension-pack-v1'
+  extensionEvidenceKind: 'cooperative_session_start_on_disk_self_report'
   phase: 'registered_and_started'
   event: 'session_start'
   reason: 'startup'
@@ -136,6 +137,13 @@ export type RealPiShutdownReceipt = {
 export type VerifiedReceipt<T> = {
   receipt: T
   stat: Stats
+}
+
+type ReceiptBoundary = {
+  rootDir: string
+  receiptDir: string
+  rootStat: Stats
+  receiptDirStat: Stats
 }
 
 const repositoryRoot = fileURLToPath(new URL('../../', import.meta.url))
@@ -207,7 +215,47 @@ function assertReceiptStat(path: string, stat: Stats): void {
   }
 }
 
-async function readVerifiedReceipt<T>(path: string): Promise<VerifiedReceipt<T>> {
+function assertReceiptDirectoryStat(path: string, stat: Stats): void {
+  if (!stat.isDirectory() || stat.isSymbolicLink()) {
+    throw new Error(`C0.6 receipt ancestor must be a real directory: ${path}`)
+  }
+  if (process.platform !== 'win32') {
+    if ((stat.mode & 0o022) !== 0) {
+      throw new Error(`C0.6 receipt ancestor must not be group/world writable: ${path}`)
+    }
+    if (process.getuid && stat.uid !== process.getuid()) {
+      throw new Error(`C0.6 receipt ancestor owner must match the test process: ${path}`)
+    }
+  }
+}
+
+function assertSameFileIdentity(expected: Stats, actual: Stats, label: string): void {
+  if (actual.dev !== expected.dev || actual.ino !== expected.ino) {
+    throw new Error(`C0.6 ${label} identity changed`)
+  }
+}
+
+async function assertReceiptBoundary(boundary: ReceiptBoundary, path: string): Promise<void> {
+  const [rootStat, receiptDirStat, canonicalRoot, canonicalReceiptDir, canonicalReceipt] = await Promise.all([
+    lstat(boundary.rootDir),
+    lstat(boundary.receiptDir),
+    realpath(boundary.rootDir),
+    realpath(boundary.receiptDir),
+    realpath(path)
+  ])
+  assertReceiptDirectoryStat(boundary.rootDir, rootStat)
+  assertReceiptDirectoryStat(boundary.receiptDir, receiptDirStat)
+  assertSameFileIdentity(boundary.rootStat, rootStat, 'private root')
+  assertSameFileIdentity(boundary.receiptDirStat, receiptDirStat, 'receipt directory')
+  if (canonicalRoot !== boundary.rootDir || canonicalReceiptDir !== boundary.receiptDir) {
+    throw new Error('C0.6 receipt ancestor canonical path changed')
+  }
+  assertContainedPath(canonicalRoot, canonicalReceiptDir, 'C0.6 receipt directory')
+  assertContainedPath(canonicalReceiptDir, canonicalReceipt, 'C0.6 receipt')
+}
+
+async function readVerifiedReceipt<T>(path: string, boundary: ReceiptBoundary): Promise<VerifiedReceipt<T>> {
+  await assertReceiptBoundary(boundary, path)
   const pathStat = await lstat(path)
   assertReceiptStat(path, pathStat)
 
@@ -238,11 +286,13 @@ async function readVerifiedReceipt<T>(path: string): Promise<VerifiedReceipt<T>>
     }
 
     try {
-      return {
-        receipt: JSON.parse(source) as T,
-        stat
-      }
+      const receipt = JSON.parse(source) as T
+      await assertReceiptBoundary(boundary, path)
+      const parsedPathStat = await lstat(path)
+      assertSameFileIdentity(stat, parsedPathStat, 'receipt path after parse')
+      return { receipt, stat }
     } catch (error) {
+      if (error instanceof Error && error.message.startsWith('C0.6 ')) throw error
       throw new Error(`C0.6 receipt is not valid JSON: ${path}`, { cause: error })
     }
   } finally {
@@ -440,6 +490,15 @@ export async function startRealPiFixture() {
     const extensionSource = await readFile(globalExtensionSourcePath)
     const expectedExtensionSha256 = createHash('sha256').update(extensionSource).digest('hex')
     const expectedExtensionRealpath = await realpath(extensionPath)
+    const receiptBoundary: ReceiptBoundary = {
+      rootDir: await realpath(rootDir),
+      receiptDir: await realpath(receiptDir),
+      rootStat: await lstat(rootDir),
+      receiptDirStat: await lstat(receiptDir)
+    }
+    assertReceiptDirectoryStat(receiptBoundary.rootDir, receiptBoundary.rootStat)
+    assertReceiptDirectoryStat(receiptBoundary.receiptDir, receiptBoundary.receiptDirStat)
+    assertContainedPath(receiptBoundary.rootDir, receiptBoundary.receiptDir, 'C0.6 receipt directory')
 
     client = new AcpProcessClient({
       command: process.execPath,
@@ -498,10 +557,10 @@ export async function startRealPiFixture() {
       packageVersion: REAL_PI_VERSION,
       requests,
       async readRegistrationReceipt(): Promise<VerifiedReceipt<RealPiFixtureReceipt>> {
-        return await readVerifiedReceipt<RealPiFixtureReceipt>(registrationReceiptPath)
+        return await readVerifiedReceipt<RealPiFixtureReceipt>(registrationReceiptPath, receiptBoundary)
       },
       async readShutdownReceipt(): Promise<VerifiedReceipt<RealPiShutdownReceipt>> {
-        return await readVerifiedReceipt<RealPiShutdownReceipt>(shutdownReceiptPath)
+        return await readVerifiedReceipt<RealPiShutdownReceipt>(shutdownReceiptPath, receiptBoundary)
       },
       async closeLoopback(): Promise<void> {
         await closeServer(server)

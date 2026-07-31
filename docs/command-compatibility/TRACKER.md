@@ -298,7 +298,8 @@ container/cgroup 或 job object 证明，不在本 harness 中使用不安全的
 - [x] null-prototype allowlist env 不继承开发者 credential/proxy/Node/npm/Git/SSH 配置；parent poison marker、完整 child env key inventory 和 serialized evidence 检查共同防止 ambient value 泄漏。POSIX shell 与 Pi 自行增加的已知 key 只进入显式 allowlist。
 - [x] global fixture extension 注册 deterministic numeric-loopback provider/model 与 state-only command；`session_start` 在 provider binding 后验证 RPC mode、provider/model availability、env auth、default selection 和 command source。factory invocation count 来自运行时计数，不是常量声明。
 - [x] `defaultProjectTrust=never`，不传 `--approve`/`--extension`；project-local canary extension 未执行、`trust.json` 未生成。global fixture 是本测试主动信任的 full-process code，不代表 extension sandbox。
-- [x] registration/shutdown receipts 使用 nonce 派生文件名、`wx`/`0600`；读取前验证 regular file、size、owner、mode 和单 hardlink，POSIX 使用 `O_NOFOLLOW`，并在 parse 前后验证 handle/path identity。receipt 绑定 extension SHA-256/realpath、exact Pi CLI、真实 Pi PID、runtime 与隔离路径。
+- [x] registration/shutdown receipts 使用 nonce 派生文件名、`wx`/`0600`；读取前验证 regular file、size、owner、mode 和单 hardlink，POSIX leaf 使用 `O_NOFOLLOW`。读取前及 parse 后均重新验证 canonical private root、receipt directory 的 dev/ino、非 symlink、owner/mode 与 containment，再验证 leaf handle/path identity；回归用例拒绝把 `artifacts` ancestor 换成指向隔离根外的 directory symlink。
+- [x] receipt 绑定 exact Pi CLI、真实 Pi PID、runtime 与隔离路径；extension SHA-256/realpath 明确标记为 cooperative extension 在 `session_start` 时对磁盘文件的 self-report，只证明受信 fixture 的注册/load 证据，不声称 attestation 已执行字节或抵御同 UID 恶意进程。
 - [x] ACP 只发送 `initialize` + `session/new`；session response 只包含 fixture model，loopback provider 在显式 close/drain 后仍为零 request。session map 的 future JSONL target 被证明位于隔离 sessionDir；本 load-only case 不声称已产生 persisted session bytes。
 - [x] `session_shutdown(reason=quit)` receipt、outer/Pi PID 终止、幂等 `closed` 和零 prompt/model request 共同证明有界 cleanup；current Node 下六个并发 real-Pi cases 也全部通过。
 
@@ -323,16 +324,19 @@ network-denied CI 尚未落地，因此不得声称禁止所有外网。Windows 
 grandchild containment 与 no-follow 等价保证也必须等 Windows matrix 后再认证。
 fixture command 的 ACP catalog/execution/UI 行为仍由 `FX-01..12`、`C2.x` 和
 `C3.x` 验证，本 checkpoint 不把“真实 Pi 已加载 extension”扩大成公开 command
-compatibility 声明。
+compatibility 声明。global fixture 与同一 private root 内的 Pi process 是本测试
+主动信任的 cooperative actors；receipt/hash 是受信 load-time self-report 与
+TOCTOU hardening，不是 hostile-child executed-code attestation。
 
 #### `C0.3, C0.5–C0.7` Harness 与失败基线
 
 - [ ] CI 分别运行 `typecheck`, `lint`, `test`, `build`。
 - [x] E2E 使用真实 Pi 子进程，不只使用 `FakePiRpcProcess`。
 - [x] 每个 case 使用独立 cwd 和 `PI_CODING_AGENT_DIR`，不读取开发者真实 Pi 配置。
-- [x] agent-turn fixture 使用 loopback deterministic provider，不消耗真实模型账户。
 - [ ] 阻塞 CI 默认禁止外网；插件、Pi 和客户端版本全部 pin。
 - [x] strict-client harness 会拒绝未出现在 `available_commands_update` 的 slash command。
+- [x] load-only real-Pi fixture 注册 deterministic loopback provider，并证明 `initialize` + `session/new` 期间零 provider request。
+- [ ] agent-turn fixture 使用 loopback deterministic provider 返回固定模型响应，不消耗真实模型账户。
 - [ ] 所有可能挂起的用例有硬 timeout，并保存 NDJSON transcript。
 - [ ] 当前已知失败被记录为测试，不以“人工知道会坏”代替。
 

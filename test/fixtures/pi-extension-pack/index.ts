@@ -123,6 +123,7 @@ export default function registerPiAcpFixture(pi: ExtensionAPI) {
       schemaVersion: 1,
       checkpoint: 'C0.6',
       fixtureId: FIXTURE_ID,
+      extensionEvidenceKind: 'cooperative_session_start_on_disk_self_report',
       phase: 'registered_and_started',
       event: event.type,
       reason: event.reason,

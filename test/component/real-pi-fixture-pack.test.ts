@@ -1,7 +1,8 @@
 import { PROTOCOL_VERSION } from '@agentclientprotocol/sdk'
 import assert from 'node:assert/strict'
-import { lstat, readFile } from 'node:fs/promises'
-import { isAbsolute, relative, sep } from 'node:path'
+import { lstat, mkdtemp, readFile, realpath, rename, rm, symlink, unlink } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { dirname, isAbsolute, join, relative, sep } from 'node:path'
 import test from 'node:test'
 import {
   FORBIDDEN_REAL_PI_ENV_NAMES,
@@ -130,6 +131,7 @@ test(
     assert.equal(receipt.schemaVersion, 1)
     assert.equal(receipt.checkpoint, 'C0.6')
     assert.equal(receipt.fixtureId, 'pi-extension-pack-v1')
+    assert.equal(receipt.extensionEvidenceKind, 'cooperative_session_start_on_disk_self_report')
     assert.equal(receipt.phase, 'registered_and_started')
     assert.equal(receipt.event, 'session_start')
     assert.equal(receipt.reason, 'startup')
@@ -190,6 +192,21 @@ test(
     await assertPathMissing(fixture.projectCanaryPath)
     await assertPathMissing(fixture.trustPath)
     assert.equal(await readFile(fixture.authPath, 'utf8'), '{}\n')
+
+    if (process.platform !== 'win32') {
+      const externalRoot = await mkdtemp(join(await realpath(tmpdir()), 'pi-acp-receipt-ancestor-'))
+      const receiptDir = dirname(fixture.registrationReceiptPath)
+      const movedReceiptDir = join(externalRoot, 'moved-artifacts')
+      await rename(receiptDir, movedReceiptDir)
+      await symlink(movedReceiptDir, receiptDir, 'dir')
+      try {
+        await assert.rejects(fixture.readRegistrationReceipt(), /C0\.6 receipt ancestor must be a real directory/u)
+      } finally {
+        await unlink(receiptDir)
+        await rename(movedReceiptDir, receiptDir)
+        await rm(externalRoot, { recursive: true, force: true })
+      }
+    }
 
     const sessionMap = JSON.parse(await readFile(fixture.sessionMapPath, 'utf8')) as {
       version?: unknown
