@@ -151,8 +151,9 @@ type ReceiptBoundary = {
 
 export type RealPiFixtureOptions = {
   clientBehavior?: 'raw' | 'strict'
+  extensionLoadFailure?: true
   hardDeadlineMs?: number
-  transcriptCheckpoint?: 'C0.6' | 'C0.7'
+  transcriptCheckpoint?: 'C0.6' | 'C0.7' | 'C1.1'
   transcriptCaseId?: string
   transcriptMetadata?: AcpTranscriptMetadata
   projectPrompts?: readonly {
@@ -177,6 +178,9 @@ const tsxImportPath = fileURLToPath(import.meta.resolve('tsx'))
 const piPackageRootPath = join(repositoryRoot, 'node_modules', '@earendil-works', 'pi-coding-agent')
 const piCliPath = join(piPackageRootPath, 'dist', 'cli.js')
 const globalExtensionSourcePath = fileURLToPath(new URL('../fixtures/pi-extension-pack/index.ts', import.meta.url))
+const failingGlobalExtensionSourcePath = fileURLToPath(
+  new URL('../fixtures/pi-extension-pack/failing-load/index.ts', import.meta.url)
+)
 const projectCanarySourcePath = fileURLToPath(
   new URL('../fixtures/pi-extension-pack/project-canary.js', import.meta.url)
 )
@@ -437,6 +441,7 @@ function validateProjectPrompts(
 
 export async function startRealPiFixture(options: RealPiFixtureOptions = {}) {
   const projectPrompts = validateProjectPrompts(options.projectPrompts)
+  const extensionLoadFailure = options.extensionLoadFailure === true
   const hardDeadlineMs = options.hardDeadlineMs
   if (
     hardDeadlineMs !== undefined &&
@@ -581,9 +586,11 @@ export async function startRealPiFixture(options: RealPiFixtureOptions = {}) {
     const emptyBinDir = join(rootDir, 'empty-bin')
     const receiptDir = join(rootDir, 'artifacts')
     const extensionDir = join(agentDir, 'extensions', 'pi-acp-fixture')
+    const failingExtensionDir = join(agentDir, 'extensions', 'pi-acp-failing-load')
     const projectExtensionDir = join(cwd, '.pi', 'extensions')
     const projectPromptDir = join(cwd, '.pi', 'prompts')
     const extensionPath = join(extensionDir, 'index.ts')
+    const failingExtensionPath = join(failingExtensionDir, 'index.ts')
     const projectExtensionPath = join(projectExtensionDir, 'project-canary.js')
     const nonce = randomBytes(16).toString('hex')
     const registrationReceiptPath = join(receiptDir, `pi-acp-c0.6-registration-${nonce}.json`)
@@ -609,6 +616,7 @@ export async function startRealPiFixture(options: RealPiFixtureOptions = {}) {
         emptyBinDir,
         receiptDir,
         extensionDir,
+        ...(extensionLoadFailure ? [failingExtensionDir] : []),
         projectExtensionDir,
         ...(projectPrompts.length > 0 ? [projectPromptDir] : [])
       ].map(path => mkdir(path, { recursive: true }))
@@ -656,6 +664,7 @@ export async function startRealPiFixture(options: RealPiFixtureOptions = {}) {
 
     await Promise.all([
       copyFile(globalExtensionSourcePath, extensionPath),
+      ...(extensionLoadFailure ? [copyFile(failingGlobalExtensionSourcePath, failingExtensionPath)] : []),
       copyFile(projectCanarySourcePath, projectExtensionPath),
       writeFile(piCommand, piWrapperSource(), {
         encoding: 'utf8',
@@ -683,6 +692,10 @@ export async function startRealPiFixture(options: RealPiFixtureOptions = {}) {
 
     const extensionSource = await readFile(globalExtensionSourcePath)
     const expectedExtensionSha256 = createHash('sha256').update(extensionSource).digest('hex')
+    const failingExtensionSource = extensionLoadFailure ? await readFile(failingGlobalExtensionSourcePath) : undefined
+    const expectedFailingExtensionSha256 = failingExtensionSource
+      ? createHash('sha256').update(failingExtensionSource).digest('hex')
+      : undefined
     const projectCanarySource = await readFile(projectCanarySourcePath)
     const expectedProjectCanarySha256 = createHash('sha256').update(projectCanarySource).digest('hex')
     const expectedExtensionRealpath = await realpath(extensionPath)
@@ -732,6 +745,14 @@ export async function startRealPiFixture(options: RealPiFixtureOptions = {}) {
             path: 'test/fixtures/pi-extension-pack/index.ts',
             sha256: expectedExtensionSha256
           },
+          ...(expectedFailingExtensionSha256
+            ? [
+                {
+                  path: 'test/fixtures/pi-extension-pack/failing-load/index.ts',
+                  sha256: expectedFailingExtensionSha256
+                }
+              ]
+            : []),
           {
             path: 'test/fixtures/pi-extension-pack/project-canary.js',
             sha256: expectedProjectCanarySha256

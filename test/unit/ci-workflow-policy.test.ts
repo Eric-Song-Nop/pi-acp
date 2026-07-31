@@ -158,6 +158,7 @@ test('the checked-in network and suite scripts make the workflow policy executab
     assert.match(gateScript, new RegExp(`^  ${gate}\\)$`, 'mu'))
   }
   assert.match(gateScript, /test\/component\/real-pi-agent-turn\.test\.ts/u)
+  assert.match(gateScript, /test\/component\/real-pi-extension-load-diagnostics\.test\.ts/u)
   assert.match(gateScript, /scripts\/check-command-transcripts\.ts/u)
   assert.match(gateScript, /npm --version/u)
   assert.match(gateScript, /cp -a package\.json tsconfig\.json tsup\.config\.ts src/u)

@@ -11,7 +11,7 @@ import type {
 import { RequestError } from '@agentclientprotocol/sdk'
 import { readFileSync } from 'node:fs'
 import { isAbsolute, resolve as resolvePath } from 'node:path'
-import { PiRpcProcess, PiRpcSpawnError, type PiRpcEvent } from '../pi-rpc/process.js'
+import { PiRpcProcess, PiRpcSpawnError, piRpcSpawnErrorData, type PiRpcEvent } from '../pi-rpc/process.js'
 import { maybeAuthRequiredError } from './auth-required.js'
 import { SessionStore } from './session-store.js'
 import { expandSlashCommand, type FileSlashCommand } from './slash-commands.js'
@@ -195,7 +195,9 @@ export class SessionManager {
       })
     } catch (e) {
       if (e instanceof PiRpcSpawnError) {
-        throw RequestError.internalError({ code: e.code }, e.message)
+        const data = piRpcSpawnErrorData(e)
+        if (e.diagnostic) throw new RequestError(-32603, e.message, data)
+        throw RequestError.internalError(data, e.message)
       }
       throw e
     }

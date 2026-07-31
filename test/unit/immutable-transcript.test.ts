@@ -9,15 +9,18 @@ import {
   readFile,
   readdir,
   realpath,
+  rename,
   rm,
   symlink,
   unlink,
+  utimes,
   writeFile
 } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
 import { promisify } from 'node:util'
+import { deflateSync } from 'node:zlib'
 import type { AcpTranscriptEntry, AcpTranscriptMetadata } from '../helpers/acp-process-client.js'
 import {
   FIXTURE_ROOT_TOKEN,
@@ -33,7 +36,13 @@ import {
   type ImmutableTranscriptCase,
   type ImmutableTranscriptManifest
 } from '../helpers/immutable-transcript.js'
-import { installedPackageTreeSha256, parseTranscriptUpdateArgs } from '../../scripts/update-command-transcripts.js'
+import {
+  assertRuntimeSourcesMatchGitHead,
+  installedPackageTreeSha256,
+  parseTranscriptUpdateArgs,
+  readCurrentRepositoryGitHead,
+  runtimeSourceTreesMatchGitHeads
+} from '../../scripts/update-command-transcripts.js'
 import { C0_7_UNTRUSTED_PROMPT_CANARY, deriveUntrustedPromptEvidence } from '../helpers/real-pi-baseline-scenarios.js'
 import type { LoopbackRequest } from '../helpers/real-pi-fixture.js'
 
@@ -1110,6 +1119,477 @@ test('C0.7 updater CLI parser requires explicit scope, CAS, and acceptance', () 
   ]) {
     assert.throws(() => parseTranscriptUpdateArgs(args), /./u)
   }
+})
+
+test('C0.7 runtime-source Git provenance distinguishes descendants from dirty paths', async t => {
+  const root = await mkdtemp(join(await realpath(tmpdir()), 'pi-acp-runtime-provenance-'))
+  const runtimePaths = ['runtime'] as const
+  const gitEnvironment = {
+    ...process.env,
+    GIT_CONFIG_COUNT: '0',
+    GIT_CONFIG_GLOBAL: '/dev/null',
+    GIT_CONFIG_NOSYSTEM: '1'
+  }
+  const git = async (args: readonly string[]): Promise<string> => {
+    const { stdout } = await execFileAsync('git', args, {
+      cwd: root,
+      encoding: 'utf8',
+      env: gitEnvironment
+    })
+    return stdout.trim()
+  }
+  const gitWithInput = async (args: readonly string[], input: string): Promise<void> =>
+    new Promise((resolve, reject) => {
+      const child = execFile(
+        'git',
+        args,
+        {
+          cwd: root,
+          env: gitEnvironment
+        },
+        error => {
+          if (error) reject(error)
+          else resolve()
+        }
+      )
+      child.stdin?.end(input)
+    })
+  const commit = async (message: string): Promise<string> => {
+    await git(['add', '.'])
+    await git([
+      '-c',
+      'user.name=C0.7 provenance test',
+      '-c',
+      'user.email=c0.7-provenance@example.invalid',
+      'commit',
+      '--quiet',
+      '-m',
+      message
+    ])
+    return readCurrentRepositoryGitHead(root)
+  }
+  const options = { cwd: root, paths: runtimePaths }
+
+  t.after(async () => {
+    await rm(root, { recursive: true, force: true })
+  })
+  await git(['init', '--quiet'])
+  await git(['config', 'core.filemode', 'true'])
+  await mkdir(join(root, 'runtime'), { mode: 0o700 })
+  await writeFile(join(root, 'runtime', 'adapter.ts'), 'export const value = 1\n')
+  await writeFile(join(root, 'runtime', 'type-entry'), 'type-target')
+  await writeFile(join(root, 'runtime', 'type-target'), 'export const target = true\n')
+  await writeFile(join(root, 'README.md'), 'baseline docs\n')
+  const baselineGitHead = await commit('baseline')
+  const baselineAdapterBlob = await git(['rev-parse', `${baselineGitHead}:runtime/adapter.ts`])
+  const baselineTypeEntryBlob = await git(['rev-parse', `${baselineGitHead}:runtime/type-entry`])
+  const runtimeTreesMatchBaseline = (gitHead: string): Promise<boolean> =>
+    runtimeSourceTreesMatchGitHeads(gitHead, baselineGitHead, options)
+  await assert.rejects(
+    assertRuntimeSourcesMatchGitHead(baselineGitHead, {
+      cwd: root,
+      paths: ['runtime/missing.ts']
+    }),
+    /runtime-bearing sources do not match/u
+  )
+
+  const addedPathOptions = { cwd: root, paths: ['runtime/added.ts'] as const }
+  await writeFile(join(root, 'runtime', 'added.ts'), 'export const added = true\n')
+  const addedPathGitHead = await commit('add selected runtime path')
+  await unlink(join(root, 'runtime', 'added.ts'))
+  const deletedPathGitHead = await commit('delete selected runtime path')
+  assert.equal(await runtimeSourceTreesMatchGitHeads(addedPathGitHead, deletedPathGitHead, addedPathOptions), false)
+  assert.equal(await runtimeSourceTreesMatchGitHeads(deletedPathGitHead, addedPathGitHead, addedPathOptions), false)
+
+  await writeFile(join(root, 'README.md'), 'docs-only descendant\n')
+  const docsOnlyGitHead = await commit('docs only')
+  assert.notEqual(docsOnlyGitHead, baselineGitHead)
+  await assertRuntimeSourcesMatchGitHead(docsOnlyGitHead, options)
+  const docsOnlyMatchesBaseline = await runtimeTreesMatchBaseline(docsOnlyGitHead)
+  assert.equal(docsOnlyMatchesBaseline, true)
+  assert.equal(docsOnlyMatchesBaseline ? baselineGitHead : docsOnlyGitHead, baselineGitHead)
+
+  await chmod(join(root, 'runtime', 'adapter.ts'), 0o755)
+  const modeOnlyChangeGitHead = await commit('runtime mode-only change')
+  assert.equal(await git(['rev-parse', `${modeOnlyChangeGitHead}:runtime/adapter.ts`]), baselineAdapterBlob)
+  assert.equal(await runtimeTreesMatchBaseline(modeOnlyChangeGitHead), false)
+
+  await chmod(join(root, 'runtime', 'adapter.ts'), 0o644)
+  const restoredModeGitHead = await commit('restore runtime mode')
+  assert.equal(await runtimeTreesMatchBaseline(restoredModeGitHead), true)
+
+  await unlink(join(root, 'runtime', 'type-entry'))
+  await symlink('type-target', join(root, 'runtime', 'type-entry'))
+  const typeOnlyChangeGitHead = await commit('runtime type-only change')
+  assert.equal(await git(['rev-parse', `${typeOnlyChangeGitHead}:runtime/type-entry`]), baselineTypeEntryBlob)
+  assert.equal(await runtimeTreesMatchBaseline(typeOnlyChangeGitHead), false)
+  await assert.rejects(
+    assertRuntimeSourcesMatchGitHead(typeOnlyChangeGitHead, options),
+    /runtime-bearing sources do not match/u
+  )
+
+  await unlink(join(root, 'runtime', 'type-entry'))
+  await writeFile(join(root, 'runtime', 'type-entry'), 'type-target')
+  const restoredTypeGitHead = await commit('restore runtime type')
+  assert.equal(await runtimeTreesMatchBaseline(restoredTypeGitHead), true)
+
+  await writeFile(join(root, 'runtime', 'adapter.ts'), 'export const value = 2\n')
+  const runtimeChangeGitHead = await commit('runtime change')
+  await assertRuntimeSourcesMatchGitHead(runtimeChangeGitHead, options)
+  await assertRuntimeSourcesMatchGitHead(runtimeChangeGitHead, {
+    cwd: root,
+    paths: ['runtime', 'runtime/adapter.ts']
+  })
+  const runtimeChangeMatchesBaseline = await runtimeTreesMatchBaseline(runtimeChangeGitHead)
+  assert.equal(runtimeChangeMatchesBaseline, false)
+  assert.equal(runtimeChangeMatchesBaseline ? baselineGitHead : runtimeChangeGitHead, runtimeChangeGitHead)
+
+  await writeFile(join(root, 'runtime', 'adapter.ts'), 'dirty tracked runtime source\n')
+  await assert.rejects(
+    assertRuntimeSourcesMatchGitHead(runtimeChangeGitHead, options),
+    /runtime-bearing sources do not match/u
+  )
+
+  await writeFile(join(root, 'runtime', 'adapter.ts'), 'export const value = 2\n')
+  await writeFile(join(root, 'runtime', 'untracked.ts'), 'export const untracked = true\n')
+  await assert.rejects(
+    assertRuntimeSourcesMatchGitHead(runtimeChangeGitHead, options),
+    /runtime-bearing sources do not match/u
+  )
+  await unlink(join(root, 'runtime', 'untracked.ts'))
+
+  await writeFile(join(root, '.gitignore'), 'runtime/ignored.ts\n')
+  await writeFile(join(root, 'runtime', 'ignored.ts'), 'export const ignored = true\n')
+  assert.equal(await git(['status', '--porcelain=v1', '--', 'runtime/ignored.ts']), '')
+  await assert.rejects(
+    assertRuntimeSourcesMatchGitHead(runtimeChangeGitHead, options),
+    /runtime-bearing sources do not match/u
+  )
+  await unlink(join(root, 'runtime', 'ignored.ts'))
+  await mkdir(join(root, 'runtime', 'ignored-empty'), { mode: 0o700 })
+  await assert.rejects(
+    assertRuntimeSourcesMatchGitHead(runtimeChangeGitHead, options),
+    /runtime-bearing sources do not match/u
+  )
+  await rm(join(root, 'runtime', 'ignored-empty'), { recursive: true, force: true })
+  await unlink(join(root, '.gitignore'))
+
+  const runtimeChangeAdapterBlob = await git(['rev-parse', `${runtimeChangeGitHead}:runtime/adapter.ts`])
+  await writeFile(join(root, 'runtime', 'adapter.ts'), 'export const value = 5\n')
+  await git(['add', 'runtime/adapter.ts'])
+  const stagedAdapterBlob = await git(['rev-parse', ':runtime/adapter.ts'])
+  await writeFile(join(root, 'runtime', 'adapter.ts'), 'export const value = 2\n')
+  await assert.rejects(
+    assertRuntimeSourcesMatchGitHead(runtimeChangeGitHead, options),
+    /runtime-bearing sources do not match/u
+  )
+  await gitWithInput(
+    ['update-index', '--index-info'],
+    [
+      `0 ${'0'.repeat(40)}\truntime/adapter.ts`,
+      `100644 ${baselineAdapterBlob} 1\truntime/adapter.ts`,
+      `100644 ${runtimeChangeAdapterBlob} 2\truntime/adapter.ts`,
+      `100644 ${stagedAdapterBlob} 3\truntime/adapter.ts`,
+      ''
+    ].join('\n')
+  )
+  await assert.rejects(
+    assertRuntimeSourcesMatchGitHead(runtimeChangeGitHead, options),
+    /runtime-bearing sources do not match/u
+  )
+  await git(['update-index', '--cacheinfo', `100644,${runtimeChangeAdapterBlob},runtime/adapter.ts`])
+
+  await git(['rm', '--cached', '--quiet', 'runtime/adapter.ts'])
+  await assert.rejects(
+    assertRuntimeSourcesMatchGitHead(runtimeChangeGitHead, options),
+    /runtime-bearing sources do not match/u
+  )
+  await git(['update-index', '--add', '--cacheinfo', `100644,${runtimeChangeAdapterBlob},runtime/adapter.ts`])
+  await git(['update-index', '--refresh'])
+
+  await git(['update-index', '--assume-unchanged', 'runtime/adapter.ts'])
+  await assert.rejects(
+    assertRuntimeSourcesMatchGitHead(runtimeChangeGitHead, options),
+    /runtime-bearing sources do not match/u
+  )
+  await writeFile(join(root, 'runtime', 'adapter.ts'), 'export const value = 3\n')
+  await assert.rejects(
+    assertRuntimeSourcesMatchGitHead(runtimeChangeGitHead, options),
+    /runtime-bearing sources do not match/u
+  )
+  await writeFile(join(root, 'runtime', 'adapter.ts'), 'export const value = 2\n')
+  await git(['update-index', '--no-assume-unchanged', 'runtime/adapter.ts'])
+
+  await git(['update-index', '--skip-worktree', 'runtime/adapter.ts'])
+  await assert.rejects(
+    assertRuntimeSourcesMatchGitHead(runtimeChangeGitHead, options),
+    /runtime-bearing sources do not match/u
+  )
+  await writeFile(join(root, 'runtime', 'adapter.ts'), 'export const value = 4\n')
+  await assert.rejects(
+    assertRuntimeSourcesMatchGitHead(runtimeChangeGitHead, options),
+    /runtime-bearing sources do not match/u
+  )
+  await writeFile(join(root, 'runtime', 'adapter.ts'), 'export const value = 2\n')
+  await git(['update-index', '--no-skip-worktree', 'runtime/adapter.ts'])
+
+  await chmod(join(root, 'runtime', 'adapter.ts'), 0o755)
+  await assert.rejects(
+    assertRuntimeSourcesMatchGitHead(runtimeChangeGitHead, options),
+    /runtime-bearing sources do not match/u
+  )
+  await chmod(join(root, 'runtime', 'adapter.ts'), 0o644)
+
+  await unlink(join(root, 'runtime', 'type-entry'))
+  await symlink('type-target', join(root, 'runtime', 'type-entry'))
+  await assert.rejects(
+    assertRuntimeSourcesMatchGitHead(runtimeChangeGitHead, options),
+    /runtime-bearing sources do not match/u
+  )
+  await unlink(join(root, 'runtime', 'type-entry'))
+  await writeFile(join(root, 'runtime', 'type-entry'), 'type-target')
+
+  const externalRuntimeRoot = await mkdtemp(join(await realpath(tmpdir()), 'pi-acp-runtime-ancestor-'))
+  const externalRuntime = join(externalRuntimeRoot, 'runtime')
+  await rename(join(root, 'runtime'), externalRuntime)
+  await symlink(externalRuntime, join(root, 'runtime'))
+  try {
+    await assert.rejects(
+      assertRuntimeSourcesMatchGitHead(runtimeChangeGitHead, {
+        cwd: root,
+        paths: ['runtime/adapter.ts']
+      }),
+      /runtime-bearing sources do not match/u
+    )
+  } finally {
+    await unlink(join(root, 'runtime'))
+    await rename(externalRuntime, join(root, 'runtime'))
+    await rm(externalRuntimeRoot, { recursive: true, force: true })
+  }
+
+  await writeFile(join(root, '.gitignore'), 'runtime/node_modules/\n')
+  await mkdir(join(root, 'runtime', 'node_modules', 'shadow-package'), { recursive: true, mode: 0o700 })
+  await writeFile(
+    join(root, 'runtime', 'node_modules', 'shadow-package', 'index.js'),
+    'throw new Error("ignored resolver shadow executed")\n'
+  )
+  assert.equal(await git(['status', '--porcelain=v1', '--', 'runtime/node_modules']), '')
+  await assert.rejects(
+    assertRuntimeSourcesMatchGitHead(runtimeChangeGitHead, {
+      cwd: root,
+      paths: ['runtime/adapter.ts']
+    }),
+    /runtime-bearing sources do not match/u
+  )
+  await rm(join(root, 'runtime', 'node_modules'), { recursive: true, force: true })
+  await unlink(join(root, '.gitignore'))
+
+  await git(['config', 'core.checkStat', 'minimal'])
+  await git(['config', 'core.trustctime', 'false'])
+  await git(['update-index', '--refresh'])
+  const cachedTimestampSeconds = 1_700_000_000
+  await utimes(join(root, 'runtime', 'adapter.ts'), cachedTimestampSeconds, cachedTimestampSeconds)
+  await git(['update-index', '--refresh'])
+  await writeFile(join(root, 'runtime', 'adapter.ts'), 'export const value = 9\n')
+  await utimes(join(root, 'runtime', 'adapter.ts'), cachedTimestampSeconds, cachedTimestampSeconds)
+  assert.equal(
+    await git(['diff-files', '--quiet', '--', 'runtime/adapter.ts']).then(
+      () => true,
+      () => false
+    ),
+    true,
+    'test setup must demonstrate Git stat-cache suppression'
+  )
+  await assert.rejects(
+    assertRuntimeSourcesMatchGitHead(runtimeChangeGitHead, options),
+    /runtime-bearing sources do not match/u
+  )
+  await writeFile(join(root, 'runtime', 'adapter.ts'), 'export const value = 2\n')
+
+  await git(['replace', baselineGitHead, runtimeChangeGitHead])
+  assert.equal(await runtimeSourceTreesMatchGitHeads(baselineGitHead, runtimeChangeGitHead, options), false)
+  await assert.rejects(
+    assertRuntimeSourcesMatchGitHead(baselineGitHead, options),
+    /runtime-bearing sources do not match/u
+  )
+  await git(['replace', '-d', baselineGitHead])
+
+  await git(['update-index', '--add', '--cacheinfo', `160000,${runtimeChangeGitHead},runtime/gitlink`])
+  await git([
+    '-c',
+    'user.name=C0.7 provenance test',
+    '-c',
+    'user.email=c0.7-provenance@example.invalid',
+    'commit',
+    '--quiet',
+    '-m',
+    'runtime gitlink'
+  ])
+  const gitlinkGitHead = await readCurrentRepositoryGitHead(root)
+  assert.equal(await runtimeSourceTreesMatchGitHeads(runtimeChangeGitHead, gitlinkGitHead, options), false)
+  await assert.rejects(
+    assertRuntimeSourcesMatchGitHead(gitlinkGitHead, options),
+    /runtime-bearing sources do not match/u
+  )
+})
+
+test('C0.7 runtime-source provenance isolates hostile ambient Git redirects', async t => {
+  const temporaryRoot = await mkdtemp(join(await realpath(tmpdir()), 'pi-acp-runtime-git-env-'))
+  const actualRoot = join(temporaryRoot, 'actual')
+  const alternateRoot = join(temporaryRoot, 'alternate')
+  const cleanGitEnvironment = Object.fromEntries(Object.entries(process.env).filter(([key]) => !/^GIT_/iu.test(key)))
+  const git = async (cwd: string, args: readonly string[]): Promise<string> => {
+    const { stdout } = await execFileAsync('git', args, {
+      cwd,
+      encoding: 'utf8',
+      env: {
+        ...cleanGitEnvironment,
+        GIT_CONFIG_COUNT: '0',
+        GIT_CONFIG_GLOBAL: '/dev/null',
+        GIT_CONFIG_NOSYSTEM: '1'
+      }
+    })
+    return stdout.trim()
+  }
+
+  t.after(async () => {
+    await rm(temporaryRoot, { recursive: true, force: true })
+  })
+  await mkdir(actualRoot, { mode: 0o700 })
+  await git(actualRoot, ['init', '--quiet'])
+  await mkdir(join(actualRoot, 'runtime'), { mode: 0o700 })
+  await writeFile(join(actualRoot, 'runtime', 'adapter.ts'), 'export const actual = true\n')
+  await git(actualRoot, ['add', '.'])
+  await git(actualRoot, [
+    '-c',
+    'user.name=C0.7 provenance test',
+    '-c',
+    'user.email=c0.7-provenance@example.invalid',
+    'commit',
+    '--quiet',
+    '-m',
+    'actual baseline'
+  ])
+  const actualGitHead = await git(actualRoot, ['rev-parse', 'HEAD'])
+  await git(temporaryRoot, ['clone', '--quiet', '--no-hardlinks', actualRoot, alternateRoot])
+  assert.equal(await git(alternateRoot, ['rev-parse', 'HEAD']), actualGitHead)
+
+  const hostileConfigPath = join(temporaryRoot, 'hostile.gitconfig')
+  await writeFile(hostileConfigPath, `[core]\n\tworktree = ${alternateRoot}\n`)
+  const hostileEnvironment: Record<string, string> = {
+    GIT_ALTERNATE_OBJECT_DIRECTORIES: join(alternateRoot, '.git', 'objects'),
+    GIT_CEILING_DIRECTORIES: join(actualRoot, 'runtime'),
+    GIT_COMMON_DIR: join(alternateRoot, '.git'),
+    GIT_CONFIG: hostileConfigPath,
+    GIT_CONFIG_COUNT: '1',
+    GIT_CONFIG_GLOBAL: hostileConfigPath,
+    GIT_CONFIG_KEY_0: 'core.worktree',
+    GIT_CONFIG_NOSYSTEM: '0',
+    GIT_CONFIG_PARAMETERS: `'core.worktree=${alternateRoot}'`,
+    GIT_CONFIG_SYSTEM: hostileConfigPath,
+    GIT_CONFIG_VALUE_0: alternateRoot,
+    GIT_DIR: join(alternateRoot, '.git'),
+    GIT_DISCOVERY_ACROSS_FILESYSTEM: '1',
+    GIT_INDEX_FILE: join(alternateRoot, '.git', 'index'),
+    GIT_NAMESPACE: 'hostile-namespace',
+    GIT_NO_REPLACE_OBJECTS: '0',
+    GIT_OBJECT_DIRECTORY: join(alternateRoot, '.git', 'objects'),
+    GIT_PREFIX: 'runtime/',
+    GIT_REPLACE_REF_BASE: 'refs/hostile-replacements',
+    GIT_WORK_TREE: alternateRoot
+  }
+  const previousEnvironment = new Map(Object.keys(hostileEnvironment).map(key => [key, process.env[key]] as const))
+  try {
+    for (const [key, value] of Object.entries(hostileEnvironment)) process.env[key] = value
+    const options = { cwd: join(actualRoot, 'runtime'), paths: ['runtime'] as const }
+    assert.equal(await readCurrentRepositoryGitHead(options.cwd), actualGitHead)
+    await assertRuntimeSourcesMatchGitHead(actualGitHead, options)
+    assert.equal(await runtimeSourceTreesMatchGitHeads(actualGitHead, actualGitHead, options), true)
+
+    const actualAdapterBlob = await git(actualRoot, ['rev-parse', `${actualGitHead}:runtime/adapter.ts`])
+    await writeFile(join(actualRoot, 'runtime', 'adapter.ts'), 'export const staged = true\n')
+    await git(actualRoot, ['add', 'runtime/adapter.ts'])
+    await writeFile(join(actualRoot, 'runtime', 'adapter.ts'), 'export const actual = true\n')
+    await assert.rejects(
+      assertRuntimeSourcesMatchGitHead(actualGitHead, options),
+      /runtime-bearing sources do not match/u
+    )
+    await git(actualRoot, ['update-index', '--cacheinfo', `100644,${actualAdapterBlob},runtime/adapter.ts`])
+    await git(actualRoot, ['update-index', '--refresh'])
+
+    await writeFile(join(actualRoot, 'runtime', 'adapter.ts'), 'export const dirty = true\n')
+    await assert.rejects(
+      assertRuntimeSourcesMatchGitHead(actualGitHead, options),
+      /runtime-bearing sources do not match/u
+    )
+  } finally {
+    for (const [key, value] of previousEnvironment) {
+      if (value === undefined) delete process.env[key]
+      else process.env[key] = value
+    }
+  }
+})
+
+test('C0.7 runtime-source provenance rehashes bytes returned for declared Git blobs', async t => {
+  const root = await mkdtemp(join(await realpath(tmpdir()), 'pi-acp-runtime-object-integrity-'))
+  const gitEnvironment = {
+    ...process.env,
+    GIT_CONFIG_COUNT: '0',
+    GIT_CONFIG_GLOBAL: '/dev/null',
+    GIT_CONFIG_NOSYSTEM: '1'
+  }
+  const git = async (args: readonly string[]): Promise<string> => {
+    const { stdout } = await execFileAsync('git', args, {
+      cwd: root,
+      encoding: 'utf8',
+      env: gitEnvironment
+    })
+    return stdout.trim()
+  }
+
+  t.after(async () => {
+    await rm(root, { recursive: true, force: true })
+  })
+  await git(['init', '--quiet'])
+  await git(['config', 'core.filemode', 'true'])
+  await mkdir(join(root, 'runtime'), { mode: 0o700 })
+  const originalBytes = Buffer.from('export const value = 1\n')
+  const tamperedBytes = Buffer.from('export const value = 9\n')
+  assert.equal(tamperedBytes.length, originalBytes.length)
+  await writeFile(join(root, 'runtime', 'adapter.ts'), originalBytes)
+  await git(['add', '.'])
+  await git([
+    '-c',
+    'user.name=C0.7 provenance test',
+    '-c',
+    'user.email=c0.7-provenance@example.invalid',
+    'commit',
+    '--quiet',
+    '-m',
+    'object integrity baseline'
+  ])
+  const gitHead = await readCurrentRepositoryGitHead(root)
+  const blobObjectId = await git(['rev-parse', `${gitHead}:runtime/adapter.ts`])
+  assert.match(blobObjectId, /^[0-9a-f]{40}$/u)
+  await assertRuntimeSourcesMatchGitHead(gitHead, { cwd: root, paths: ['runtime'] })
+
+  const looseObjectPath = join(root, '.git', 'objects', blobObjectId.slice(0, 2), blobObjectId.slice(2))
+  const tamperedLooseObject = deflateSync(
+    Buffer.concat([Buffer.from(`blob ${String(tamperedBytes.length)}\0`), tamperedBytes])
+  )
+  await chmod(looseObjectPath, 0o600)
+  await writeFile(looseObjectPath, tamperedLooseObject)
+  await writeFile(join(root, 'runtime', 'adapter.ts'), tamperedBytes)
+  const { stdout: returnedBlob } = await execFileAsync('git', ['cat-file', 'blob', blobObjectId], {
+    cwd: root,
+    encoding: 'buffer',
+    env: gitEnvironment
+  })
+  assert.deepEqual(returnedBlob, tamperedBytes, 'test setup must demonstrate unverified cat-file bytes')
+  await assert.rejects(
+    assertRuntimeSourcesMatchGitHead(gitHead, { cwd: root, paths: ['runtime'] }),
+    /runtime-bearing sources do not match/u
+  )
 })
 
 test('C0.7 installed-package tree identity binds content and rejects symlinks', async t => {

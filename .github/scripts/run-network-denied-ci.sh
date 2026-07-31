@@ -48,7 +48,8 @@ case "${gate}" in
     node --import tsx --test --test-concurrency=1 \
       test/component/real-pi-fixture-pack.test.ts \
       test/component/c0.7-fixture-boundaries.test.ts \
-      test/component/real-pi-agent-turn.test.ts
+      test/component/real-pi-agent-turn.test.ts \
+      test/component/real-pi-extension-load-diagnostics.test.ts
     ;;
   immutable-failures)
     node --import tsx scripts/check-command-transcripts.ts
