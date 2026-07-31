@@ -67,7 +67,7 @@
 | ACP SDK            | `@agentclientprotocol/sdk@0.26.0` | 已含 experimental elicitation；升级到 1.x 必须单独进行 |
 | Pi                 | `0.80.5`–`0.83.0`                 | `C0.2` 固定目标窗口；完整兼容性由 `G5` 证明            |
 | Node               | `>=22.19.0`                       | 与受测 Pi 的最低 engine 一致；E2E 单独建矩阵           |
-| existing tests     | 98/98 通过                        | 含 3 个 C0.2 manifest tests；尚不能证明真实插件兼容    |
+| existing tests     | 104/104 通过                      | 含 C0.2/C0.4 contract tests；尚不能证明真实插件兼容    |
 | Pi built-ins       | 22 个                             | pi-acp 只公布 8 个 adapter commands，精确重合 5 个     |
 | extension commands | Pi RPC 可发现                     | pi-acp 在 new/load 两处显式过滤                        |
 | GitHub Issues      | enabled                           | `DEC-001` accepted；总控 issue `#1`                    |
@@ -156,7 +156,7 @@ commands 宣称为稳定支持。
 | `C0.1` | tracker 合入仓库并决定 Issues 策略                                | `in_review` | `DEC-001`                 | `G0`      |
 | `C0.2` | 固定 compatibility tuple 与受测版本窗口                           | `in_review` | —                         | `G0`      |
 | `C0.3` | CI 跑 typecheck/lint/unit/build 和 E2E 基础矩阵                   | `proposed`  | `C0.2`                    | `G0`      |
-| `C0.4` | 定义 command compatibility schema                                 | `proposed`  | `DEC-003`                 | `G0`      |
+| `C0.4` | 定义 command compatibility schema                                 | `in_review` | `DEC-003`                 | `G0`      |
 | `C0.5` | raw ACP + strict-client harness                                   | `proposed`  | `DEC-005`                 | `G0`      |
 | `C0.6` | 建立真实 Pi fixture extension pack                                | `proposed`  | `C0.5`                    | `G0`      |
 | `C0.7` | 记录当前失败基线和 immutable transcripts                          | `proposed`  | `C0.3`, `C0.6`            | `G0`      |
@@ -227,7 +227,21 @@ commands 宣称为稳定支持。
 [`test/e2e/compatibility-matrix.json`](../../test/e2e/compatibility-matrix.json)
 和 `test/unit/compatibility-matrix.test.ts`。
 
-#### `C0.3–C0.7` Harness 与失败基线
+#### `C0.4` Command compatibility schema
+
+- [x] 冻结 source、compatibility、execution、exposure、interaction 和 evidence vocabulary。
+- [x] `tui-only` 永远 hidden；`unknown` 不得 stable；stable 必须有 headless tier 和证据。
+- [x] 默认曝光策略实现 `DEC-003`，unknown 只能通过显式实验路径并携带 warning。
+- [x] ACP metadata 只导出 opaque ID/tier，不导出本地路径或 evidence 细节。
+- [x] Zod contract、JSON Schema companion、文档和 unit tests 使用同一 vocabulary。
+
+证据：
+[`COMMAND_SCHEMA.md`](COMMAND_SCHEMA.md)、
+[`command-compatibility.schema.json`](command-compatibility.schema.json)、
+`src/acp/command-compatibility.ts`
+和 `test/unit/command-compatibility.test.ts`。
+
+#### `C0.3, C0.5–C0.7` Harness 与失败基线
 
 - [ ] CI 分别运行 `typecheck`, `lint`, `test`, `build`。
 - [ ] E2E 使用真实 Pi 子进程，不只使用 `FakePiRpcProcess`。

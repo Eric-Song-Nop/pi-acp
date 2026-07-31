@@ -1,0 +1,266 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/Eric-Song-Nop/pi-acp/blob/main/docs/command-compatibility/command-compatibility.schema.json",
+  "title": "pi-acp command compatibility entry",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "id",
+    "name",
+    "source",
+    "sourceId",
+    "compatibility",
+    "execution",
+    "exposure",
+    "interactions",
+    "evidence"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "const": 1
+    },
+    "id": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9-]*(?::[a-z0-9][a-z0-9._-]*){2,}$"
+    },
+    "name": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+    },
+    "source": {
+      "$ref": "#/$defs/source"
+    },
+    "sourceId": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9-]*:[a-z0-9][a-z0-9._-]{0,127}$"
+    },
+    "compatibility": {
+      "$ref": "#/$defs/compatibility"
+    },
+    "execution": {
+      "$ref": "#/$defs/execution"
+    },
+    "exposure": {
+      "$ref": "#/$defs/exposure"
+    },
+    "interactions": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "$ref": "#/$defs/interaction"
+      }
+    },
+    "evidence": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/evidence"
+      }
+    },
+    "description": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 512
+    },
+    "argumentHint": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+    },
+    "warning": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 512
+    }
+  },
+  "$defs": {
+    "source": {
+      "enum": ["adapter", "pi-builtin", "extension", "prompt", "skill"]
+    },
+    "compatibility": {
+      "enum": ["rpc-native", "basic-dialog", "external-ui", "tui-only", "unknown"]
+    },
+    "execution": {
+      "enum": ["local", "agent", "session", "unknown"]
+    },
+    "exposure": {
+      "enum": ["stable", "experimental", "hidden"]
+    },
+    "interaction": {
+      "enum": ["notify", "select", "confirm", "input", "editor", "external-url", "custom-tui"]
+    },
+    "evidenceKind": {
+      "enum": ["fixture", "unit", "e2e", "manual", "upstream"]
+    },
+    "evidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "ref"],
+      "properties": {
+        "kind": {
+          "$ref": "#/$defs/evidenceKind"
+        },
+        "ref": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512
+        },
+        "verifiedAgainst": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512
+        }
+      }
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "compatibility": {
+            "const": "tui-only"
+          }
+        },
+        "required": ["compatibility"]
+      },
+      "then": {
+        "properties": {
+          "exposure": {
+            "const": "hidden"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "compatibility": {
+            "const": "unknown"
+          }
+        },
+        "required": ["compatibility"]
+      },
+      "then": {
+        "properties": {
+          "exposure": {
+            "enum": ["experimental", "hidden"]
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "compatibility": {
+            "const": "unknown"
+          },
+          "exposure": {
+            "const": "experimental"
+          }
+        },
+        "required": ["compatibility", "exposure"]
+      },
+      "then": {
+        "required": ["warning"]
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "exposure": {
+            "const": "stable"
+          }
+        },
+        "required": ["exposure"]
+      },
+      "then": {
+        "properties": {
+          "compatibility": {
+            "enum": ["rpc-native", "basic-dialog", "external-ui"]
+          },
+          "evidence": {
+            "minItems": 1
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "compatibility": {
+            "const": "rpc-native"
+          }
+        },
+        "required": ["compatibility"]
+      },
+      "then": {
+        "properties": {
+          "interactions": {
+            "items": {
+              "const": "notify"
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "compatibility": {
+            "const": "basic-dialog"
+          }
+        },
+        "required": ["compatibility"]
+      },
+      "then": {
+        "properties": {
+          "interactions": {
+            "contains": {
+              "enum": ["select", "confirm", "input", "editor"]
+            },
+            "minContains": 1
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "compatibility": {
+            "const": "external-ui"
+          }
+        },
+        "required": ["compatibility"]
+      },
+      "then": {
+        "properties": {
+          "interactions": {
+            "contains": {
+              "const": "external-url"
+            },
+            "minContains": 1
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "interactions": {
+            "contains": {
+              "const": "custom-tui"
+            }
+          }
+        },
+        "required": ["interactions"]
+      },
+      "then": {
+        "properties": {
+          "compatibility": {
+            "const": "tui-only"
+          }
+        }
+      }
+    }
+  ]
+}
