@@ -10,6 +10,10 @@ This is an MVP-style adapter intended to be useful today and easy to iterate on.
 
 Expect some minor breaking changes.
 
+The long-term implementation status for headless Pi command and extension
+compatibility is maintained in the
+[command compatibility tracker](docs/command-compatibility/TRACKER.md).
+
 ## Features
 
 - Streams assistant output as ACP `agent_message_chunk`
@@ -34,11 +38,11 @@ Expect some minor breaking changes.
 Make sure pi is installed
 
 ```bash
-npm install -g @earendil-works/pi-coding-agent
+npm install -g @earendil-works/pi-coding-agent@0.83.0
 ```
 
-- Node.js 22+
-- `pi` v0.80.4+ installed and available on your `PATH` (the adapter runs the `pi` executable)
+- Node.js 22.19+
+- `pi` v0.80.5–0.83.0 installed and available on your `PATH` (the adapter runs the `pi` executable). This is the target test window, not a completed compatibility claim; full certification is gated by G5. Versions outside the window are best effort; see the [compatibility baseline](docs/command-compatibility/BASELINE.md).
 - Configure `pi` separately for your model providers/API keys
 
 ## Install
