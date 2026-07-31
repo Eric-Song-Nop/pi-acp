@@ -41,8 +41,8 @@ Make sure pi is installed
 npm install -g @earendil-works/pi-coding-agent
 ```
 
-- Node.js 22+
-- `pi` v0.80.4+ installed and available on your `PATH` (the adapter runs the `pi` executable)
+- Node.js 22.19+
+- `pi` v0.80.5–0.83.0 installed and available on your `PATH` (the adapter runs the `pi` executable). Versions outside this validation window are best effort; see the [compatibility baseline](docs/command-compatibility/BASELINE.md).
 - Configure `pi` separately for your model providers/API keys
 
 ## Install

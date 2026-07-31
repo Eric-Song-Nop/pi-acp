@@ -1,0 +1,64 @@
+{
+  "schemaVersion": 1,
+  "planId": "PACP-CMD-2026-01",
+  "recordedAt": "2026-07-31",
+  "e2eStatus": "planned",
+  "adapter": {
+    "package": "pi-acp",
+    "version": "0.0.33",
+    "baselineSha": "d1cffc047ab37a096ee70ca39cfc1de463db8d12"
+  },
+  "pi": {
+    "package": "@earendil-works/pi-coding-agent",
+    "minimumVersion": "0.80.5",
+    "minimumGitHead": "cc62baa442b5c0333923fdfdcc1d7264f445b5b0",
+    "baselineVersion": "0.83.0",
+    "baselineGitHead": "845d6ff1f6643aba440341cce877ce1c43ebbc39",
+    "headRef": "main",
+    "outsideWindow": "best-effort"
+  },
+  "acp": {
+    "protocolVersion": 1,
+    "sdkPackage": "@agentclientprotocol/sdk",
+    "sdkVersion": "0.26.0",
+    "sdkGitHead": "73bc30649b650de320340c782733bf69a545bd28"
+  },
+  "node": {
+    "minimumVersion": "22.19.0",
+    "baselineVersion": "24.18.1",
+    "recordedVersion": "26.5.0"
+  },
+  "clients": {
+    "zed": {
+      "version": "1.9.0",
+      "build": "20260701.153843",
+      "repository": "zed-industries/zed",
+      "ref": "v1.9.0",
+      "commit": "ced90fc636c4ede05402befc38a63bae7fd741bd",
+      "status": "planned",
+      "verification": "manual"
+    },
+    "nonZed": {
+      "name": "CodeCompanion.nvim",
+      "repository": "olimorris/codecompanion.nvim",
+      "version": "19.21.0",
+      "ref": "v19.21.0",
+      "commit": "cedbead815fb435026daa63a487bb69260c1cf69",
+      "status": "planned",
+      "verification": "manual"
+    }
+  },
+  "dependencyAudit": {
+    "runtime": {
+      "moderate": 0,
+      "high": 0,
+      "critical": 0
+    },
+    "development": {
+      "moderate": 1,
+      "high": 6,
+      "critical": 0
+    },
+    "followUpCheckpoint": "C5.8"
+  }
+}
