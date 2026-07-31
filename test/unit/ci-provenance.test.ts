@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
+import { join } from 'node:path'
 import test from 'node:test'
-import { parseArgs } from '../../scripts/check-ci-provenance.js'
+import { parseArgs, sanitizedCommandEnvironment } from '../../scripts/check-ci-provenance.js'
 import {
   assertAuditSnapshot,
   assertExactToolchain,
@@ -97,6 +98,18 @@ test('C0.3 provenance binds the exact clean checkout and strict CLI input', () =
   assert.throws(() => assertGitCheckout(EXPECTED_SHA, EXPECTED_SHA, '?? generated.json\n'), /clean checkout/u)
   assert.throws(() => assertGitCheckout(EXPECTED_SHA, EXPECTED_SHA, ' '), /clean checkout/u)
   assert.throws(() => assertGitCheckout('not-a-sha', EXPECTED_SHA, ''))
+})
+
+test('C0.3 npm subprocesses use distinct isolated user and global configuration', () => {
+  const cacheDir = join('/tmp', 'c0.3-provenance-test')
+  const env = sanitizedCommandEnvironment(cacheDir)
+
+  assert.equal(env.npm_config_userconfig, join(cacheDir, 'npm-userconfig'))
+  assert.equal(env.npm_config_globalconfig, join(cacheDir, 'npm-globalconfig'))
+  assert.notEqual(env.npm_config_userconfig, env.npm_config_globalconfig)
+  assert.equal(env.npm_config_registry, 'https://registry.npmjs.org/')
+  assert.equal(env.GIT_CONFIG_GLOBAL, '/dev/null')
+  assert.equal(Object.hasOwn(env, 'GITHUB_TOKEN'), false)
 })
 
 test('C0.3 provenance canonicalizes GitHub event and run identities without credentials', () => {

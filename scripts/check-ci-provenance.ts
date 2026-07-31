@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
 import { execFile } from 'node:child_process'
-import { mkdir, readFile } from 'node:fs/promises'
+import { rmSync } from 'node:fs'
+import { mkdtemp, readFile, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { isAbsolute, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -47,7 +48,7 @@ export function parseArgs(argv: readonly string[]): CliOptions {
   return { expectedAdapterSha: argv[1] }
 }
 
-function sanitizedCommandEnvironment(cacheDir: string): NodeJS.ProcessEnv {
+export function sanitizedCommandEnvironment(cacheDir: string): NodeJS.ProcessEnv {
   return {
     PATH: process.env.PATH,
     HOME: cacheDir,
@@ -61,8 +62,8 @@ function sanitizedCommandEnvironment(cacheDir: string): NodeJS.ProcessEnv {
     GIT_TERMINAL_PROMPT: '0',
     GIT_ASKPASS: '',
     npm_config_registry: 'https://registry.npmjs.org/',
-    npm_config_userconfig: '/dev/null',
-    npm_config_globalconfig: '/dev/null',
+    npm_config_userconfig: join(cacheDir, 'npm-userconfig'),
+    npm_config_globalconfig: join(cacheDir, 'npm-globalconfig'),
     npm_config_cache: join(cacheDir, 'npm-cache'),
     npm_config_fund: 'false',
     npm_config_update_notifier: 'false'
@@ -192,9 +193,13 @@ async function main(): Promise<void> {
   const matrix = readCompatibilityMatrix()
   const cacheDir =
     process.env.RUNNER_TEMP && isAbsolute(process.env.RUNNER_TEMP)
-      ? join(process.env.RUNNER_TEMP, 'pi-acp-c0.3-provenance')
-      : join(tmpdir(), 'pi-acp-c0.3-provenance')
-  await mkdir(cacheDir, { recursive: true, mode: 0o700 })
+      ? await mkdtemp(join(process.env.RUNNER_TEMP, 'pi-acp-c0.3-provenance-'))
+      : await mkdtemp(join(tmpdir(), 'pi-acp-c0.3-provenance-'))
+  process.once('exit', () => rmSync(cacheDir, { recursive: true, force: true }))
+  await Promise.all([
+    writeFile(join(cacheDir, 'npm-userconfig'), '', { encoding: 'utf8', flag: 'wx', mode: 0o600 }),
+    writeFile(join(cacheDir, 'npm-globalconfig'), '', { encoding: 'utf8', flag: 'wx', mode: 0o600 })
+  ])
   const env = sanitizedCommandEnvironment(cacheDir)
 
   const npmVersion = (await runCommand('npm', ['--version'], { env })).stdout.trim()
