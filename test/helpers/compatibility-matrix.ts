@@ -3,7 +3,16 @@ import { z } from 'zod'
 
 const exactVersionSchema = z.string().regex(/^\d+\.\d+\.\d+$/)
 const gitShaSchema = z.string().regex(/^[0-9a-f]{40}$/)
-const verificationStatusSchema = z.enum(['planned', 'in-progress', 'verified', 'regressed'])
+const verificationStatusSchema = z.enum([
+  'todo',
+  'in_progress',
+  'blocked',
+  'in_review',
+  'verified',
+  'regressed',
+  'waived',
+  'retired'
+])
 const auditCountsSchema = z
   .object({
     moderate: z.number().int().nonnegative(),

@@ -37,8 +37,29 @@ test('compatibility matrix strictly matches locked package metadata', () => {
   assert.equal(matrix.acp.sdkVersion, lock.packages['node_modules/@agentclientprotocol/sdk']?.version)
 })
 
-test('compatibility matrix rejects unknown fields and malformed source identities', () => {
+test('compatibility matrix accepts only canonical verification statuses and valid source identities', () => {
   const matrix = readCompatibilityMatrix()
+  const verificationStatuses = [
+    'todo',
+    'in_progress',
+    'blocked',
+    'in_review',
+    'verified',
+    'regressed',
+    'waived',
+    'retired'
+  ] as const
+
+  for (const status of verificationStatuses) {
+    assert.equal(
+      compatibilityMatrixSchema.safeParse({
+        ...matrix,
+        e2eStatus: status
+      }).success,
+      true,
+      `verification status ${status} must be accepted`
+    )
+  }
 
   assert.equal(
     compatibilityMatrixSchema.safeParse({
@@ -57,34 +78,40 @@ test('compatibility matrix rejects unknown fields and malformed source identitie
     }).success,
     false
   )
+  assert.equal(
+    compatibilityMatrixSchema.safeParse({
+      ...matrix,
+      e2eStatus: 'planned'
+    }).success,
+    false
+  )
 })
 
-test('compatibility docs contain every pinned version and source identity', () => {
+test('compatibility docs bind every pin and status to its canonical role', () => {
   const matrix = readCompatibilityMatrix()
   const baseline = readText('../../docs/command-compatibility/BASELINE.md')
   const readme = readText('../../README.md')
 
-  const baselinePins = [
-    matrix.adapter.version,
-    matrix.adapter.baselineSha,
-    matrix.pi.minimumVersion,
-    matrix.pi.minimumGitHead,
-    matrix.pi.baselineVersion,
-    matrix.pi.baselineGitHead,
-    matrix.acp.sdkVersion,
-    matrix.acp.sdkGitHead,
-    matrix.node.minimumVersion,
-    matrix.node.baselineVersion,
-    matrix.node.recordedVersion,
-    matrix.clients.zed.version,
-    matrix.clients.zed.build,
-    matrix.clients.zed.commit,
-    matrix.clients.nonZed.version,
-    matrix.clients.nonZed.commit
+  const labeledBaselineLines = [
+    `pi-acp ${matrix.adapter.version} @ ${matrix.adapter.baselineSha}`,
+    `× Pi ${matrix.pi.minimumVersion} (minimum) / ${matrix.pi.baselineVersion} (baseline)`,
+    `× ACP protocol ${matrix.acp.protocolVersion} / TypeScript SDK ${matrix.acp.sdkVersion}`,
+    `× Node ${matrix.node.minimumVersion} minimum / ${matrix.node.baselineVersion} baseline / ${matrix.node.recordedVersion} recorded`,
+    `× Zed ${matrix.clients.zed.version} build ${matrix.clients.zed.build}`,
+    `× ${matrix.clients.nonZed.name} ${matrix.clients.nonZed.version} @ ${matrix.clients.nonZed.commit}`,
+    `- \`e2eStatus\`: \`${matrix.e2eStatus}\``,
+    `- \`clients.zed.status\`: \`${matrix.clients.zed.status}\` (\`${matrix.clients.zed.verification}\`)`,
+    `- \`clients.nonZed.status\`: \`${matrix.clients.nonZed.status}\` (\`${matrix.clients.nonZed.verification}\`)`,
+    `- Pi \`${matrix.pi.minimumVersion}\`: \`${matrix.pi.minimumGitHead}\``,
+    `- Pi \`${matrix.pi.baselineVersion}\`: \`${matrix.pi.baselineGitHead}\``,
+    `- ACP SDK \`${matrix.acp.sdkVersion}\`: \`${matrix.acp.sdkGitHead}\``,
+    `- Zed \`${matrix.clients.zed.ref}\`: \`${matrix.clients.zed.commit}\``,
+    `- ${matrix.clients.nonZed.name} \`${matrix.clients.nonZed.ref}\`: \`${matrix.clients.nonZed.commit}\``
   ]
 
-  for (const pin of baselinePins) {
-    assert.ok(baseline.includes(pin), `BASELINE.md must contain ${pin}`)
+  const baselineLines = new Set(baseline.split(/\r?\n/))
+  for (const expectedLine of labeledBaselineLines) {
+    assert.ok(baselineLines.has(expectedLine), `BASELINE.md must bind its canonical role as: ${expectedLine}`)
   }
 
   assert.ok(
