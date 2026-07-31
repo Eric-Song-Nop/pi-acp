@@ -2,6 +2,7 @@ import { AgentSideConnection, PROTOCOL_VERSION, ndJsonStream } from '@agentclien
 import { spawn } from 'node:child_process'
 import { writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
+import { createInterface } from 'node:readline'
 import { Readable as NodeReadable } from 'node:stream'
 
 const mode = process.argv.find(argument => argument.startsWith('--mode='))?.slice('--mode='.length) ?? 'default'
@@ -23,7 +24,8 @@ if (process.env.ACP_HARNESS_PARENT_MARKER !== undefined) {
   process.stderr.write(`unexpected inherited marker: ${process.env.ACP_HARNESS_PARENT_MARKER}\n`)
 }
 
-const stubbornMode = mode === 'hang-prompt' || mode === 'close-output-on-prompt' || malformedPayloads.has(mode)
+const stubbornMode =
+  mode === 'hang-prompt' || mode === 'timeout-race' || mode === 'close-output-on-prompt' || malformedPayloads.has(mode)
 if (stubbornMode) {
   if (process.platform !== 'win32') process.on('SIGTERM', () => {})
   setInterval(() => {}, 1_000)
@@ -50,8 +52,6 @@ const output = new WritableStream({
     }
   }
 })
-const input = NodeReadable.toWeb(process.stdin)
-const stream = ndJsonStream(output, input)
 
 class CatalogAgent {
   constructor(connection) {
@@ -188,9 +188,149 @@ class CatalogAgent {
   }
 }
 
+async function runTimeoutRaceAgent() {
+  let writeQueue = Promise.resolve()
+  let nextSessionId = 1
+  let latePrompt
+  const send = message => {
+    writeQueue = writeQueue.then(() => writeStdout(`${JSON.stringify(message)}\n`))
+    return writeQueue
+  }
+  const handleMessage = async message => {
+    if (message?.jsonrpc !== '2.0' || typeof message.method !== 'string' || !Object.hasOwn(message, 'id')) return
+
+    if (message.method === 'initialize') {
+      await send({
+        jsonrpc: '2.0',
+        id: message.id,
+        result: {
+          protocolVersion: PROTOCOL_VERSION,
+          agentCapabilities: {
+            loadSession: false
+          }
+        }
+      })
+      return
+    }
+
+    if (message.method === 'session/new') {
+      const sessionId = `fixture-session-${nextSessionId}`
+      nextSessionId += 1
+      await send({
+        jsonrpc: '2.0',
+        id: message.id,
+        result: { sessionId }
+      })
+      await send({
+        jsonrpc: '2.0',
+        method: 'session/update',
+        params: {
+          sessionId,
+          update: {
+            sessionUpdate: 'available_commands_update',
+            availableCommands: [
+              {
+                name: 'alpha',
+                description: 'Fixture command /alpha',
+                input: {
+                  hint: 'arguments'
+                }
+              }
+            ]
+          }
+        }
+      })
+      return
+    }
+
+    if (message.method !== 'session/prompt') return
+    const promptText = Array.isArray(message.params?.prompt)
+      ? message.params.prompt
+          .filter(content => content?.type === 'text' && typeof content.text === 'string')
+          .map(content => content.text)
+          .join('')
+      : ''
+    if (!promptText.includes('late')) return
+
+    latePrompt = message
+    await send({
+      jsonrpc: '2.0',
+      method: 'session/update',
+      params: {
+        sessionId: message.params.sessionId,
+        update: {
+          sessionUpdate: 'agent_message_chunk',
+          content: {
+            type: 'text',
+            text: `armed:${promptText}`
+          }
+        }
+      }
+    })
+  }
+
+  const handlers = new Set()
+  const lines = createInterface({
+    input: process.stdin,
+    crlfDelay: Number.POSITIVE_INFINITY
+  })
+  for await (const line of lines) {
+    if (line.length === 0) continue
+    try {
+      const message = JSON.parse(line)
+      const handler = handleMessage(message)
+      handlers.add(handler)
+      void handler
+        .catch(error => {
+          process.stderr.write(`timeout-race message failed: ${String(error)}\n`)
+        })
+        .finally(() => {
+          handlers.delete(handler)
+        })
+    } catch (error) {
+      process.stderr.write(`timeout-race parse failed: ${String(error)}\n`)
+    }
+  }
+
+  await Promise.allSettled([...handlers])
+  await new Promise(resolve => {
+    process.stderr.write('TIMEOUT-RACE-EOF\n', resolve)
+  })
+  if (latePrompt) {
+    await send({
+      jsonrpc: '2.0',
+      method: 'session/update',
+      params: {
+        sessionId: latePrompt.params.sessionId,
+        update: {
+          sessionUpdate: 'available_commands_update',
+          availableCommands: [
+            {
+              name: 'late-poison',
+              description: 'Must never enter retained client state',
+              input: {
+                hint: 'arguments'
+              }
+            }
+          ]
+        }
+      }
+    })
+    await send({
+      jsonrpc: '2.0',
+      id: latePrompt.id,
+      result: { stopReason: 'end_turn' }
+    })
+  }
+}
+
 if (malformedPayloads.has(mode)) {
   await writeStdout(`${JSON.stringify(malformedPayload)}\n`)
+} else if (mode === 'timeout-race') {
+  await runTimeoutRaceAgent()
 } else {
+  const input = NodeReadable.toWeb(process.stdin)
+  const stream = ndJsonStream(output, input)
   new AgentSideConnection(connection => new CatalogAgent(connection), stream)
 }
 

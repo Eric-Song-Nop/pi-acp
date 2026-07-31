@@ -7,6 +7,7 @@ import { performance } from 'node:perf_hooks'
 import test from 'node:test'
 import { fileURLToPath } from 'node:url'
 import {
+  AcpClientLifecycleError,
   AcpOperationTimeoutError,
   AcpMalformedMessageError,
   AcpProcessClient,
@@ -29,6 +30,7 @@ type FixtureOptions = {
     | 'default'
     | 'no-catalog'
     | 'hang-prompt'
+    | 'timeout-race'
     | 'exit-on-prompt'
     | 'close-output-on-prompt'
     | 'malformed-primitive'
@@ -621,6 +623,179 @@ test('prompt timeout tears down the process and close remains idempotent', { tim
     assert.equal(firstExit.signal, 'SIGKILL')
     assert.equal(isProcessRunning(descendantPid), false)
   }
+})
+
+test('fatal prompt timeout rejects concurrent work and quarantines late updates', { timeout: 15_000 }, async t => {
+  const fixture = await startFixture({
+    mode: 'timeout-race',
+    client: {
+      requestTimeoutMs: 8_000,
+      updateTimeoutMs: 8_000,
+      shutdownTimeoutMs: 500,
+      clientBehavior: 'strict'
+    }
+  })
+  t.after(fixture.cleanup)
+
+  await fixture.client.initialize()
+  const sessionA = await fixture.client.newSession({ cwd: fixture.cwd, mcpServers: [] })
+  const sessionB = await fixture.client.newSession({ cwd: fixture.cwd, mcpServers: [] })
+  await fixture.client.waitForSessionUpdate(
+    notification => isCatalogUpdate(notification) && notification.sessionId === sessionA.sessionId
+  )
+  await fixture.client.waitForSessionUpdate(
+    notification => isCatalogUpdate(notification) && notification.sessionId === sessionB.sessionId
+  )
+
+  const strict = new StrictCatalogClient(fixture.client, 8_000)
+  t.after(() => strict.dispose())
+  assert.deepEqual(
+    (await strict.waitForCatalog(sessionB.sessionId)).commands.map(command => command.name),
+    ['alpha']
+  )
+
+  let lateObserverCalls = 0
+  const unsubscribe = fixture.client.subscribeSessionUpdates(notification => {
+    if (
+      notification.sessionId === sessionB.sessionId &&
+      notification.update.sessionUpdate === 'available_commands_update' &&
+      notification.update.availableCommands.some(command => command.name === 'late-poison')
+    ) {
+      lateObserverCalls += 1
+    }
+  }, false)
+  t.after(unsubscribe)
+
+  const beforePrompts = fixture.client.retainedSessionUpdateCount
+  const armedB = fixture.client.waitForSessionUpdate(
+    notification =>
+      notification.sessionId === sessionB.sessionId &&
+      notification.update.sessionUpdate === 'agent_message_chunk' &&
+      notification.update.content.type === 'text' &&
+      notification.update.content.text === 'armed:fixture-late-b',
+    { afterIndex: beforePrompts, timeoutMs: 8_000 }
+  )
+  const concurrentPrompt = fixture.client.prompt(
+    {
+      sessionId: sessionB.sessionId,
+      prompt: [{ type: 'text', text: 'fixture-late-b' }]
+    },
+    { timeoutMs: 8_000 }
+  )
+  const concurrentAssertion = assert.rejects(concurrentPrompt, (error: unknown) => {
+    assert.ok(error instanceof AcpClientLifecycleError)
+    assert.equal(error.code, 'ACP_CLIENT_FATAL')
+    assert.equal(error.operation, 'session/prompt')
+    assert.ok(error.fatalReason instanceof AcpOperationTimeoutError)
+    return true
+  })
+
+  await armedB
+  const retainedBeforeFatalBoundary = fixture.client.retainedSessionUpdateCount
+  const lateCatalog = fixture.client.waitForSessionUpdate(
+    notification =>
+      notification.sessionId === sessionB.sessionId &&
+      notification.update.sessionUpdate === 'available_commands_update' &&
+      notification.update.availableCommands.some(command => command.name === 'late-poison'),
+    { afterIndex: retainedBeforeFatalBoundary, timeoutMs: 8_000 }
+  )
+  const lateCatalogAssertion = assert.rejects(lateCatalog, (error: unknown) => {
+    assert.ok(error instanceof AcpClientLifecycleError)
+    assert.equal(error.operation, 'session/update')
+    assert.ok(error.fatalReason instanceof AcpOperationTimeoutError)
+    return true
+  })
+  const timedOutPrompt = fixture.client.prompt(
+    {
+      sessionId: sessionA.sessionId,
+      prompt: [{ type: 'text', text: 'fixture-timeout-a' }]
+    },
+    { timeoutMs: 1_000 }
+  )
+  const timedOutAssertion = assert.rejects(timedOutPrompt, (error: unknown) => {
+    assert.ok(error instanceof AcpOperationTimeoutError)
+    assert.equal(error.operation, 'session/prompt')
+    assert.equal(error.timeoutMs, 1_000)
+    assert.equal(error.teardownError, undefined)
+    assert.match(error.transcript, /"kind":"process_exit"/)
+    return true
+  })
+
+  await Promise.all([concurrentAssertion, lateCatalogAssertion])
+  assert.equal(fixture.client.isRunning, false)
+  await timedOutAssertion
+  const exit = await fixture.client.closed
+
+  assert.equal(lateObserverCalls, 0)
+  assert.equal(fixture.client.retainedSessionUpdateCount, retainedBeforeFatalBoundary)
+  assert.deepEqual(
+    strict.catalog(sessionB.sessionId)?.commands.map(command => command.name),
+    ['alpha']
+  )
+  assert.equal(strict.catalog(sessionB.sessionId)?.revision, 1)
+
+  const replayedStrict = new StrictCatalogClient(fixture.client, 50)
+  try {
+    assert.deepEqual(
+      replayedStrict.catalog(sessionB.sessionId)?.commands.map(command => command.name),
+      ['alpha']
+    )
+    assert.equal(replayedStrict.catalog(sessionB.sessionId)?.revision, 1)
+  } finally {
+    replayedStrict.dispose()
+  }
+  await assert.rejects(
+    fixture.client.waitForSessionUpdate(
+      notification =>
+        notification.update.sessionUpdate === 'available_commands_update' &&
+        notification.update.availableCommands.some(command => command.name === 'late-poison'),
+      { afterIndex: retainedBeforeFatalBoundary }
+    ),
+    AcpClientLifecycleError
+  )
+
+  const transcript = fixture.client.transcript()
+  const lateWireUpdates = transcript.filter(entry => {
+    if (
+      entry.kind !== 'message' ||
+      entry.direction !== 'agent_to_client' ||
+      !('method' in entry.message) ||
+      entry.message.method !== 'session/update' ||
+      !('params' in entry.message)
+    ) {
+      return false
+    }
+    return JSON.stringify(entry.message.params).includes('late-poison')
+  })
+  assert.equal(lateWireUpdates.length, 1)
+
+  const lateRequest = transcript.find(entry => {
+    if (
+      entry.kind !== 'message' ||
+      entry.direction !== 'client_to_agent' ||
+      !('method' in entry.message) ||
+      entry.message.method !== 'session/prompt' ||
+      !('params' in entry.message)
+    ) {
+      return false
+    }
+    return JSON.stringify(entry.message.params).includes(sessionB.sessionId)
+  })
+  assert.ok(lateRequest?.kind === 'message' && 'id' in lateRequest.message)
+  const lateRequestId = lateRequest.message.id
+  const lateResponses = transcript.filter(
+    entry =>
+      entry.kind === 'message' &&
+      entry.direction === 'agent_to_client' &&
+      'id' in entry.message &&
+      entry.message.id === lateRequestId &&
+      'result' in entry.message
+  )
+  assert.equal(lateResponses.length, 1)
+  assert.match(JSON.stringify(lateResponses[0]), /"stopReason":"end_turn"/)
+  assert.match(exit.stderrTail, /TIMEOUT-RACE-EOF/)
+  if (process.platform !== 'win32') assert.equal(exit.signal, 'SIGKILL')
+  assert.equal(transcript.at(-1)?.kind, 'process_exit')
 })
 
 test('early child exit reports code and bounded stderr diagnostics', { timeout: TEST_TIMEOUT_MS }, async t => {

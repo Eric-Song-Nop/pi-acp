@@ -105,6 +105,19 @@ export class AcpOperationTimeoutError extends Error {
   transcript: string
 }
 
+export class AcpClientLifecycleError extends Error {
+  readonly code = 'ACP_CLIENT_FATAL'
+
+  constructor(
+    readonly operation: string,
+    readonly fatalReason: Error,
+    readonly transcript: string
+  ) {
+    super(`ACP operation ${operation} was aborted by fatal client lifecycle: ${fatalReason.message}`)
+    this.name = 'AcpClientLifecycleError'
+  }
+}
+
 export class AcpUpdateTimeoutError extends Error {
   constructor(
     readonly timeoutMs: number,
@@ -401,6 +414,7 @@ export class AcpProcessClient {
   private readonly sessionUpdates: SessionNotification[] = []
   private readonly updateListeners = new Set<SessionUpdateListener>()
   private readonly exitListeners = new Set<ProcessExitListener>()
+  private readonly fatalLifecycleController = new AbortController()
   private readonly closedPromise: Promise<AcpProcessExit>
   private resolveClosed!: (exit: AcpProcessExit) => void
   private rejectClosed!: (error: Error) => void
@@ -495,6 +509,9 @@ export class AcpProcessClient {
     const client: Client = {
       requestPermission: async () => ({ outcome: { outcome: 'cancelled' } }),
       sessionUpdate: async notification => {
+        if (this.fatalLifecycleController.signal.aborted || this.closePromise || this.exitInfo) {
+          return
+        }
         const retained = clone(notification)
         this.sessionUpdates.push(retained)
         for (const listener of [...this.updateListeners]) {
@@ -508,8 +525,11 @@ export class AcpProcessClient {
       'abort',
       () => {
         const reason = this.connection.signal.reason
-        if (reason instanceof AcpMalformedMessageError) this.malformedMessageError = reason
-        if (!this.closePromise && !this.exitInfo) void this.close().catch(() => undefined)
+        if (reason instanceof AcpMalformedMessageError) {
+          this.malformedMessageError = reason
+          this.beginFatalLifecycle(reason)
+        }
+        if (!this.closePromise && !this.exitInfo) void this.ensureClose().catch(() => undefined)
       },
       { once: true }
     )
@@ -524,7 +544,12 @@ export class AcpProcessClient {
   }
 
   get isRunning(): boolean {
-    return this.exitInfo === undefined && this.child.exitCode === null && this.child.signalCode === null
+    return (
+      !this.fatalLifecycleController.signal.aborted &&
+      this.exitInfo === undefined &&
+      this.child.exitCode === null &&
+      this.child.signalCode === null
+    )
   }
 
   get retainedSessionUpdateCount(): number {
@@ -576,6 +601,9 @@ export class AcpProcessClient {
     for (const notification of this.sessionUpdates.slice(afterIndex)) {
       if (predicate(clone(notification))) return clone(notification)
     }
+    if (this.fatalLifecycleController.signal.aborted) {
+      throw this.fatalLifecycleReason('session/update')
+    }
     if (this.exitInfo) throw new AcpProcessExitError('session/update', this.exitInfo, this.transcriptNdjson())
 
     const timeoutMs = requirePositiveInteger(options.timeoutMs ?? this.updateTimeoutMs, 'timeoutMs')
@@ -584,12 +612,16 @@ export class AcpProcessClient {
       const exitListener: ProcessExitListener = exit => {
         finish(() => reject(new AcpProcessExitError('session/update', exit, this.transcriptNdjson())))
       }
+      const fatalLifecycleListener = (): void => {
+        finish(() => reject(this.fatalLifecycleReason('session/update')))
+      }
       const finish = (complete: () => void): void => {
         if (settled) return
         settled = true
         clearTimeout(timer)
         this.updateListeners.delete(listener)
         this.exitListeners.delete(exitListener)
+        this.fatalLifecycleController.signal.removeEventListener('abort', fatalLifecycleListener)
         complete()
       }
       const listener: SessionUpdateListener = notification => {
@@ -605,6 +637,7 @@ export class AcpProcessClient {
       }, timeoutMs)
       this.updateListeners.add(listener)
       this.exitListeners.add(exitListener)
+      this.fatalLifecycleController.signal.addEventListener('abort', fatalLifecycleListener, { once: true })
     })
   }
 
@@ -649,6 +682,11 @@ export class AcpProcessClient {
   }
 
   close(): Promise<AcpProcessExit> {
+    this.beginFatalLifecycle(new Error('ACP process client teardown has begun'))
+    return this.ensureClose()
+  }
+
+  private ensureClose(): Promise<AcpProcessExit> {
     this.closePromise ??= this.performClose()
     return this.closePromise
   }
@@ -662,11 +700,20 @@ export class AcpProcessClient {
     invoke: () => Promise<T>,
     timeoutMs = this.requestTimeoutMs
   ): Promise<T> {
-    if (this.unusable || this.closePromise || this.connection.signal.aborted || this.exitInfo) {
+    if (
+      this.unusable ||
+      this.closePromise ||
+      this.fatalLifecycleController.signal.aborted ||
+      this.connection.signal.aborted ||
+      this.exitInfo
+    ) {
       let closeError: unknown
-      if (!this.exitInfo && (this.closePromise || this.connection.signal.aborted)) {
+      if (
+        !this.exitInfo &&
+        (this.closePromise || this.fatalLifecycleController.signal.aborted || this.connection.signal.aborted)
+      ) {
         try {
-          await this.close()
+          await this.ensureClose()
         } catch (error) {
           closeError = error
         }
@@ -676,13 +723,21 @@ export class AcpProcessClient {
       }
       if (this.exitInfo) throw new AcpProcessExitError(operation, this.exitInfo, this.transcriptNdjson())
       if (closeError) throw closeError
+      if (this.fatalLifecycleController.signal.aborted) throw this.fatalLifecycleReason(operation)
       throw new Error(`ACP process client is closed and cannot run ${operation}`)
     }
 
     let timeout: NodeJS.Timeout | undefined
+    let fatalLifecycleListener: (() => void) | undefined
     const timeoutPromise = new Promise<never>((_resolve, reject) => {
       timeout = setTimeout(() => {
-        reject(new AcpOperationTimeoutError(operation, timeoutMs, this.transcriptNdjson()))
+        const error = new AcpOperationTimeoutError(operation, timeoutMs, this.transcriptNdjson())
+        if (fatalLifecycleListener) {
+          this.fatalLifecycleController.signal.removeEventListener('abort', fatalLifecycleListener)
+          fatalLifecycleListener = undefined
+        }
+        reject(error)
+        this.beginFatalLifecycle(error)
       }, timeoutMs)
     })
     let exitListener: ProcessExitListener | undefined
@@ -692,9 +747,16 @@ export class AcpProcessClient {
       }
       this.exitListeners.add(exitListener)
     })
+    const fatalLifecyclePromise = new Promise<never>((_resolve, reject) => {
+      fatalLifecycleListener = () => {
+        reject(this.fatalLifecycleReason(operation))
+      }
+      this.fatalLifecycleController.signal.addEventListener('abort', fatalLifecycleListener, { once: true })
+    })
 
     try {
-      const result = await Promise.race([invoke(), timeoutPromise, exitPromise])
+      const result = await Promise.race([invoke(), timeoutPromise, exitPromise, fatalLifecyclePromise])
+      if (this.fatalLifecycleController.signal.aborted) throw this.fatalLifecycleReason(operation)
       if (this.connection.signal.aborted) {
         throw this.connection.signal.reason ?? new Error(`ACP transport closed during ${operation}`)
       }
@@ -702,19 +764,19 @@ export class AcpProcessClient {
     } catch (error) {
       const malformedError = error instanceof AcpMalformedMessageError ? error : this.malformedMessageError
       if (malformedError) {
-        this.unusable = true
+        this.beginFatalLifecycle(malformedError)
         let teardownError: unknown
         try {
-          await this.close()
+          await this.ensureClose()
         } catch (closeError) {
           teardownError = closeError
         }
         throw this.finalizeMalformedMessageError(malformedError, teardownError)
       }
       if (error instanceof AcpOperationTimeoutError) {
-        this.unusable = true
+        this.beginFatalLifecycle(error)
         try {
-          await this.close()
+          await this.ensureClose()
         } catch (teardownError) {
           error.teardownError = teardownError
         }
@@ -723,7 +785,7 @@ export class AcpProcessClient {
         let teardownError: unknown
         if (!this.exitInfo && this.connection.signal.aborted) {
           try {
-            await this.close()
+            await this.ensureClose()
           } catch (closeError) {
             teardownError = closeError
           }
@@ -737,7 +799,26 @@ export class AcpProcessClient {
     } finally {
       if (timeout) clearTimeout(timeout)
       if (exitListener) this.exitListeners.delete(exitListener)
+      if (fatalLifecycleListener) {
+        this.fatalLifecycleController.signal.removeEventListener('abort', fatalLifecycleListener)
+      }
     }
+  }
+
+  private beginFatalLifecycle(reason: Error): void {
+    this.unusable = true
+    if (!this.fatalLifecycleController.signal.aborted) {
+      this.fatalLifecycleController.abort(reason)
+    }
+  }
+
+  private fatalLifecycleReason(operation: string): Error {
+    const reason = this.fatalLifecycleController.signal.reason
+    const fatalReason =
+      reason instanceof Error
+        ? reason
+        : new Error(`ACP process client entered a fatal lifecycle state during ${operation}`)
+    return new AcpClientLifecycleError(operation, fatalReason, this.transcriptNdjson())
   }
 
   private finalizeMalformedMessageError(
@@ -799,7 +880,7 @@ export class AcpProcessClient {
         // Exit delivery must reach every active waiter/operation.
       }
     }
-    if (!this.closePromise) void this.close().catch(() => undefined)
+    if (!this.closePromise) void this.ensureClose().catch(() => undefined)
   }
 
   private async performClose(): Promise<AcpProcessExit> {
@@ -811,16 +892,19 @@ export class AcpProcessClient {
       }
     }
 
-    if (!(await this.waitForProcessTreeExit(this.shutdownTimeoutMs))) {
+    if (!(await this.waitForManagedProcessExit(this.shutdownTimeoutMs))) {
       this.signalProcess('SIGTERM')
     }
-    if (!(await this.waitForProcessTreeExit(this.shutdownTimeoutMs))) {
+    if (!(await this.waitForManagedProcessExit(this.shutdownTimeoutMs))) {
       this.signalProcess('SIGKILL')
     }
-    if (!(await this.waitForProcessTreeExit(this.shutdownTimeoutMs))) {
+    if (!(await this.waitForManagedProcessExit(this.shutdownTimeoutMs))) {
       this.destroyStreams()
       const processError = this.lastProcessError ? `; last process error: ${this.lastProcessError}` : ''
-      const error = new Error(`ACP process tree ${String(this.processId)} did not exit after SIGKILL${processError}`)
+      const managedTarget = process.platform === 'win32' ? 'child process' : 'process group'
+      const error = new Error(
+        `ACP ${managedTarget} ${String(this.processId)} did not exit after SIGKILL${processError}`
+      )
       if (!this.closedSettled) {
         this.closedSettled = true
         this.rejectClosed(error)
@@ -837,7 +921,7 @@ export class AcpProcessClient {
     return exit
   }
 
-  private async waitForProcessTreeExit(timeoutMs: number): Promise<boolean> {
+  private async waitForManagedProcessExit(timeoutMs: number): Promise<boolean> {
     const deadline = Date.now() + timeoutMs
     while (true) {
       if (this.exitInfo && !this.processGroupIsRunning()) return true
