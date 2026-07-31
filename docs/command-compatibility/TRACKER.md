@@ -62,12 +62,12 @@
 
 | 组件               | 已知基线                          | 状态/证据                                              |
 | ------------------ | --------------------------------- | ------------------------------------------------------ |
-| fork               | `Eric-Song-Nop/pi-acp@d1cffc0`    | 与 `svkozak/pi-acp` 主分支差异 `0 0`                   |
+| upstream/fork base | `Eric-Song-Nop/pi-acp@d1cffc0`    | 与 `svkozak/pi-acp` 主分支差异 `0 0`                   |
 | pi-acp package     | `0.0.33`                          | 当前源码基线                                           |
 | ACP SDK            | `@agentclientprotocol/sdk@0.26.0` | 已含 experimental elicitation；升级到 1.x 必须单独进行 |
 | Pi                 | `0.80.5`–`0.83.0`                 | `C0.2` 固定目标窗口；完整兼容性由 `G5` 证明            |
 | Node               | `>=22.19.0`                       | 与受测 Pi 的最低 engine 一致；E2E 单独建矩阵           |
-| existing tests     | 107/107 通过                      | 含 C0.2/C0.4 contract tests；尚不能证明真实插件兼容    |
+| existing tests     | 113/113 通过                      | 当前 C0.5 stacked head；尚不能证明真实插件兼容         |
 | Pi built-ins       | 22 个                             | pi-acp 只公布 8 个 adapter commands，精确重合 5 个     |
 | extension commands | Pi RPC 可发现                     | pi-acp 在 new/load 两处显式过滤                        |
 | GitHub Issues      | enabled                           | `DEC-001` accepted；总控 issue `#1`                    |
@@ -156,8 +156,8 @@ commands 宣称为稳定支持。
 | `C0.1` | tracker 合入仓库并决定 Issues 策略                                | `in_review` | `DEC-001`                 | `G0`      |
 | `C0.2` | 固定 compatibility tuple 与受测版本窗口                           | `in_review` | —                         | `G0`      |
 | `C0.3` | CI 跑 typecheck/lint/unit/build 和 E2E 基础矩阵                   | `proposed`  | `C0.2`                    | `G0`      |
-| `C0.4` | 定义 command compatibility schema                                 | `in_review` | `DEC-003`                 | `G0`      |
-| `C0.5` | raw ACP + strict-client harness                                   | `proposed`  | `DEC-005`                 | `G0`      |
+| `C0.4` | 定义 command compatibility schema                                 | `verified`  | `DEC-003`                 | `G0`      |
+| `C0.5` | raw ACP + strict-client harness                                   | `active`    | `DEC-005`                 | `G0`      |
 | `C0.6` | 建立真实 Pi fixture extension pack                                | `proposed`  | `C0.5`                    | `G0`      |
 | `C0.7` | 记录当前失败基线和 immutable transcripts                          | `proposed`  | `C0.3`, `C0.6`            | `G0`      |
 | `C1.1` | extension stderr/load diagnostics 可见且安全限长                  | `proposed`  | `C0.7`                    | `G1`      |
@@ -243,6 +243,34 @@ commands 宣称为稳定支持。
 [`command-compatibility.schema.json`](command-compatibility.schema.json)、
 `src/acp/command-compatibility.ts`
 和 `test/unit/command-compatibility.test.ts`。
+独立复验固定在
+[PR #3 head `ee05cbb`](https://github.com/Eric-Song-Nop/pi-acp/commit/ee05cbb120264758af3df0b6c738cf7f2051568e)：
+focused `8/8`（含 Node `22.19.0`）、全量 `107/107`、typecheck、lint、build、
+Prettier 与 production audit `0` 全部通过，六条 review threads 全部 resolved。
+
+#### `C0.5` Raw ACP and strict-client harness
+
+- [x] 使用固定 ACP SDK 的 `ClientSideConnection` + NDJSON stream 启动真实子进程；command/cwd 必须为绝对路径，禁用 shell，并要求调用方显式提供 env；本 fixture 提供最小隔离 env。
+- [x] transcript 保留有序 request/response/notification 与最终 process exit；harness 不自动记录 timestamp、PID、env 或 stderr，caller metadata 仅接受 canonical JSON-safe 值且必须预先脱敏。
+- [x] operation、session update、catalog wait 和 test case 都有硬 timeout；operation timeout 完成有界 teardown 后再返回最终 transcript。
+- [x] cleanup 按 stdin EOF → SIGTERM → SIGKILL 执行且幂等；POSIX 会清理 detached process group，并以 TERM-resistant descendant 回归证明。
+- [x] session updates 保留 immutable replay；predicate 失败不会破坏缓存或退化成假 timeout，child exit 会立即结束 update/catalog wait。
+- [x] strict wrapper 不公开 raw transport；每个 session 的目录是全量 replacement（含 empty），未广告 slash command 在任何 prompt write 前本地拒绝。
+- [x] 覆盖 fragmented multibyte NDJSON、early replay、多 session isolation、replacement/empty、raw/strict timeout、transport EOF、early exit、UTF-8 stderr byte cap 和 process-tree cleanup。
+
+证据：
+[`test/helpers/acp-process-client.ts`](../../test/helpers/acp-process-client.ts)、
+[`test/helpers/strict-catalog-client.ts`](../../test/helpers/strict-catalog-client.ts)、
+[`test/fixtures/acp/catalog-agent.mjs`](../../test/fixtures/acp/catalog-agent.mjs)
+和
+[`test/component/acp-client-harness.test.ts`](../../test/component/acp-client-harness.test.ts)。
+Focused harness `6/6`、全量测试 `113/113`、typecheck、lint、build 和 Prettier
+通过。
+
+边界：本 checkpoint 使用 pinned SDK fixture，不等同真实 Pi/provider/client
+认证；真实 Pi 隔离属于 `C0.6`，immutable persisted transcripts 属于 `C0.7`。
+POSIX descendant cleanup 已覆盖；Windows 当前只保证直接 child cleanup，后续
+Windows E2E 必须继续验证或引入 job-object/tree-kill。
 
 #### `C0.3, C0.5–C0.7` Harness 与失败基线
 
@@ -251,7 +279,7 @@ commands 宣称为稳定支持。
 - [ ] 每个 case 使用独立 cwd 和 `PI_CODING_AGENT_DIR`，不读取开发者真实 Pi 配置。
 - [ ] agent-turn fixture 使用 loopback deterministic provider，不消耗真实模型账户。
 - [ ] 阻塞 CI 默认禁止外网；插件、Pi 和客户端版本全部 pin。
-- [ ] strict-client harness 会拒绝未出现在 `available_commands_update` 的 slash command。
+- [x] strict-client harness 会拒绝未出现在 `available_commands_update` 的 slash command。
 - [ ] 所有可能挂起的用例有硬 timeout，并保存 NDJSON transcript。
 - [ ] 当前已知失败被记录为测试，不以“人工知道会坏”代替。
 
@@ -395,7 +423,7 @@ Gate 不能靠“豁免通过”。如果某能力未达到 gate，只能：
 | `G2 Catalog`       | 严格客户端目录正确；collision/动态刷新/来源/兼容级别一致                                                            |
 | `G3 Execution`     | no-LLM、agent-run、throw、cancel、reload、handled input 均 exactly once；PR 100 次、nightly 1000 次无挂起或重复终态 |
 | `G4 Interaction`   | elicitation 与 fallback 可验证；关键生态 built-ins 可用；TUI-only 不误宣传                                          |
-| `G5 Compatibility` | 现有 95 tests + fixture + pinned real plugins；raw、Zed、另一客户端完成矩阵                                         |
+| `G5 Compatibility` | 仓库全量 tests + fixture + pinned real plugins；raw、Zed、另一客户端完成矩阵                                        |
 | `G6 Delivery`      | 文档、compat tuple、changelog、升级/回滚、upstream 状态和 RC 安装验证齐全                                           |
 
 核心量化指标：
