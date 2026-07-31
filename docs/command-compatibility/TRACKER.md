@@ -311,11 +311,13 @@ container/cgroup 或 job object 证明，不在本 harness 中使用不安全的
 [`test/component/real-pi-fixture-pack.test.ts`](../../test/component/real-pi-fixture-pack.test.ts)。
 [PR #5](https://github.com/Eric-Song-Nop/pi-acp/pull/5) stacked 在
 `agent/c0.5-client-harness@edd318e`，实现 commit 固定为
-[`e3a67a7`](https://github.com/Eric-Song-Nop/pi-acp/commit/e3a67a7752707a10e095ba1c78c6ca4a596f959f)。
+[`e3a67a7`](https://github.com/Eric-Song-Nop/pi-acp/commit/e3a67a7752707a10e095ba1c78c6ca4a596f959f)，
+adversarial evidence-boundary 修正固定为
+[`3133d97`](https://github.com/Eric-Song-Nop/pi-acp/commit/3133d9704248ca880ddfbbdb5672eb6e9d6dd768)。
 Author validation runtime 为 Node `26.5.0` / `darwin` / `arm64`：focused real-Pi
 fixture `1/1`、全量测试 `118/118`、typecheck、lint、build、Prettier、diff-check
 与 production audit `0` 全部通过；最低 Node `22.19.0` focused fixture `1/1`、
-全量测试 `118/118`。current Node 另有六轮并发 fixture stress，全部 `1/1`。
+全量测试 `118/118`。两个 runtime 各有六轮并发 fixture stress，全部 `1/1`。
 full dev-tree audit 保留六个 high，继续由 `C5.8` 跟踪。
 
 边界：本 checkpoint 证明 configured loopback provider 零 request，但
