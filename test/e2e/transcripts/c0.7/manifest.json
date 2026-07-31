@@ -1,0 +1,238 @@
+{
+  "blockedBy": {
+    "checkpoint": "C0.3",
+    "owner": "@Hiton (#Pi-ACP task #2)",
+    "reason": "C0.7 cannot pass G0 until C0.3's exact pushed network-denied CI evidence is independently verified.",
+    "recheckDate": "2026-08-07",
+    "trackingUrl": "https://github.com/Eric-Song-Nop/pi-acp/issues/7"
+  },
+  "capturePolicy": {
+    "caseHardDeadlineMs": 30000,
+    "freshCaptureCount": 2,
+    "loopbackBodyByteLimit": 65536,
+    "loopbackBodyTimeoutMs": 2000,
+    "loopbackCloseTimeoutMs": 1000
+  },
+  "cases": [
+    {
+      "artifact": {
+        "byteLength": 5328,
+        "path": "artifacts/sha256-f6514a79c2e6d5ed83699bf7bd6cc10bb4624f9ddc72a18c355dff1c45562f84.ndjson",
+        "recordCount": 7,
+        "sha256": "f6514a79c2e6d5ed83699bf7bd6cc10bb4624f9ddc72a18c355dff1c45562f84"
+      },
+      "clientBehavior": "strict",
+      "expectedFailure": {
+        "advertisedNames": [
+          "compact",
+          "autocompact",
+          "export",
+          "session",
+          "name",
+          "steering",
+          "follow-up",
+          "changelog"
+        ],
+        "commandName": "fixture-state",
+        "errorName": "CommandNotAdvertisedError",
+        "kind": "command_not_advertised",
+        "outboundPromptDelta": 0
+      },
+      "id": "C0.7-XF01",
+      "networkBoundary": {
+        "configuredLoopbackRequests": 0,
+        "osEgressDenied": false
+      },
+      "ownerCheckpoints": [
+        "C2.3"
+      ],
+      "recheckTrigger": "Recheck when extension commands are exposed with source/compatibility metadata.",
+      "runtime": {
+        "arch": "arm64",
+        "nodeVersion": "22.19.0",
+        "platform": "darwin"
+      },
+      "status": "xfail",
+      "title": "Real Pi extension command is absent from the ACP catalog",
+      "trackingUrl": "https://github.com/svkozak/pi-acp/pull/20",
+      "upstreamLedgerId": "X-01"
+    },
+    {
+      "artifact": {
+        "byteLength": 6037,
+        "path": "artifacts/sha256-8e8a53133dbf3d3d3eb2bcf65ff7da8744ef8939930dbf781f715282345edc3d.ndjson",
+        "recordCount": 11,
+        "sha256": "8e8a53133dbf3d3d3eb2bcf65ff7da8744ef8939930dbf781f715282345edc3d"
+      },
+      "clientBehavior": "raw",
+      "expectedFailure": {
+        "catalogHasCommand": false,
+        "configuredLoopbackRequests": 1,
+        "kind": "untrusted_project_prompt_expanded",
+        "literalSlashPersisted": false,
+        "projectTrusted": false,
+        "providerRequest": {
+          "bodyWithinLimit": true,
+          "count": 1,
+          "method": "POST",
+          "path": "/v1/chat/completions",
+          "userMessage": {
+            "byteLength": 29,
+            "matchCount": 1,
+            "sha256": "e5e3815c2cd60916b0f73896826b76d7a4bc2977bbab196fbb4a69f5569268e1"
+          }
+        },
+        "sessionUserMessage": {
+          "byteLength": 29,
+          "matchCount": 1,
+          "sha256": "e5e3815c2cd60916b0f73896826b76d7a4bc2977bbab196fbb4a69f5569268e1"
+        }
+      },
+      "id": "C0.7-XF02",
+      "networkBoundary": {
+        "configuredLoopbackRequests": 1,
+        "osEgressDenied": false
+      },
+      "ownerCheckpoints": [
+        "C1.6",
+        "C2.2",
+        "C5.8"
+      ],
+      "recheckTrigger": "Recheck when adapter-side project prompt loading honors authoritative Pi trust.",
+      "runtime": {
+        "arch": "arm64",
+        "nodeVersion": "22.19.0",
+        "platform": "darwin"
+      },
+      "status": "xfail",
+      "title": "Untrusted project prompt is expanded and submitted to the model",
+      "trackingUrl": "https://github.com/Eric-Song-Nop/pi-acp/issues/6",
+      "upstreamLedgerId": null
+    },
+    {
+      "artifact": {
+        "byteLength": 5968,
+        "path": "artifacts/sha256-14fab059885e0df780ea6580848a1bbbc9730534aa29587a1269f94091b104d3.ndjson",
+        "recordCount": 10,
+        "sha256": "14fab059885e0df780ea6580848a1bbbc9730534aa29587a1269f94091b104d3"
+      },
+      "clientBehavior": "raw",
+      "expectedFailure": {
+        "acpResponseCount": 0,
+        "configuredLoopbackRequests": 0,
+        "errorName": "AcpOperationTimeoutError",
+        "kind": "operation_timeout",
+        "notification": {
+          "afterPrompt": true,
+          "contentType": "text",
+          "level": "info",
+          "sessionUpdate": "agent_message_chunk",
+          "text": "Pi ACP fixture loaded"
+        },
+        "operation": "session/prompt",
+        "outboundPromptCount": 1,
+        "processExit": {
+          "code": 0,
+          "signal": null
+        },
+        "remainedPendingThroughDeadline": true,
+        "timeoutMs": 1500
+      },
+      "id": "C0.7-XF03",
+      "networkBoundary": {
+        "configuredLoopbackRequests": 0,
+        "osEgressDenied": false
+      },
+      "ownerCheckpoints": [
+        "C3.4"
+      ],
+      "recheckTrigger": "Recheck when Pi RPC/adapter command completion distinguishes no-agent-run commands.",
+      "runtime": {
+        "arch": "arm64",
+        "nodeVersion": "22.19.0",
+        "platform": "darwin"
+      },
+      "status": "xfail",
+      "title": "State-only output arrives while ACP prompt remains pending through 1500ms",
+      "trackingUrl": "https://github.com/svkozak/pi-acp/issues/84",
+      "upstreamLedgerId": "X-03"
+    }
+  ],
+  "checkpoint": "C0.7",
+  "compatibility": {
+    "acp": {
+      "installedTreeSha256": "6b5a2d9876a3bac8861954fab54d4355a992be4a799bcfccfc6f6bc1737a5086",
+      "lockIntegrity": "sha512-ialrcI+RzKOYe+fw+TfpyTdRmEoqIkXLlwbTi6XgaXXfdhNcdod7TmE1VsTnG3yTlox8TMTSMQgWbLLbz3r86Q==",
+      "protocolVersion": 1,
+      "sdkGitHead": "73bc30649b650de320340c782733bf69a545bd28",
+      "sdkPackage": "@agentclientprotocol/sdk",
+      "sdkVersion": "0.26.0"
+    },
+    "adapter": {
+      "baselineGitHead": "1009c1e58536c7c907348356706c148cf5593e87",
+      "package": "pi-acp",
+      "version": "0.0.33"
+    },
+    "clients": {
+      "raw": {
+        "id": "raw-process-client",
+        "sources": [
+          {
+            "path": "test/helpers/acp-process-client.ts",
+            "sha256": "05e3a06e11e6df8be57e1b496fa5a38366a2158e0ddd59fba534a8ae533f9b8b"
+          }
+        ],
+        "version": {
+          "commit": "1009c1e58536c7c907348356706c148cf5593e87",
+          "kind": "git"
+        }
+      },
+      "repository": "https://github.com/Eric-Song-Nop/pi-acp",
+      "strict": {
+        "id": "strict-catalog-client",
+        "sources": [
+          {
+            "path": "test/helpers/acp-process-client.ts",
+            "sha256": "05e3a06e11e6df8be57e1b496fa5a38366a2158e0ddd59fba534a8ae533f9b8b"
+          },
+          {
+            "path": "test/helpers/strict-catalog-client.ts",
+            "sha256": "fc2915799b3bd074fc2d60055c7e819ba7327754040677d2fa90a56778856c5e"
+          }
+        ],
+        "version": {
+          "commit": "1009c1e58536c7c907348356706c148cf5593e87",
+          "kind": "git"
+        }
+      }
+    },
+    "fixture": {
+      "id": "pi-extension-pack-v1",
+      "sources": [
+        {
+          "path": "test/fixtures/pi-extension-pack/index.ts",
+          "sha256": "700edf4e7908c969e27117dac2cd680da57e6c3e3b57d83d885c1b3ae41e8d62"
+        },
+        {
+          "path": "test/fixtures/pi-extension-pack/project-canary.js",
+          "sha256": "a9846ccdd4bf4584f207ebb7e6cfcf2a9726919e1c48c9c8f0f1b902391d85f0"
+        }
+      ]
+    },
+    "pi": {
+      "gitHead": "845d6ff1f6643aba440341cce877ce1c43ebbc39",
+      "installedTreeSha256": "623bc39816481c2fa15fe2140da0f4df1e865b97dfc69f39f44ba86cf7b0705f",
+      "lockIntegrity": "sha512-uYhF+FsZxogoSX/AxBcUdiY+ZklubwaXyAoEGA2eQwsHcyEAhUYIKh/WLXe/a8+k8eTCmxb+ZN2Zo9mzQtzbWw==",
+      "package": "@earendil-works/pi-coding-agent",
+      "version": "0.83.0"
+    }
+  },
+  "planId": "PACP-CMD-2026-01",
+  "recordedAt": "2026-07-31",
+  "recordingNodeVersions": [
+    "22.19.0"
+  ],
+  "schemaVersion": 1,
+  "status": "blocked",
+  "storagePolicy": "linux-darwin-localfs-nofollow-cas-v1"
+}

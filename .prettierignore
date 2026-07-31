@@ -24,3 +24,7 @@ coverage/
 
 # Lockfiles (optional: keep stable diffs)
 package-lock.json
+
+# Canonical immutable evidence (validated by transcripts:check)
+/test/e2e/transcripts/c0.7/manifest.json
+/test/e2e/transcripts/c0.7/artifacts/*.ndjson

@@ -66,10 +66,56 @@ Exact runtime versions and the compatibility tuple must be included in every
 transcript artifact. A newer local installation is not evidence for a pinned
 matrix case.
 
+## C0.7 immutable failure baseline
+
+The machine-readable source is
+[`test/e2e/transcripts/c0.7/manifest.json`](../../test/e2e/transcripts/c0.7/manifest.json).
+All three artifacts were recorded on exact Node `22.19.0` / `darwin` / `arm64`
+against pi-acp runtime/capture commit
+`1009c1e58536c7c907348356706c148cf5593e87`, Pi `0.83.0`, and ACP protocol `1`
+/ SDK `0.26.0`. The manifest SHA-256 is
+`edfbbf2807e84f409e826a853e514debb30bd51a964a711cccd0577dea469ce3`.
+The manifest binds the exact package-lock integrities, Pi/SDK source Git heads,
+clean-`npm ci` installed own-package tree digests, raw/strict client source
+digests, and both fixture sources (`index.ts`
+`700edf4e7908c969e27117dac2cd680da57e6c3e3b57d83d885c1b3ae41e8d62`;
+`project-canary.js`
+`a9846ccdd4bf4584f207ebb7e6cfcf2a9726919e1c48c9c8f0f1b902391d85f0`).
+
+| ID          | Frozen expected failure                                                         | Owner                  | Permanent issue/PR                                                |
+| ----------- | ------------------------------------------------------------------------------- | ---------------------- | ----------------------------------------------------------------- |
+| `C0.7-XF01` | registered extension command absent from ACP; strict rejection, zero write      | `C2.3`                 | [upstream PR #20](https://github.com/svkozak/pi-acp/pull/20)      |
+| `C0.7-XF02` | untrusted project prompt expanded/persisted; one configured provider request    | `C1.6`, `C2.2`, `C5.8` | [fork issue #6](https://github.com/Eric-Song-Nop/pi-acp/issues/6) |
+| `C0.7-XF03` | state-only notify arrives; ACP prompt times out at `1500ms`, zero model request | `C3.4`                 | [upstream issue #84](https://github.com/svkozak/pi-acp/issues/84) |
+
+These are executable `xfail(issue)` contracts, not skips. An unexpected fix is
+an error until the case is converted to a positive assertion. Checked-in
+artifacts contain canonical ACP wire records and exact allowlisted metadata;
+raw Pi session JSONL, provider bodies, receipts, stderr, and environment dumps
+are not persisted. The verifier rejects the exact XF02 canary (including
+ordered text-chunk reconstruction), credential signatures, UUIDs, 24/32-hex
+nonces, absolute paths, and loopback host/port forms. This is the enforced
+redaction vocabulary, not a claim that every arbitrary number/date string can
+be classified as a PID or timestamp.
+
+The loopback observer records each accepted HTTP request synchronously, then
+terminalizes that same record exactly once as `end`, `timeout`, `aborted`, or
+`error`; only a completed `end` body is eligible for XF02 derived evidence.
+Completed-POST and incomplete handler-timeout controls prevent partial accepted
+requests from disappearing behind a false zero count. Terminal outcomes and
+bodies remain test-internal; persisted artifacts retain only the allowlisted
+count and derived shape.
+
+C0.7 remains `blocked` pending independent verification of C0.3's exact pushed
+network-denied CI evidence. That external run-scoped Linux evidence does not
+retroactively turn the C0.7 artifacts' configured loopback counts into OS-level
+egress denial. The manifest records this blocker and recheck date explicitly.
+
 ## Dependency audit snapshot
 
 On 2026-07-31, the locked production dependency graph reported zero npm audit
-findings. The complete graph, including development tooling, reported one
-moderate and six high findings in transitive dependencies. This snapshot is not
-a waiver; risk and remediation belong to `C5.8` and dependency changes must be
-reviewed separately from Pi or ACP SDK version-axis changes.
+findings. After the C0.6 Pi `0.83.0` pin, the complete graph, including
+development tooling, reported zero moderate and six high findings in transitive
+dependencies. This snapshot is not a waiver; risk and remediation belong to
+`C5.8` and dependency changes must be reviewed separately from Pi or ACP SDK
+version-axis changes.

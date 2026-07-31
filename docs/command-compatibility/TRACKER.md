@@ -155,11 +155,11 @@ commands 宣称为稳定支持。
 | ------ | ----------------------------------------------------------------- | ----------- | ------------------------- | --------- |
 | `C0.1` | tracker 合入仓库并决定 Issues 策略                                | `in_review` | `DEC-001`                 | `G0`      |
 | `C0.2` | 固定 compatibility tuple 与受测版本窗口                           | `in_review` | —                         | `G0`      |
-| `C0.3` | CI 跑 typecheck/lint/unit/build 和 E2E 基础矩阵                   | `proposed`  | `C0.2`                    | `G0`      |
+| `C0.3` | CI 跑 typecheck/lint/unit/build 和 E2E 基础矩阵                   | `in_review` | `C0.2`                    | `G0`      |
 | `C0.4` | 定义 command compatibility schema                                 | `verified`  | `DEC-003`                 | `G0`      |
 | `C0.5` | raw ACP + strict-client harness                                   | `verified`  | `DEC-005`                 | `G0`      |
-| `C0.6` | 建立真实 Pi fixture extension pack                                | `in_review` | `C0.5`                    | `G0`      |
-| `C0.7` | 记录当前失败基线和 immutable transcripts                          | `proposed`  | `C0.3`, `C0.6`            | `G0`      |
+| `C0.6` | 建立真实 Pi fixture extension pack                                | `verified`  | `C0.5`                    | `G0`      |
+| `C0.7` | 记录当前失败基线和 immutable transcripts                          | `blocked`   | `C0.3`, `C0.6`            | `G0`      |
 | `C1.1` | extension stderr/load diagnostics 可见且安全限长                  | `proposed`  | `C0.7`                    | `G1`      |
 | `C1.2` | `extension_error` 映射为可见、可测试错误                          | `proposed`  | `C0.7`                    | `G1`      |
 | `C1.3` | Pi child 退出时 fail pending command，并提供确定恢复路径          | `proposed`  | `C0.5`                    | `G1`      |
@@ -320,15 +320,71 @@ fixture `1/1`、全量测试 `118/118`、typecheck、lint、build、Prettier、d
 全量测试 `118/118`。两个 runtime 各有六轮并发 fixture stress，全部 `1/1`。
 full dev-tree audit 保留六个 high，继续由 `C5.8` 跟踪。
 
+独立复验固定在
+[PR #5 head `860be1f`](https://github.com/Eric-Song-Nop/pi-acp/commit/860be1f2f714938ee37b1cde0cb1e82f3aa9b49f)：
+Node `26.5.0` 与精确 Node `22.19.0` focused real-Pi fixture 各 `1/1`，
+typecheck、lint、build、全仓 Prettier、diff-check、production audit `0`、
+ancestor symlink 与替换成另一 real directory 的 adversarial checks 均通过，
+无 P1/P2。三个 review threads 全部 resolved；永久 re-review 记录为
+[GitHub review `4827962159`](https://github.com/Eric-Song-Nop/pi-acp/pull/5#pullrequestreview-4827962159)。
+
 边界：本 checkpoint 证明 configured loopback provider 零 request，但
-`PI_OFFLINE`/telemetry flags 与空 `PATH` 不是 OS egress sandbox；`C0.3` 的
-network-denied CI 尚未落地，因此不得声称禁止所有外网。Windows `.cmd`/shell env、
-grandchild containment 与 no-follow 等价保证也必须等 Windows matrix 后再认证。
+`PI_OFFLINE`/telemetry flags 与空 `PATH` 不是 OS egress sandbox；C0.3 的独立
+run-scoped Linux evidence 正在 stacked PR #9 复验，不会 retroactively 扩大 C0.6
+artifact 的结论。Windows `.cmd`/shell env、grandchild containment 与 no-follow
+等价保证也必须等 Windows matrix 后再认证。
 fixture command 的 ACP catalog/execution/UI 行为仍由 `FX-01..12`、`C2.x` 和
 `C3.x` 验证，本 checkpoint 不把“真实 Pi 已加载 extension”扩大成公开 command
 compatibility 声明。global fixture 与同一 private root 内的 Pi process 是本测试
 主动信任的 cooperative actors；receipt/hash 是受信 load-time self-report 与
 TOCTOU hardening，不是 hostile-child executed-code attestation。
+
+#### `C0.7` Current failure baseline and immutable transcripts
+
+- [x] `C0.7-XF01` / upstream `X-01`：真实 Pi receipt 证明 fixture extension command 已注册，但 ACP 目录只公布 8 个 adapter commands；strict client 在任何 `session/prompt` 写入前以 `CommandNotAdvertisedError` 拒绝。
+- [x] `C0.7-XF02` / fork [issue #6](https://github.com/Eric-Song-Nop/pi-acp/issues/6)：`projectTrusted=false` 且项目 prompt 未公布时，adapter 仍提前读取/展开 `/poison`，Pi session 保存 synthetic canary 并向 configured loopback provider 发出 1 次 request。
+- [x] `C0.7-XF03` / upstream `X-03`：raw `/fixture-state` 收到 `Pi ACP fixture loaded`，零 provider request，但 owning `session/prompt` 在 `1500ms` hard timeout 前无 response。
+- [x] 三个 case 都是独立正常运行的 `xfail(issue)` 契约，不使用 skip/todo；修复导致 unexpected pass，必须改成 positive assertion，不能刷新 snapshot 掩盖修复。
+- [x] checked-in ACP transcript 使用 canonical LF NDJSON、只允许 `cwd`/`sessionId` 的 exact root/session substitution、递归 key order、完整 wire order 与最终 process exit；manifest 绑定 runtime/capture commit、Pi/ACP package-lock + source Git + clean-`npm ci` own-package tree、raw/strict client sources、两份 fixture sources、Node/platform/arch、owner、recheck trigger、capture bounds、configured loopback count 和 artifact SHA-256。
+- [x] loopback listener 在 HTTP handler 接受 request 时同步加入唯一 observation，再将同一记录 exactly-once terminalize 为 `end` / `timeout` / `aborted` / `error`；XF02 只接受 completed `end` body。completed POST 503 与 incomplete POST handler-owned 408 controls 在 Node `26.5.0` / exact `22.19.0` 都证明 partial accepted request 不会从零计数证据消失。
+- [x] normal tests 不改写 evidence；bounded lstat → `O_NOFOLLOW` open → fstat/path identity → digest/canonical parse 接受 fresh Git `0644`，但拒绝 group/world write。credential signatures、24/32-hex nonce、UUID、absolute path、loopback host/port、XF02 canary（含 ordered text-chunk reconstruction）、reserved-token placement、leaf/ancestor symlink、hardlink、非 canonical bytes、malicious historical orphan、CAS/active/stale lock、crash temp/link-before-unlink 与 live-reader retry 都有回归。
+- [x] 显式 Linux/Darwin updater 要求 exact Node `22.19.0`、全仓 clean Git、全部三个 case、旧 manifest SHA、未来有效 recheck date 与 `--accept-baseline-change`；每个 case fresh capture 两次且 bytes/outcome 完全相同，30s fixture hard deadline 在 teardown race 中也不能接受 late success。artifact 采用 no-clobber content address，manifest 采用 cooperative lock、双重 CAS、atomic rename 与 directory `fsync`。stale-lock recovery 仅限同一 local filesystem、host 与 PID namespace；不覆盖 NFS/shared-host 或 hostile same-UID actor。
+- [ ] `C0.3` exact pushed network-denied CI evidence 尚待 independent verification；因此 C0.7 即使本地 artifacts/gates 全绿也保持 `blocked`。blocker owner 为 task #2，复查日期 `2026-08-07`。
+
+本次 runtime/capture commit 为
+[`1009c1e`](https://github.com/Eric-Song-Nop/pi-acp/commit/1009c1e58536c7c907348356706c148cf5593e87)，
+manifest SHA-256 为
+`edfbbf2807e84f409e826a853e514debb30bd51a964a711cccd0577dea469ce3`。
+原始 observation P2 记录在
+[GitHub review `4829256552`](https://github.com/Eric-Song-Nop/pi-acp/pull/8#pullrequestreview-4829256552)。
+
+| Failure ID  | 当前行为                                           | Future owner           | Artifact SHA-256                                                   |
+| ----------- | -------------------------------------------------- | ---------------------- | ------------------------------------------------------------------ |
+| `C0.7-XF01` | extension 已注册但 strict ACP 不可发现             | `C2.3`                 | `f6514a79c2e6d5ed83699bf7bd6cc10bb4624f9ddc72a18c355dff1c45562f84` |
+| `C0.7-XF02` | untrusted project prompt 被展开并提交模型          | `C1.6`, `C2.2`, `C5.8` | `8e8a53133dbf3d3d3eb2bcf65ff7da8744ef8939930dbf781f715282345edc3d` |
+| `C0.7-XF03` | state-only output 到达，prompt 持续 pending 1500ms | `C3.4`                 | `14fab059885e0df780ea6580848a1bbbc9730534aa29587a1269f94091b104d3` |
+
+证据：
+[implementation issue #7](https://github.com/Eric-Song-Nop/pi-acp/issues/7)、
+[`manifest.json`](../../test/e2e/transcripts/c0.7/manifest.json)、
+`test/helpers/immutable-transcript.ts`、
+`test/helpers/real-pi-baseline-scenarios.ts`、
+`test/component/c0.7-fixture-boundaries.test.ts`、
+`test/component/immutable-real-pi-transcripts.test.ts`
+和 `test/unit/immutable-transcript.test.ts`。
+
+边界：C0.7 只记录当前行为；不公布 extension commands，不修复 routing/completion，
+不认证 dialogs/reload/flags/plugin matrix。persisted artifact 不含 receipt、stderr、
+Pi session JSONL、provider body 或 env dump；derived observation 只保存 allowlisted
+bool/count/hash。verifier 明确拒绝 credential signature、known nonce/UUID/path/loopback
+形式与 XF02 canary，但不把任意 number/date-like string 推断为 PID/timestamp。
+request terminal outcome 与 bounded body 只用于 test-internal validation，不进入
+persisted artifact；zero count 仍表示 handler 未接受任何 request，而不只是没有收到
+完整 request body。
+configured loopback count 不是 OS egress denial；Linux/Darwin local-host cooperative
+CAS/no-follow 也不是 shared-filesystem 或 hostile same-UID directory attestation。
+Pi built-in fallthrough 与 adapter/prompt collision 继续由 `C1.5`、`C2.2`、`C2.4`
+和 `C4.7–9` 负责，不扩张本 checkpoint artifact 集合。
 
 #### `C0.3, C0.5–C0.7` Harness 与失败基线
 
@@ -339,8 +395,8 @@ TOCTOU hardening，不是 hostile-child executed-code attestation。
 - [x] strict-client harness 会拒绝未出现在 `available_commands_update` 的 slash command。
 - [x] load-only real-Pi fixture 注册 deterministic loopback provider，并证明 `initialize` + `session/new` 期间零 provider request。
 - [ ] agent-turn fixture 使用 loopback deterministic provider 返回固定模型响应，不消耗真实模型账户。
-- [ ] 所有可能挂起的用例有硬 timeout，并保存 NDJSON transcript。
-- [ ] 当前已知失败被记录为测试，不以“人工知道会坏”代替。
+- [x] 所有当前 failure-baseline 中可能挂起的用例有独立 hard timeout，并保存 canonical NDJSON transcript。
+- [x] C0.7 范围内的当前已知失败被记录为 executable `xfail(issue)`，不以“人工知道会坏”代替。
 
 ### M1 — Safe Foundation
 

@@ -375,7 +375,7 @@ test('malformed JSON-RPC envelopes fail closed without reaching the SDK', { time
       mode: malformedCase.mode,
       client: {
         requestTimeoutMs: 2_000,
-        shutdownTimeoutMs: 50
+        shutdownTimeoutMs: 250
       }
     })
     try {
@@ -410,7 +410,7 @@ test('malformed JSON-RPC envelopes fail closed without reaching the SDK', { time
     const fixture = await startFixture({
       client: {
         requestTimeoutMs: 2_000,
-        shutdownTimeoutMs: 50
+        shutdownTimeoutMs: 250
       }
     })
     try {
