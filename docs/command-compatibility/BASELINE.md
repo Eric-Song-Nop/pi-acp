@@ -131,10 +131,12 @@ The machine-readable source is
 [`test/e2e/transcripts/c0.7/manifest.json`](../../test/e2e/transcripts/c0.7/manifest.json).
 All three artifacts were recorded on exact Node `22.19.0` / `darwin` / `arm64`
 against pi-acp runtime/capture commit
-`98a2e83f1ea3381ff90a693493680d7adb3eac76`, Pi `0.83.0`, and ACP protocol `1`
-/ SDK `0.26.0`. The manifest binds the exact package-lock integrities, Pi/SDK
-source Git heads, clean-`npm ci` installed own-package tree digests, raw/strict
-client source digests, and both fixture sources (`index.ts`
+`1009c1e58536c7c907348356706c148cf5593e87`, Pi `0.83.0`, and ACP protocol `1`
+/ SDK `0.26.0`. The manifest SHA-256 is
+`edfbbf2807e84f409e826a853e514debb30bd51a964a711cccd0577dea469ce3`.
+The manifest binds the exact package-lock integrities, Pi/SDK source Git heads,
+clean-`npm ci` installed own-package tree digests, raw/strict client source
+digests, and both fixture sources (`index.ts`
 `700edf4e7908c969e27117dac2cd680da57e6c3e3b57d83d885c1b3ae41e8d62`;
 `project-canary.js`
 `a9846ccdd4bf4584f207ebb7e6cfcf2a9726919e1c48c9c8f0f1b902391d85f0`).
@@ -155,12 +157,21 @@ nonces, absolute paths, and loopback host/port forms. This is the enforced
 redaction vocabulary, not a claim that every arbitrary number/date string can
 be classified as a PID or timestamp.
 
-C0.7 remains `blocked` while C0.3's exact pushed head/run awaits independent
-verification and while the separate surviving fixture-observation review
-candidate awaits disposition. Its historical checked-in artifacts prove
-configured loopback request counts, not OS-level egress denial; C0.3's
-run-scoped Linux execution evidence is external to that immutable manifest and
-does not rewrite it retroactively.
+The loopback observer records each accepted HTTP request synchronously, then
+terminalizes that same record exactly once as `end`, `timeout`, `aborted`, or
+`error`; only a completed `end` body is eligible for XF02 derived evidence.
+Completed-POST and incomplete handler-timeout controls prevent partial accepted
+requests from disappearing behind a false zero count. Terminal outcomes and
+bodies remain test-internal; persisted artifacts retain only the allowlisted
+count and derived shape.
+
+C0.7 remains `blocked` while C0.3's exact pushed network-denied head/run awaits
+independent verification and while the accepted-partial-request correction at
+replacement head `f95df57d56497753c12beb864903c02e7ceb99d6` awaits final review
+disposition. C0.3's run-scoped Linux execution evidence is external to the
+immutable C0.7 manifest and does not retroactively turn configured loopback
+counts into OS-level egress denial. The manifest records the C0.3 blocker and
+recheck date explicitly.
 
 ## Dependency audit snapshot
 

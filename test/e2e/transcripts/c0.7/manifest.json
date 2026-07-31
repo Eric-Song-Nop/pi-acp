@@ -2,7 +2,7 @@
   "blockedBy": {
     "checkpoint": "C0.3",
     "owner": "@Hiton (#Pi-ACP task #2)",
-    "reason": "C0.7 cannot pass G0 until C0.3 wires the required CI gates and proves OS-level network denial.",
+    "reason": "C0.7 cannot pass G0 until C0.3's exact pushed network-denied CI evidence is independently verified.",
     "recheckDate": "2026-08-07",
     "trackingUrl": "https://github.com/Eric-Song-Nop/pi-acp/issues/7"
   },
@@ -17,9 +17,9 @@
     {
       "artifact": {
         "byteLength": 5328,
-        "path": "artifacts/sha256-c67a9ef598b6decd1e7f8a6952152cb4d0a1d78542485b412fb20f0f6569631a.ndjson",
+        "path": "artifacts/sha256-f6514a79c2e6d5ed83699bf7bd6cc10bb4624f9ddc72a18c355dff1c45562f84.ndjson",
         "recordCount": 7,
-        "sha256": "c67a9ef598b6decd1e7f8a6952152cb4d0a1d78542485b412fb20f0f6569631a"
+        "sha256": "f6514a79c2e6d5ed83699bf7bd6cc10bb4624f9ddc72a18c355dff1c45562f84"
       },
       "clientBehavior": "strict",
       "expectedFailure": {
@@ -60,9 +60,9 @@
     {
       "artifact": {
         "byteLength": 6037,
-        "path": "artifacts/sha256-a6e89c572ba593203b1218ab22d99e8076c67f3f87941fccdc06b4cf84ec6bf6.ndjson",
+        "path": "artifacts/sha256-8e8a53133dbf3d3d3eb2bcf65ff7da8744ef8939930dbf781f715282345edc3d.ndjson",
         "recordCount": 11,
-        "sha256": "a6e89c572ba593203b1218ab22d99e8076c67f3f87941fccdc06b4cf84ec6bf6"
+        "sha256": "8e8a53133dbf3d3d3eb2bcf65ff7da8744ef8939930dbf781f715282345edc3d"
       },
       "clientBehavior": "raw",
       "expectedFailure": {
@@ -112,9 +112,9 @@
     {
       "artifact": {
         "byteLength": 5968,
-        "path": "artifacts/sha256-e19b6cde8301ab35aa9a6b53edca1a6309ffeef4ea7e9fd6d5e96031285fb288.ndjson",
+        "path": "artifacts/sha256-14fab059885e0df780ea6580848a1bbbc9730534aa29587a1269f94091b104d3.ndjson",
         "recordCount": 10,
-        "sha256": "e19b6cde8301ab35aa9a6b53edca1a6309ffeef4ea7e9fd6d5e96031285fb288"
+        "sha256": "14fab059885e0df780ea6580848a1bbbc9730534aa29587a1269f94091b104d3"
       },
       "clientBehavior": "raw",
       "expectedFailure": {
@@ -169,7 +169,7 @@
       "sdkVersion": "0.26.0"
     },
     "adapter": {
-      "baselineGitHead": "98a2e83f1ea3381ff90a693493680d7adb3eac76",
+      "baselineGitHead": "1009c1e58536c7c907348356706c148cf5593e87",
       "package": "pi-acp",
       "version": "0.0.33"
     },
@@ -183,7 +183,7 @@
           }
         ],
         "version": {
-          "commit": "98a2e83f1ea3381ff90a693493680d7adb3eac76",
+          "commit": "1009c1e58536c7c907348356706c148cf5593e87",
           "kind": "git"
         }
       },
@@ -201,7 +201,7 @@
           }
         ],
         "version": {
-          "commit": "98a2e83f1ea3381ff90a693493680d7adb3eac76",
+          "commit": "1009c1e58536c7c907348356706c148cf5593e87",
           "kind": "git"
         }
       }

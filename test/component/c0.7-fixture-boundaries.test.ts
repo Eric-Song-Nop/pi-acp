@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict'
 import { access } from 'node:fs/promises'
+import { request as httpRequest } from 'node:http'
 import { connect, type Socket } from 'node:net'
 import { performance } from 'node:perf_hooks'
 import test from 'node:test'
@@ -45,6 +46,105 @@ async function assertPortClosed(port: number): Promise<void> {
     })
   })
 }
+
+async function readSocketResponse(socket: Socket): Promise<string> {
+  return await new Promise<string>((resolve, reject) => {
+    let source = ''
+    let settled = false
+    const finish = (error?: Error): void => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      if (error) reject(error)
+      else resolve(source)
+    }
+    const timer = setTimeout(() => {
+      socket.destroy()
+      finish(new Error('C0.7 partial request did not receive a bounded terminal response'))
+    }, 5_000)
+    timer.unref()
+    socket.setEncoding('utf8')
+    socket.on('data', chunk => {
+      source += chunk
+    })
+    socket.once('end', () => finish())
+    socket.once('close', () => finish())
+    socket.once('error', finish)
+  })
+}
+
+test('C0.7 fixture records completed and timed-out accepted requests exactly once', { timeout: 15_000 }, async t => {
+  const fixture = await startRealPiFixture({
+    transcriptCheckpoint: 'C0.7',
+    transcriptCaseId: 'C0.7-request-observation-control',
+    transcriptMetadata: {
+      baselineGitHead: TEST_GIT_HEAD
+    }
+  })
+  t.after(async () => {
+    await fixture.cleanup()
+  })
+
+  const completedBody = Buffer.from('{"control":"completed"}')
+  const completedStatus = await new Promise<number | undefined>((resolve, reject) => {
+    const request = httpRequest(
+      {
+        host: fixture.loopbackAddress.host,
+        port: fixture.loopbackAddress.port,
+        method: 'POST',
+        path: '/v1/chat/completions',
+        headers: {
+          'content-length': completedBody.length
+        }
+      },
+      response => {
+        response.resume()
+        response.once('end', () => resolve(response.statusCode))
+        response.once('error', reject)
+      }
+    )
+    request.once('error', reject)
+    request.end(completedBody)
+  })
+  assert.equal(completedStatus, 503)
+  assert.deepEqual(fixture.requests, [
+    {
+      method: 'POST',
+      url: '/v1/chat/completions',
+      host: `${fixture.loopbackAddress.host}:${String(fixture.loopbackAddress.port)}`,
+      body: completedBody,
+      bodyByteLength: completedBody.length,
+      bodyExceededLimit: false,
+      outcome: 'end'
+    }
+  ])
+
+  const incompleteBody = 'partial'
+  const incompleteSocket = await connectedSocket(fixture.loopbackAddress.port)
+  incompleteSocket.write(
+    `POST /v1/chat/completions HTTP/1.1\r\nHost: ${fixture.loopbackAddress.host}:${String(
+      fixture.loopbackAddress.port
+    )}\r\nContent-Length: 64\r\n\r\n${incompleteBody}`
+  )
+  const timeoutResponse = await readSocketResponse(incompleteSocket)
+  assert.match(timeoutResponse, /^HTTP\/1\.1 408 /u)
+  assert.equal(fixture.requests.length, 2)
+  assert.deepEqual(fixture.requests[1], {
+    method: 'POST',
+    url: '/v1/chat/completions',
+    host: `${fixture.loopbackAddress.host}:${String(fixture.loopbackAddress.port)}`,
+    body: Buffer.from(incompleteBody),
+    bodyByteLength: Buffer.byteLength(incompleteBody),
+    bodyExceededLimit: false,
+    outcome: 'timeout'
+  })
+  await fixture.closeLoopback()
+  assert.equal(fixture.requests.length, 2)
+  assert.equal(
+    fixture.requests.some(request => request.outcome === 'pending'),
+    false
+  )
+})
 
 test(
   'C0.7 XF02 rejects an unrelated GET observation followed by a refused model connection',
@@ -97,6 +197,10 @@ test(
     assert.ok(elapsedMs < 2_000, `C0.7 fixture cleanup took ${elapsedMs.toFixed(1)}ms`)
     assert.equal(idleSocket.destroyed, true)
     assert.equal(incompleteHttpSocket.destroyed, true)
+    assert.equal(
+      fixture.requests.some(request => request.outcome === 'pending'),
+      false
+    )
     await assert.rejects(access(fixture.rootDir), (error: unknown) => {
       assert.equal((error as NodeJS.ErrnoException).code, 'ENOENT')
       return true

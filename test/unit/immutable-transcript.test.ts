@@ -727,7 +727,8 @@ test('C0.7 XF02 evidence requires the same exact session and provider user-messa
     host: '127.0.0.1:1',
     body: providerBody,
     bodyByteLength: providerBody.length,
-    bodyExceededLimit: false
+    bodyExceededLimit: false,
+    outcome: 'end'
   }
   const sessionSource = `${JSON.stringify(sessionRecord)}\n`
   const evidence = deriveUntrustedPromptEvidence(sessionSource, [request])
@@ -758,7 +759,18 @@ test('C0.7 XF02 evidence requires the same exact session and provider user-messa
           host: '127.0.0.1:1',
           body: Buffer.alloc(0),
           bodyByteLength: 0,
-          bodyExceededLimit: false
+          bodyExceededLimit: false,
+          outcome: 'end'
+        }
+      ]),
+    /not one bounded POST/u
+  )
+  assert.throws(
+    () =>
+      deriveUntrustedPromptEvidence(sessionSource, [
+        {
+          ...request,
+          outcome: 'timeout'
         }
       ]),
     /not one bounded POST/u
