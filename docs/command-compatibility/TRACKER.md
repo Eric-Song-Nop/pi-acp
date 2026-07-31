@@ -257,8 +257,8 @@ commands 宣称为稳定支持。
       对 exact event head
       [`1b21be38e992f96b406c7a8d5d1f740384e32b02`](https://github.com/Eric-Song-Nop/pi-acp/commit/1b21be38e992f96b406c7a8d5d1f740384e32b02)
       的全部 distinct gates 与 stable `required` job 全绿。`C0.3` 在 independent
-      review 绑定该 exact head/run 前保持 `in_review`；`C0.7` 在该复验与自身 review
-      均解决前保持 `blocked`。
+      review 绑定该 exact head/run 前保持 `in_review`；`C0.7` 在该复验与 separate
+      surviving fixture-observation review candidate 均解决前保持 `blocked`。
 
 证据：
 [`.github/workflows/ci.yml`](../../.github/workflows/ci.yml)、
@@ -402,8 +402,9 @@ TOCTOU hardening，不是 hostile-child executed-code attestation。
       [run `30636901392`](https://github.com/Eric-Song-Nop/pi-acp/actions/runs/30636901392)
       全绿。
 - [ ] `C0.3` 尚待 independent review 绑定上述 exact head/run；C0.7 即使本地
-      artifacts/gates 全绿也保持 `blocked`，直到该复验与 C0.7 自身 review 都解决。
-      blocker owner 为 task #2，复查日期 `2026-08-07`。
+      artifacts/gates 全绿也保持 `blocked`，直到该复验与 separate surviving
+      fixture-observation review candidate 都解决。blocker owner 为 task #2，
+      复查日期 `2026-08-07`。
 
 | Failure ID  | 当前行为                                           | Future owner           | Artifact SHA-256                                                   |
 | ----------- | -------------------------------------------------- | ---------------------- | ------------------------------------------------------------------ |

@@ -32,5 +32,13 @@ expected failures frozen by checkpoint C0.7.
   a stale recoverable view. These guarantees do not cover NFS/shared-host
   publication or a hostile process with the same UID.
 
-The manifest remains `blocked` on C0.3 until network-denied CI exists. These
-artifacts prove configured loopback request counts, not OS-level egress denial.
+The immutable manifest records the C0.3 blocker as it existed at capture time.
+Pushed
+[run `30636901392`](https://github.com/Eric-Song-Nop/pi-acp/actions/runs/30636901392)
+at implementation head
+[`1b21be38e992f96b406c7a8d5d1f740384e32b02`](https://github.com/Eric-Song-Nop/pi-acp/commit/1b21be38e992f96b406c7a8d5d1f740384e32b02)
+now provides external run-scoped Linux/x64 evidence and does not retroactively
+rewrite that historical manifest. Operationally, C0.7 remains `blocked` pending
+independent C0.3 verification and disposition of the separate surviving
+fixture-observation review candidate. These artifacts prove configured loopback
+request counts, not OS-level egress denial.

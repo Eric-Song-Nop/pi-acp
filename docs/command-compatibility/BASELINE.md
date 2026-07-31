@@ -80,8 +80,8 @@ against exact requested event head
 [`1b21be38e992f96b406c7a8d5d1f740384e32b02`](https://github.com/Eric-Song-Nop/pi-acp/commit/1b21be38e992f96b406c7a8d5d1f740384e32b02)
 passed every distinct blocking gate and the stable `required` aggregate. It must
 not be marked `verified` until independent review binds its disposition to that
-exact head and run; `C0.7` remains `blocked` while that review and its own review
-are unresolved.
+exact head and run; `C0.7` remains `blocked` while that review and disposition
+of the separate surviving fixture-observation review candidate are unresolved.
 
 Exact CI toolchain and policy pins:
 
@@ -155,10 +155,11 @@ redaction vocabulary, not a claim that every arbitrary number/date string can
 be classified as a PID or timestamp.
 
 C0.7 remains `blocked` while C0.3's exact pushed head/run awaits independent
-verification and while C0.7's own review is unresolved. Its historical
-checked-in artifacts prove configured loopback request counts, not OS-level
-egress denial; C0.3's run-scoped Linux execution evidence is external to that
-immutable manifest and does not rewrite it retroactively.
+verification and while the separate surviving fixture-observation review
+candidate awaits disposition. Its historical checked-in artifacts prove
+configured loopback request counts, not OS-level egress denial; C0.3's
+run-scoped Linux execution evidence is external to that immutable manifest and
+does not rewrite it retroactively.
 
 ## Dependency audit snapshot
 
