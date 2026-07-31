@@ -2,16 +2,19 @@ import { createHash, randomBytes } from 'node:crypto'
 import { constants, type Stats } from 'node:fs'
 import { chmod, copyFile, lstat, mkdir, mkdtemp, open, readFile, realpath, rm, writeFile } from 'node:fs/promises'
 import { createServer, type Server } from 'node:http'
-import type { AddressInfo } from 'node:net'
+import type { AddressInfo, Socket } from 'node:net'
 import { tmpdir } from 'node:os'
 import { isAbsolute, join, relative, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { AcpProcessClient } from './acp-process-client.js'
+import { AcpProcessClient, type AcpTranscriptMetadata } from './acp-process-client.js'
 
 export const REAL_PI_VERSION = '0.83.0'
 export const REAL_PI_FIXTURE_PROVIDER_ID = 'pi-acp-fixture'
 export const REAL_PI_FIXTURE_MODEL_ID = 'fixture-model-v1'
 export const REAL_PI_FIXTURE_COMMAND_ID = 'fixture-state'
+const LOOPBACK_CLOSE_TIMEOUT_MS = 1_000
+const LOOPBACK_BODY_TIMEOUT_MS = 2_000
+export const MAX_LOOPBACK_BODY_BYTES = 64 * 1024
 
 export const FORBIDDEN_REAL_PI_ENV_NAMES = [
   'ANTHROPIC_API_KEY',
@@ -146,6 +149,28 @@ type ReceiptBoundary = {
   receiptDirStat: Stats
 }
 
+export type RealPiFixtureOptions = {
+  clientBehavior?: 'raw' | 'strict'
+  hardDeadlineMs?: number
+  transcriptCheckpoint?: 'C0.6' | 'C0.7'
+  transcriptCaseId?: string
+  transcriptMetadata?: AcpTranscriptMetadata
+  projectPrompts?: readonly {
+    name: string
+    contents: string
+  }[]
+}
+
+export class RealPiFixtureDeadlineError extends Error {
+  constructor(
+    readonly deadlineMs: number,
+    options?: ErrorOptions
+  ) {
+    super(`real Pi fixture exceeded its ${String(deadlineMs)}ms hard deadline`, options)
+    this.name = 'RealPiFixtureDeadlineError'
+  }
+}
+
 const repositoryRoot = fileURLToPath(new URL('../../', import.meta.url))
 const agentEntryPath = join(repositoryRoot, 'src', 'index.ts')
 const tsxImportPath = fileURLToPath(import.meta.resolve('tsx'))
@@ -156,10 +181,13 @@ const projectCanarySourcePath = fileURLToPath(
   new URL('../fixtures/pi-extension-pack/project-canary.js', import.meta.url)
 )
 
-type LoopbackRequest = {
+export type LoopbackRequest = {
   method: string | undefined
   url: string | undefined
   host: string | undefined
+  body: Buffer | undefined
+  bodyByteLength: number
+  bodyExceededLimit: boolean
 }
 
 async function listen(server: Server): Promise<AddressInfo> {
@@ -182,14 +210,36 @@ async function listen(server: Server): Promise<AddressInfo> {
   return address
 }
 
-async function closeServer(server: Server): Promise<void> {
-  if (!server.listening) return
-  await new Promise<void>((resolve, reject) => {
-    server.close(error => {
-      if (error) reject(error)
-      else resolve()
+function createServerCloser(server: Server, sockets: Set<Socket>): () => Promise<void> {
+  let closePromise: Promise<void> | undefined
+  return async () => {
+    closePromise ??= new Promise<void>((resolve, reject) => {
+      let settled = false
+      const finish = (error?: Error): void => {
+        if (settled) return
+        settled = true
+        clearTimeout(timer)
+        if (error) reject(error)
+        else resolve()
+      }
+      const timer = setTimeout(() => {
+        for (const socket of sockets) socket.destroy()
+        server.closeAllConnections()
+        finish(new Error(`C0.7 loopback listener did not close within ${String(LOOPBACK_CLOSE_TIMEOUT_MS)}ms`))
+      }, LOOPBACK_CLOSE_TIMEOUT_MS)
+      timer.unref()
+
+      if (server.listening) {
+        server.close(error => finish(error ?? undefined))
+      } else {
+        finish()
+      }
+      for (const socket of sockets) socket.destroy()
+      server.closeIdleConnections()
+      server.closeAllConnections()
     })
-  })
+    await closePromise
+  }
 }
 
 function assertContainedPath(parent: string, candidate: string, label: string): void {
@@ -285,16 +335,16 @@ async function readVerifiedReceipt<T>(path: string, boundary: ReceiptBoundary): 
       throw new Error(`C0.6 receipt path was substituted while it was being read: ${path}`)
     }
 
+    let receipt: T
     try {
-      const receipt = JSON.parse(source) as T
-      await assertReceiptBoundary(boundary, path)
-      const parsedPathStat = await lstat(path)
-      assertSameFileIdentity(stat, parsedPathStat, 'receipt path after parse')
-      return { receipt, stat }
+      receipt = JSON.parse(source) as T
     } catch (error) {
-      if (error instanceof Error && error.message.startsWith('C0.6 ')) throw error
       throw new Error(`C0.6 receipt is not valid JSON: ${path}`, { cause: error })
     }
+    await assertReceiptBoundary(boundary, path)
+    const parsedPathStat = await lstat(path)
+    assertSameFileIdentity(stat, parsedPathStat, 'receipt path after parse')
+    return { receipt, stat }
   } finally {
     await handle.close()
   }
@@ -364,22 +414,143 @@ function piWrapperSource(): string {
   return '#!/bin/sh\nexec "$PI_ACP_FIXTURE_NODE" "$PI_PACKAGE_DIR/dist/cli.js" "$@"\n'
 }
 
-export async function startRealPiFixture() {
+function validateProjectPrompts(
+  prompts: RealPiFixtureOptions['projectPrompts']
+): readonly { name: string; contents: string }[] {
+  const normalized = prompts ?? []
+  const names = new Set<string>()
+  for (const prompt of normalized) {
+    if (!/^[a-z0-9][a-z0-9-]*$/u.test(prompt.name)) {
+      throw new TypeError('C0.7 project prompt names must be lowercase bare command names')
+    }
+    if (names.has(prompt.name)) {
+      throw new TypeError(`C0.7 project prompt name is duplicated: ${prompt.name}`)
+    }
+    if (prompt.contents.length === 0 || Buffer.byteLength(prompt.contents) > 4_096) {
+      throw new TypeError(`C0.7 project prompt ${prompt.name} must contain 1..4096 UTF-8 bytes`)
+    }
+    names.add(prompt.name)
+  }
+  return normalized
+}
+
+export async function startRealPiFixture(options: RealPiFixtureOptions = {}) {
+  const projectPrompts = validateProjectPrompts(options.projectPrompts)
+  const hardDeadlineMs = options.hardDeadlineMs
+  if (
+    hardDeadlineMs !== undefined &&
+    (!Number.isInteger(hardDeadlineMs) || hardDeadlineMs < 100 || hardDeadlineMs > 120_000)
+  ) {
+    throw new TypeError('real Pi fixture hard deadline must be an integer from 100ms through 120000ms')
+  }
   const rootDir = await mkdtemp(join(await realpath(tmpdir()), 'pi-acp-real-pi-'))
   await chmod(rootDir, 0o700)
 
   const requests: LoopbackRequest[] = []
+  const sockets = new Set<Socket>()
   const server = createServer((request, response) => {
-    requests.push({
-      method: request.method,
-      url: request.url,
-      host: request.headers.host
+    const chunks: Buffer[] = []
+    let bodyByteLength = 0
+    let bodyExceededLimit = false
+    let settled = false
+    const finish = (): void => {
+      if (settled) return
+      settled = true
+      requests.push({
+        method: request.method,
+        url: request.url,
+        host: request.headers.host,
+        body: bodyExceededLimit ? undefined : Buffer.concat(chunks, bodyByteLength),
+        bodyByteLength,
+        bodyExceededLimit
+      })
+      response.statusCode = bodyExceededLimit ? 413 : 503
+      response.end('C0.7 fixture refuses model requests\n')
+    }
+    request.setTimeout(LOOPBACK_BODY_TIMEOUT_MS, () => {
+      response.statusCode = 408
+      response.end('C0.7 fixture request body timed out\n')
+      request.destroy()
     })
-    response.statusCode = 503
-    response.end('C0.6 fixture does not permit model requests\n')
+    request.on('data', chunk => {
+      const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)
+      bodyByteLength += bytes.length
+      if (bodyByteLength <= MAX_LOOPBACK_BODY_BYTES) chunks.push(bytes)
+      else bodyExceededLimit = true
+    })
+    request.once('end', finish)
+    request.once('aborted', () => {
+      settled = true
+    })
+    request.once('error', () => {
+      settled = true
+    })
   })
+  server.on('connection', socket => {
+    sockets.add(socket)
+    socket.once('close', () => sockets.delete(socket))
+  })
+  const closeLoopbackServer = createServerCloser(server, sockets)
 
   let client: AcpProcessClient | undefined
+  let cleanupPromise: Promise<void> | undefined
+  let hardDeadlineTimer: NodeJS.Timeout | undefined
+  let hardDeadlineExceeded = false
+  const hardDeadlineAt = hardDeadlineMs === undefined ? undefined : Date.now() + hardDeadlineMs
+  let resolveHardDeadline!: (error: RealPiFixtureDeadlineError) => void
+  const hardDeadline = new Promise<RealPiFixtureDeadlineError>(resolve => {
+    resolveHardDeadline = resolve
+  })
+  const cleanup = async (): Promise<void> => {
+    if (hardDeadlineTimer) {
+      clearTimeout(hardDeadlineTimer)
+      hardDeadlineTimer = undefined
+    }
+    cleanupPromise ??= (async () => {
+      const errors: unknown[] = []
+      try {
+        await client?.close()
+      } catch (error) {
+        errors.push(error)
+      }
+      try {
+        await closeLoopbackServer()
+      } catch (error) {
+        errors.push(error)
+      }
+      try {
+        await rm(rootDir, { recursive: true, force: true })
+      } catch (error) {
+        errors.push(error)
+      }
+      if (errors.length > 0) throw new AggregateError(errors, 'C0.6 real Pi fixture cleanup failed')
+    })()
+    await cleanupPromise
+  }
+  const triggerHardDeadline = async (): Promise<RealPiFixtureDeadlineError> => {
+    if (hardDeadlineMs === undefined) {
+      throw new Error('real Pi fixture has no configured hard deadline')
+    }
+    if (!hardDeadlineExceeded) {
+      hardDeadlineExceeded = true
+      void cleanup().then(
+        () => resolveHardDeadline(new RealPiFixtureDeadlineError(hardDeadlineMs)),
+        error =>
+          resolveHardDeadline(
+            new RealPiFixtureDeadlineError(hardDeadlineMs, {
+              cause: error
+            })
+          )
+      )
+    }
+    return await hardDeadline
+  }
+  if (hardDeadlineMs !== undefined) {
+    hardDeadlineTimer = setTimeout(() => {
+      void triggerHardDeadline()
+    }, hardDeadlineMs)
+    hardDeadlineTimer.unref()
+  }
   try {
     const address = await listen(server)
     server.unref()
@@ -397,6 +568,7 @@ export async function startRealPiFixture() {
     const receiptDir = join(rootDir, 'artifacts')
     const extensionDir = join(agentDir, 'extensions', 'pi-acp-fixture')
     const projectExtensionDir = join(cwd, '.pi', 'extensions')
+    const projectPromptDir = join(cwd, '.pi', 'prompts')
     const extensionPath = join(extensionDir, 'index.ts')
     const projectExtensionPath = join(projectExtensionDir, 'project-canary.js')
     const nonce = randomBytes(16).toString('hex')
@@ -423,7 +595,8 @@ export async function startRealPiFixture() {
         emptyBinDir,
         receiptDir,
         extensionDir,
-        projectExtensionDir
+        projectExtensionDir,
+        ...(projectPrompts.length > 0 ? [projectPromptDir] : [])
       ].map(path => mkdir(path, { recursive: true }))
     )
 
@@ -484,11 +657,20 @@ export async function startRealPiFixture() {
         encoding: 'utf8',
         flag: 'wx',
         mode: 0o600
-      })
+      }),
+      ...projectPrompts.map(prompt =>
+        writeFile(join(projectPromptDir, `${prompt.name}.md`), prompt.contents, {
+          encoding: 'utf8',
+          flag: 'wx',
+          mode: 0o600
+        })
+      )
     ])
 
     const extensionSource = await readFile(globalExtensionSourcePath)
     const expectedExtensionSha256 = createHash('sha256').update(extensionSource).digest('hex')
+    const projectCanarySource = await readFile(projectCanarySourcePath)
+    const expectedProjectCanarySha256 = createHash('sha256').update(projectCanarySource).digest('hex')
     const expectedExtensionRealpath = await realpath(extensionPath)
     const receiptBoundary: ReceiptBoundary = {
       rootDir: await realpath(rootDir),
@@ -525,18 +707,34 @@ export async function startRealPiFixture() {
       updateTimeoutMs: 10_000,
       shutdownTimeoutMs: 5_000,
       stderrLimitBytes: 16 * 1024,
-      clientBehavior: 'raw',
+      clientBehavior: options.clientBehavior ?? 'raw',
       transcriptMetadata: {
+        ...(options.transcriptMetadata ?? {}),
         planId: 'PACP-CMD-2026-01',
-        checkpoint: 'C0.6',
+        checkpoint: options.transcriptCheckpoint ?? 'C0.6',
         fixtureId: 'pi-extension-pack-v1',
+        fixtureSources: [
+          {
+            path: 'test/fixtures/pi-extension-pack/index.ts',
+            sha256: expectedExtensionSha256
+          },
+          {
+            path: 'test/fixtures/pi-extension-pack/project-canary.js',
+            sha256: expectedProjectCanarySha256
+          }
+        ],
         piAcpVersion: '0.0.33',
         piVersion: REAL_PI_VERSION,
-        client: 'raw-process-client'
+        client: options.clientBehavior === 'strict' ? 'strict-catalog-client' : 'raw-process-client',
+        platform: process.platform,
+        arch: process.arch,
+        ...(options.transcriptCaseId ? { caseId: options.transcriptCaseId } : {})
       }
     })
 
-    let cleanupPromise: Promise<void> | undefined
+    if (hardDeadlineExceeded || (hardDeadlineAt !== undefined && Date.now() >= hardDeadlineAt)) {
+      throw await triggerHardDeadline()
+    }
     return {
       client,
       rootDir,
@@ -553,9 +751,26 @@ export async function startRealPiFixture() {
       expectedCliRealpath,
       expectedExtensionRealpath,
       expectedExtensionSha256,
+      expectedProjectCanarySha256,
       piPackageRoot,
       packageVersion: REAL_PI_VERSION,
+      projectPromptPaths: Object.fromEntries(
+        projectPrompts.map(prompt => [prompt.name, join(projectPromptDir, `${prompt.name}.md`)])
+      ),
+      loopbackAddress: {
+        host: '127.0.0.1' as const,
+        port: address.port
+      },
       requests,
+      hardDeadline,
+      get hardDeadlineExceeded(): boolean {
+        return hardDeadlineExceeded
+      },
+      async assertWithinHardDeadline(): Promise<void> {
+        if (hardDeadlineAt !== undefined && (hardDeadlineExceeded || Date.now() >= hardDeadlineAt)) {
+          throw await triggerHardDeadline()
+        }
+      },
       async readRegistrationReceipt(): Promise<VerifiedReceipt<RealPiFixtureReceipt>> {
         return await readVerifiedReceipt<RealPiFixtureReceipt>(registrationReceiptPath, receiptBoundary)
       },
@@ -563,37 +778,24 @@ export async function startRealPiFixture() {
         return await readVerifiedReceipt<RealPiShutdownReceipt>(shutdownReceiptPath, receiptBoundary)
       },
       async closeLoopback(): Promise<void> {
-        await closeServer(server)
+        await closeLoopbackServer()
       },
       async cleanup(): Promise<void> {
-        cleanupPromise ??= (async () => {
-          const errors: unknown[] = []
-          try {
-            await client?.close()
-          } catch (error) {
-            errors.push(error)
-          }
-          try {
-            await closeServer(server)
-          } catch (error) {
-            errors.push(error)
-          }
-          try {
-            await rm(rootDir, { recursive: true, force: true })
-          } catch (error) {
-            errors.push(error)
-          }
-          if (errors.length > 0) throw new AggregateError(errors, 'C0.6 real Pi fixture cleanup failed')
-        })()
-        await cleanupPromise
+        await cleanup()
       }
     }
   } catch (error) {
+    let cleanupError: unknown
     try {
-      await client?.close()
-    } finally {
-      await closeServer(server).catch(() => undefined)
-      await rm(rootDir, { recursive: true, force: true })
+      await cleanup()
+    } catch (caughtCleanupError) {
+      cleanupError = caughtCleanupError
+    }
+    if (hardDeadlineExceeded || (hardDeadlineAt !== undefined && Date.now() >= hardDeadlineAt)) {
+      throw await triggerHardDeadline()
+    }
+    if (cleanupError !== undefined) {
+      throw new AggregateError([error, cleanupError], 'C0.6 real Pi fixture setup and cleanup failed')
     }
     throw error
   }

@@ -41,6 +41,8 @@
     "typecheck": "tsc --noEmit",
     "lint": "eslint .",
     "test": "node --import tsx --test test/**/*.test.ts",
+    "transcripts:check": "node --import tsx scripts/check-command-transcripts.ts",
+    "transcripts:update": "node --import tsx scripts/update-command-transcripts.ts",
     "smoke": "node scripts/smoke-acp.mjs",
     "prepack": "npm run build",
     "prepublishOnly": "npm run test && npm run build"
