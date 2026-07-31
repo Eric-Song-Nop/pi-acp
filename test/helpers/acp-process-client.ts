@@ -808,27 +808,43 @@ export class AcpProcessClient {
     }
 
     let timeout: NodeJS.Timeout | undefined
+    let exitListener: ProcessExitListener | undefined
     let fatalLifecycleListener: (() => void) | undefined
+    let raceResourcesCleaned = false
+    const cleanupRaceResources = (): void => {
+      if (raceResourcesCleaned) return
+      raceResourcesCleaned = true
+      if (timeout) {
+        clearTimeout(timeout)
+        timeout = undefined
+      }
+      if (exitListener) {
+        this.exitListeners.delete(exitListener)
+        exitListener = undefined
+      }
+      if (fatalLifecycleListener) {
+        this.fatalLifecycleController.signal.removeEventListener('abort', fatalLifecycleListener)
+        fatalLifecycleListener = undefined
+      }
+    }
     const timeoutPromise = new Promise<never>((_resolve, reject) => {
       timeout = setTimeout(() => {
         const error = new AcpOperationTimeoutError(operation, timeoutMs, this.transcriptNdjson())
-        if (fatalLifecycleListener) {
-          this.fatalLifecycleController.signal.removeEventListener('abort', fatalLifecycleListener)
-          fatalLifecycleListener = undefined
-        }
+        cleanupRaceResources()
         reject(error)
         this.beginFatalLifecycle(error)
       }, timeoutMs)
     })
-    let exitListener: ProcessExitListener | undefined
     const exitPromise = new Promise<never>((_resolve, reject) => {
       exitListener = exit => {
+        cleanupRaceResources()
         reject(new AcpProcessExitError(operation, exit, this.transcriptNdjson()))
       }
       this.exitListeners.add(exitListener)
     })
     const fatalLifecyclePromise = new Promise<never>((_resolve, reject) => {
       fatalLifecycleListener = () => {
+        cleanupRaceResources()
         reject(this.fatalLifecycleReason(operation))
       }
       this.fatalLifecycleController.signal.addEventListener('abort', fatalLifecycleListener, { once: true })
@@ -836,12 +852,14 @@ export class AcpProcessClient {
 
     try {
       const result = await Promise.race([invoke(), timeoutPromise, exitPromise, fatalLifecyclePromise])
+      cleanupRaceResources()
       if (this.fatalLifecycleController.signal.aborted) throw this.fatalLifecycleReason(operation)
       if (this.connection.signal.aborted) {
         throw this.connection.signal.reason ?? new Error(`ACP transport closed during ${operation}`)
       }
       return result
     } catch (error) {
+      cleanupRaceResources()
       const malformedError = error instanceof AcpMalformedMessageError ? error : this.malformedMessageError
       if (malformedError) {
         this.beginFatalLifecycle(malformedError)
@@ -877,11 +895,7 @@ export class AcpProcessClient {
       }
       throw error
     } finally {
-      if (timeout) clearTimeout(timeout)
-      if (exitListener) this.exitListeners.delete(exitListener)
-      if (fatalLifecycleListener) {
-        this.fatalLifecycleController.signal.removeEventListener('abort', fatalLifecycleListener)
-      }
+      cleanupRaceResources()
     }
   }
 

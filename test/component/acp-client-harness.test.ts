@@ -916,7 +916,7 @@ test('transport EOF waits for bounded teardown and preserves the final exit', { 
     mode: 'close-output-on-prompt',
     client: {
       requestTimeoutMs: 2_000,
-      shutdownTimeoutMs: 100
+      shutdownTimeoutMs: 500
     }
   })
   t.after(fixture.cleanup)
@@ -938,16 +938,19 @@ test('transport EOF waits for bounded teardown and preserves the final exit', { 
       closedSettled = true
     }
   )
+  let pendingStrictCause: unknown
   const pendingStrictCatalogAssertion = assert.rejects(
     strict.waitForCatalog(sessionId, { afterRevision: 1, timeoutMs: 2_000 }),
     (error: unknown) => {
       assert.ok(error instanceof CatalogTransportClosedError)
       assert.equal(error.exit, undefined)
       assert.ok(error.cause instanceof Error)
+      pendingStrictCause = error.cause
       assert.equal(error.transcript.includes('"kind":"process_exit"'), false)
       return true
     }
   )
+  let pendingRawCause: unknown
   const pendingRawUpdateAssertion = assert.rejects(
     fixture.client.waitForSessionUpdate(() => false, {
       afterIndex: fixture.client.retainedSessionUpdateCount,
@@ -958,15 +961,19 @@ test('transport EOF waits for bounded teardown and preserves the final exit', { 
       assert.equal(error.code, 'ACP_TRANSPORT_CLOSED')
       assert.equal(error.operation, 'session/update')
       assert.ok(error.cause instanceof Error)
+      pendingRawCause = error.cause
       assert.equal(error.transcript.includes('"kind":"process_exit"'), false)
       return true
     }
   )
   const promptAssertion = assert.rejects(
-    fixture.client.prompt({
-      sessionId,
-      prompt: [{ type: 'text', text: '/alpha close-output' }]
-    }),
+    fixture.client.prompt(
+      {
+        sessionId,
+        prompt: [{ type: 'text', text: '/alpha close-output' }]
+      },
+      { timeoutMs: 50 }
+    ),
     (error: unknown) => {
       assert.ok(error instanceof AcpProcessExitError)
       assert.equal(error.operation, 'session/prompt')
@@ -977,7 +984,19 @@ test('transport EOF waits for bounded teardown and preserves the final exit', { 
   )
 
   await Promise.all([pendingStrictCatalogAssertion, pendingRawUpdateAssertion])
+  const terminalReason = fixture.client.terminalLifecycleSignal.reason
+  assert.ok(terminalReason instanceof Error)
+  assert.strictEqual(pendingStrictCause, terminalReason)
+  assert.strictEqual(pendingRawCause, terminalReason)
   assert.equal(fixture.client.isRunning, false)
+  assert.equal(closedSettled, false)
+  assert.equal(
+    fixture.client.transcript().some(entry => entry.kind === 'process_exit'),
+    false
+  )
+
+  await new Promise(resolve => setTimeout(resolve, 100))
+  assert.equal(fixture.client.fatalLifecycleSignal.aborted, false)
   assert.equal(closedSettled, false)
   assert.equal(
     fixture.client.transcript().some(entry => entry.kind === 'process_exit'),
@@ -996,6 +1015,7 @@ test('transport EOF waits for bounded teardown and preserves the final exit', { 
         assert.ok(error instanceof CatalogTransportClosedError)
         assert.equal(error.exit, undefined)
         assert.ok(error.cause instanceof Error)
+        assert.strictEqual(error.cause, terminalReason)
         assert.equal(error.transcript.includes('"kind":"process_exit"'), false)
         return true
       }
@@ -1013,6 +1033,7 @@ test('transport EOF waits for bounded teardown and preserves the final exit', { 
       assert.equal(error.code, 'ACP_TRANSPORT_CLOSED')
       assert.equal(error.operation, 'session/update')
       assert.ok(error.cause instanceof Error)
+      assert.strictEqual(error.cause, terminalReason)
       assert.equal(error.transcript.includes('"kind":"process_exit"'), false)
       return true
     }
