@@ -17,8 +17,13 @@ pi-acp 0.0.33 @ d1cffc047ab37a096ee70ca39cfc1de463db8d12
 
 The Pi package versions were installation/version-probed with an isolated
 `PI_PACKAGE_DIR`. Full command and extension compatibility is not claimed until
-the relevant G5 matrix case is verified. The machine-readable matrix therefore
-starts with `e2eStatus: proposed`, using the tracker workflow vocabulary.
+the relevant G5 matrix case is verified.
+
+Initial verification states use the canonical vocabulary from tracker §8.1:
+
+- `e2eStatus`: `todo`
+- `clients.zed.status`: `todo` (`manual`)
+- `clients.nonZed.status`: `todo` (`manual`)
 
 Pinned source identities:
 
@@ -26,6 +31,7 @@ Pinned source identities:
 - Pi `0.83.0`: `845d6ff1f6643aba440341cce877ce1c43ebbc39`
 - ACP SDK `0.26.0`: `73bc30649b650de320340c782733bf69a545bd28`
 - Zed `v1.9.0`: `ced90fc636c4ede05402befc38a63bae7fd741bd`
+- CodeCompanion.nvim `v19.21.0`: `cedbead815fb435026daa63a487bb69260c1cf69`
 
 ## Target test window
 

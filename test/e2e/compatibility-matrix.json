@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "planId": "PACP-CMD-2026-01",
   "recordedAt": "2026-07-31",
-  "e2eStatus": "proposed",
+  "e2eStatus": "todo",
   "adapter": {
     "package": "pi-acp",
     "version": "0.0.33",
@@ -35,7 +35,7 @@
       "repository": "zed-industries/zed",
       "ref": "v1.9.0",
       "commit": "ced90fc636c4ede05402befc38a63bae7fd741bd",
-      "status": "proposed",
+      "status": "todo",
       "verification": "manual"
     },
     "nonZed": {
@@ -44,7 +44,7 @@
       "version": "19.21.0",
       "ref": "v19.21.0",
       "commit": "cedbead815fb435026daa63a487bb69260c1cf69",
-      "status": "proposed",
+      "status": "todo",
       "verification": "manual"
     }
   },
