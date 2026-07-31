@@ -40,12 +40,13 @@ a completed `end` body may contribute XF02 derived evidence. Outcomes and
 bodies remain test-internal and are not added to the persisted artifact surface.
 
 The immutable manifest records the C0.3 blocker at capture time. Pushed
-[run `30638274121`](https://github.com/Eric-Song-Nop/pi-acp/actions/runs/30638274121)
-at prior C0.3 head
-[`0606d74c21e35f566d117c7493e7a02554efefb8`](https://github.com/Eric-Song-Nop/pi-acp/commit/0606d74c21e35f566d117c7493e7a02554efefb8)
+[run `30642047986`](https://github.com/Eric-Song-Nop/pi-acp/actions/runs/30642047986)
+at C0.3 implementation head
+[`1a6a00c1f62bcb165b9738ef308f2f9d73151953`](https://github.com/Eric-Song-Nop/pi-acp/commit/1a6a00c1f62bcb165b9738ef308f2f9d73151953)
 provides external run-scoped Linux/x64 evidence, but still awaits independent
-verification. Operationally, C0.7 remains `blocked` until that dependency and
-the accepted-partial-request review at replacement head `f95df57…` are
-resolved. These artifacts prove configured loopback request counts, not
-OS-level egress denial; external evidence does not rewrite that boundary
+verification. C0.7 replacement head `f95df57…` is independently clean with no
+P1/P2 or unresolved review thread, so operationally C0.7 remains `blocked` only
+until the C0.3 review binds that exact implementation head/run. These artifacts
+prove configured loopback request counts, not OS-level egress denial; external
+evidence and later documentation-only commits do not rewrite that boundary
 retroactively.

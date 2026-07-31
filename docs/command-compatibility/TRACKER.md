@@ -239,11 +239,19 @@ commands 宣称为稳定支持。
       输出 `testedCheckoutSha` (`git rev-parse HEAD`) 与 `expectedCheckoutSha`，
       run-scoped SHA 不写回历史 `adapter.baselineSha`。
 - [x] networked preflight 完成 checkout/setup、`npm ci`、image acquisition、npm
-      registry 与 credential-neutralized Git smart-HTTP `ls-remote` peeled tag pin
-      验证，以及 npm `10.9.3` 的 runtime/full-tree live audit；package
-      name/version/`gitHead`/SHA-512 SRI、repository tag、全部 severity totals、
-      sorted GHSA IDs 或验证可用性漂移都会 hard fail。latest 与 Pi `main` 只是
-      warn-only observation，audit 不是 immutable evidence 或 waiver。
+      registry 与 repository-independent、credential/proxy-neutralized Git
+      smart-HTTP `ls-remote` peeled tag pin 验证，以及 npm `10.9.3` 的
+      runtime/full-tree live audit；package name/version/`gitHead`/SHA-512 SRI、
+      repository tag、全部 severity totals、sorted GHSA IDs 或验证可用性漂移都会
+      hard fail。latest 与 Pi `main` 只是 warn-only observation，audit 不是
+      immutable evidence 或 waiver。
+- [x] 五个 network Git tag lookup 都从 canonical fresh temporary cwd 执行，
+      discovery ceiling 位于其 parent，并显式使用 `/dev/null` git-dir、
+      system/global/environment config isolation 与 HTTPS-only transport。
+      adversarial regression 在 ancestor repo 注入 URL-scoped credential helper、
+      `extraHeader`、proxy 与 `url.*.insteadOf`，证明旧调用会 rewrite，而 production
+      双层 isolation 保持 canonical GitHub URL 且不读取 scoped config；generic
+      empty helper/header/proxy 仅作为 defense-in-depth。
 - [x] `typecheck`、`lint`、`test`、`build` 与 `real-pi-e2e` execution 使用同一
       `linux/amd64` container、`docker --network none`、只读 root/worktree、isolated
       temp homes、unprivileged UID/GID、`--cap-drop ALL`、no-new-privileges 与
@@ -254,12 +262,14 @@ commands 宣称为稳定支持。
       one-shot loopback provider 发出一个 bounded request，得到固定 ACP text 与
       `end_turn`，随后 clean exit/teardown，不使用真实模型账户。
 - [x] pushed CI
-      [run `30636901392`](https://github.com/Eric-Song-Nop/pi-acp/actions/runs/30636901392)
-      对 exact event head
-      [`1b21be38e992f96b406c7a8d5d1f740384e32b02`](https://github.com/Eric-Song-Nop/pi-acp/commit/1b21be38e992f96b406c7a8d5d1f740384e32b02)
+      [run `30642047986`](https://github.com/Eric-Song-Nop/pi-acp/actions/runs/30642047986)
+      对 exact implementation head
+      [`1a6a00c1f62bcb165b9738ef308f2f9d73151953`](https://github.com/Eric-Song-Nop/pi-acp/commit/1a6a00c1f62bcb165b9738ef308f2f9d73151953)
       的全部 distinct gates 与 stable `required` job 全绿。`C0.3` 在 independent
-      review 绑定该 exact head/run 前保持 `in_review`；`C0.7` 在该复验与 separate
-      surviving fixture-observation review candidate 均解决前保持 `blocked`。
+      review 绑定该 exact implementation head/run 前保持 `in_review`；后续
+      documentation-only publication commit 不替换这个 run-scoped identity。C0.7
+      自身 replacement head 已独立复验，无 unresolved review thread，仅在该 C0.3
+      复验完成前保持 `blocked`。
 
 证据：
 [`.github/workflows/ci.yml`](../../.github/workflows/ci.yml)、
@@ -268,6 +278,7 @@ commands 宣称为稳定支持。
 `.github/scripts/run-network-denied-ci.sh`、
 `scripts/check-ci-provenance.ts`、
 `test/helpers/ci-provenance.ts`、
+`test/unit/ci-provenance.test.ts`、
 `test/unit/compatibility-matrix.test.ts`
 和 `test/component/real-pi-agent-turn.test.ts`。
 
@@ -398,19 +409,21 @@ TOCTOU hardening，不是 hostile-child executed-code attestation。
 - [x] loopback listener 在 HTTP handler 接受 request 时同步加入唯一 observation，再将同一记录 exactly-once terminalize 为 `end` / `timeout` / `aborted` / `error`；XF02 只接受 completed `end` body。completed POST 503 与 incomplete POST handler-owned 408 controls 在 Node `26.5.0` / exact `22.19.0` 都证明 partial accepted request 不会从零计数证据消失。
 - [x] normal tests 不改写 evidence；bounded lstat → `O_NOFOLLOW` open → fstat/path identity → digest/canonical parse 接受 fresh Git `0644`，但拒绝 group/world write。credential signatures、24/32-hex nonce、UUID、absolute path、loopback host/port、XF02 canary（含 ordered text-chunk reconstruction）、reserved-token placement、leaf/ancestor symlink、hardlink、非 canonical bytes、malicious historical orphan、CAS/active/stale lock、crash temp/link-before-unlink 与 live-reader retry 都有回归。
 - [x] 显式 Linux/Darwin updater 要求 exact Node `22.19.0`、全仓 clean Git、全部三个 case、旧 manifest SHA、未来有效 recheck date 与 `--accept-baseline-change`；每个 case fresh capture 两次且 bytes/outcome 完全相同，30s fixture hard deadline 在 teardown race 中也不能接受 late success。artifact 采用 no-clobber content address，manifest 采用 cooperative lock、双重 CAS、atomic rename 与 directory `fsync`。stale-lock recovery 仅限同一 local filesystem、host 与 PID namespace；不覆盖 NFS/shared-host 或 hostile same-UID actor。
-- [x] `C0.3` prior exact head
-      [`0606d74c21e35f566d117c7493e7a02554efefb8`](https://github.com/Eric-Song-Nop/pi-acp/commit/0606d74c21e35f566d117c7493e7a02554efefb8)
+- [x] `C0.3` exact implementation head
+      [`1a6a00c1f62bcb165b9738ef308f2f9d73151953`](https://github.com/Eric-Song-Nop/pi-acp/commit/1a6a00c1f62bcb165b9738ef308f2f9d73151953)
       的 pushed stable-`required`
-      [run `30638274121`](https://github.com/Eric-Song-Nop/pi-acp/actions/runs/30638274121)
+      [run `30642047986`](https://github.com/Eric-Song-Nop/pi-acp/actions/runs/30642047986)
       全绿。
 - [ ] `C0.3` exact pushed network-denied CI evidence 尚待 independent verification，
-      repository-local Git config provenance review candidate 也尚待修正复验；C0.7
-      即使本地 artifacts/gates 全绿也保持 `blocked`。blocker owner 为 task #2，
-      复查日期 `2026-08-07`。
-- [ ] C0.7 replacement head
+      已修正的 repository-independent provenance head/run 尚待复验；C0.7 即使本地
+      artifacts/gates 全绿也保持 `blocked`。blocker owner 为 task #2，复查日期
+      `2026-08-07`。
+- [x] C0.7 replacement head
       [`f95df57`](https://github.com/Eric-Song-Nop/pi-acp/commit/f95df57d56497753c12beb864903c02e7ceb99d6)
-      尚待 independent verification accepted-partial-request control，并据此处理
-      GitHub review thread。
+      已 independent verification accepted-partial-request control；原 GitHub
+      review thread 已 resolved，PR #8 无 unresolved review thread、无 P1/P2。
+      nonblocking Low：committed controls deterministic 覆盖 `end` / `timeout`，
+      未单独覆盖 `aborted` / `error`。
 
 本次 runtime/capture commit 为
 [`1009c1e`](https://github.com/Eric-Song-Nop/pi-acp/commit/1009c1e58536c7c907348356706c148cf5593e87)，

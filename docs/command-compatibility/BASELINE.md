@@ -75,13 +75,15 @@ matrix case.
 ## C0.3 CI execution boundary and live provenance
 
 `C0.3` remains `in_review`. Pushed CI
-[run `30636901392`](https://github.com/Eric-Song-Nop/pi-acp/actions/runs/30636901392)
-against exact requested event head
-[`1b21be38e992f96b406c7a8d5d1f740384e32b02`](https://github.com/Eric-Song-Nop/pi-acp/commit/1b21be38e992f96b406c7a8d5d1f740384e32b02)
+[run `30642047986`](https://github.com/Eric-Song-Nop/pi-acp/actions/runs/30642047986)
+against exact implementation head
+[`1a6a00c1f62bcb165b9738ef308f2f9d73151953`](https://github.com/Eric-Song-Nop/pi-acp/commit/1a6a00c1f62bcb165b9738ef308f2f9d73151953)
 passed every distinct blocking gate and the stable `required` aggregate. It must
 not be marked `verified` until independent review binds its disposition to that
-exact head and run; `C0.7` remains `blocked` while that review and disposition
-of the separate surviving fixture-observation review candidate are unresolved.
+exact implementation head and run. The later documentation-only publication
+commit does not replace that run-scoped implementation identity. C0.7's own
+replacement head is independently clean with no unresolved review threads, so
+its remaining blocker is only C0.3.
 
 Exact CI toolchain and policy pins:
 
@@ -97,11 +99,16 @@ Exact CI toolchain and policy pins:
 Checkout, Node setup, `npm ci`, image acquisition, registry/GitHub provenance,
 and both npm audits run in the explicitly networked preflight. The provenance
 step hard-fails when an immutable package name/version/npm `gitHead`/SHA-512 SRI,
-credential-neutralized Git smart-HTTP peeled repository tag, exact audit severity
-total, or sorted GHSA identity drifts or cannot be verified. The audit is a live
-mutable-policy check under npm `10.9.3`, not reproducible immutable evidence and
-not a vulnerability waiver. Latest package versions and Pi `main` are warn-only
-observations.
+repository-independent and credential/proxy-neutralized Git smart-HTTP peeled
+repository tag, exact audit severity total, or sorted GHSA identity drifts or
+cannot be verified. Network Git runs from a canonical fresh temporary cwd with
+ancestor discovery stopped at its parent, an explicit `/dev/null` Git directory,
+system/global/environment config isolation, and HTTPS-only transport.
+Repository-local and worktree URL-scoped helpers, headers, proxies, and rewrites
+cannot participate; empty command-line helper/header/proxy values are additional
+defense, not the isolation boundary. The audit is a live mutable-policy check
+under npm `10.9.3`, not reproducible immutable evidence and not a vulnerability
+waiver. Latest package versions and Pi `main` are warn-only observations.
 
 Each provenance run emits its own `testedCheckoutSha` from `git rev-parse HEAD`
 and compares it with `expectedCheckoutSha` from the GitHub event. The historical
@@ -165,13 +172,15 @@ requests from disappearing behind a false zero count. Terminal outcomes and
 bodies remain test-internal; persisted artifacts retain only the allowlisted
 count and derived shape.
 
-C0.7 remains `blocked` while C0.3's exact pushed network-denied head/run awaits
-independent verification and while the accepted-partial-request correction at
-replacement head `f95df57d56497753c12beb864903c02e7ceb99d6` awaits final review
-disposition. C0.3's run-scoped Linux execution evidence is external to the
-immutable C0.7 manifest and does not retroactively turn configured loopback
-counts into OS-level egress denial. The manifest records the C0.3 blocker and
-recheck date explicitly.
+C0.7 replacement head `f95df57d56497753c12beb864903c02e7ceb99d6` is
+independently clean with no P1/P2 and no unresolved review threads. C0.7 remains
+`blocked` only while C0.3's exact pushed network-denied implementation head/run
+awaits independent verification. C0.3's run-scoped Linux execution evidence is
+external to the immutable C0.7 manifest and does not retroactively turn
+configured loopback counts into OS-level egress denial. The manifest records
+the C0.3 blocker and recheck date explicitly. A nonblocking Low remains because
+the committed observer controls deterministically exercise `end` and `timeout`,
+but not separate `aborted` and `error` cases.
 
 ## Dependency audit snapshot
 
