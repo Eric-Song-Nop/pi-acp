@@ -2,7 +2,7 @@
   "schemaVersion": 2,
   "planId": "PACP-CMD-2026-01",
   "recordedAt": "2026-07-31",
-  "e2eStatus": "in_review",
+  "e2eStatus": "verified",
   "adapter": {
     "package": "pi-acp",
     "version": "0.0.33",

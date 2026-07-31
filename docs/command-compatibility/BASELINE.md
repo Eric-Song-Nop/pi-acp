@@ -21,9 +21,13 @@ the relevant G5 matrix case is verified.
 
 Current verification states use the canonical vocabulary from tracker §8.1:
 
-- `e2eStatus`: `in_review`
+- `e2eStatus`: `verified`
 - `clients.zed.status`: `todo` (`manual`)
 - `clients.nonZed.status`: `todo` (`manual`)
+
+The verified E2E status covers the C0.3 gate and in-repository harness boundary.
+It is not G5 command/client certification; both manual client axes remain
+`todo`.
 
 Pinned source identities:
 
@@ -74,16 +78,21 @@ matrix case.
 
 ## C0.3 CI execution boundary and live provenance
 
-`C0.3` remains `in_review`. Pushed CI
+`C0.3` is `verified`. Pushed CI
 [run `30642047986`](https://github.com/Eric-Song-Nop/pi-acp/actions/runs/30642047986)
 against exact implementation head
 [`1a6a00c1f62bcb165b9738ef308f2f9d73151953`](https://github.com/Eric-Song-Nop/pi-acp/commit/1a6a00c1f62bcb165b9738ef308f2f9d73151953)
-passed every distinct blocking gate and the stable `required` aggregate. It must
-not be marked `verified` until independent review binds its disposition to that
-exact implementation head and run. The later documentation-only publication
-commit does not replace that run-scoped implementation identity. C0.7's own
-replacement head is independently clean with no unresolved review threads, so
-its remaining blocker is only C0.3.
+passed every distinct blocking gate and the stable `required` aggregate.
+Independent review bound its clean disposition, with no P1/P2/Low, to that
+exact implementation head and run, then resolved the
+[sole PR #9 review thread](https://github.com/Eric-Song-Nop/pi-acp/pull/9#discussion_r3691265707).
+The separate documentation-only publication head
+[`e4cdeecd64f2652d1bc32f1a26844ec2f8dc4c8b`](https://github.com/Eric-Song-Nop/pi-acp/commit/e4cdeecd64f2652d1bc32f1a26844ec2f8dc4c8b)
+also passed all eight jobs in
+[run `30642477922`](https://github.com/Eric-Song-Nop/pi-acp/actions/runs/30642477922);
+it does not replace the run-scoped implementation identity. C0.7's own
+replacement head was already independently clean, so this verification
+discharges its only remaining operational blocker.
 
 Exact CI toolchain and policy pins:
 
@@ -173,14 +182,15 @@ bodies remain test-internal; persisted artifacts retain only the allowlisted
 count and derived shape.
 
 C0.7 replacement head `f95df57d56497753c12beb864903c02e7ceb99d6` is
-independently clean with no P1/P2 and no unresolved review threads. C0.7 remains
-`blocked` only while C0.3's exact pushed network-denied implementation head/run
-awaits independent verification. C0.3's run-scoped Linux execution evidence is
-external to the immutable C0.7 manifest and does not retroactively turn
-configured loopback counts into OS-level egress denial. The manifest records
-the C0.3 blocker and recheck date explicitly. A nonblocking Low remains because
-the committed observer controls deterministically exercise `end` and `timeout`,
-but not separate `aborted` and `error` cases.
+independently clean with no P1/P2 and no unresolved review threads. C0.7 is now
+operationally `verified` because C0.3's exact pushed network-denied
+implementation head/run was independently verified. C0.3's run-scoped Linux
+execution evidence is external to the immutable C0.7 manifest and does not
+retroactively turn configured loopback counts into OS-level egress denial. The
+unchanged manifest continues to record the C0.3 blocker and recheck date that
+were true at capture time. A nonblocking Low remains because the committed
+observer controls deterministically exercise `end` and `timeout`, but not
+separate `aborted` and `error` cases.
 
 ## Dependency audit snapshot
 

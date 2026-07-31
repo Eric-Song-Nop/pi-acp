@@ -308,7 +308,7 @@ test('compatibility matrix pins the exact repositories, source identities, and n
 test('compatibility matrix pins the C0.3 execution and checkout policy', () => {
   const matrix = readCompatibilityMatrix()
 
-  assert.equal(matrix.e2eStatus, 'in_review')
+  assert.equal(matrix.e2eStatus, 'verified')
   assert.deepEqual(matrix.ci, {
     checkpoint: 'C0.3',
     runner: 'ubuntu-24.04',
@@ -366,7 +366,8 @@ test('compatibility docs bind every pin and status to its canonical role', () =>
   assert.match(readme, /target test window/i)
   assert.match(readme, /G5/)
 
-  assert.match(tracker, /\| `C0\.3`[^\n]+\| `in_review`\s+\|/u)
+  assert.match(tracker, /\| `C0\.3`[^\n]+\| `verified`\s+\|/u)
+  assert.match(tracker, /\| `C0\.7`[^\n]+\| `verified`\s+\|/u)
   for (const phrase of [
     'testedCheckoutSha',
     'expectedCheckoutSha',

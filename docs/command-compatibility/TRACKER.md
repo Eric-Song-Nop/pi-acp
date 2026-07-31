@@ -155,11 +155,11 @@ commands 宣称为稳定支持。
 | ------ | ----------------------------------------------------------------- | ----------- | ------------------------- | --------- |
 | `C0.1` | tracker 合入仓库并决定 Issues 策略                                | `in_review` | `DEC-001`                 | `G0`      |
 | `C0.2` | 固定 compatibility tuple 与受测版本窗口                           | `in_review` | —                         | `G0`      |
-| `C0.3` | CI 跑 typecheck/lint/unit/build 和 E2E 基础矩阵                   | `in_review` | `C0.2`                    | `G0`      |
+| `C0.3` | CI 跑 typecheck/lint/unit/build 和 E2E 基础矩阵                   | `verified`  | `C0.2`                    | `G0`      |
 | `C0.4` | 定义 command compatibility schema                                 | `verified`  | `DEC-003`                 | `G0`      |
 | `C0.5` | raw ACP + strict-client harness                                   | `verified`  | `DEC-005`                 | `G0`      |
 | `C0.6` | 建立真实 Pi fixture extension pack                                | `verified`  | `C0.5`                    | `G0`      |
-| `C0.7` | 记录当前失败基线和 immutable transcripts                          | `blocked`   | `C0.3`, `C0.6`            | `G0`      |
+| `C0.7` | 记录当前失败基线和 immutable transcripts                          | `verified`  | `C0.3`, `C0.6`            | `G0`      |
 | `C1.1` | extension stderr/load diagnostics 可见且安全限长                  | `proposed`  | `C0.7`                    | `G1`      |
 | `C1.2` | `extension_error` 映射为可见、可测试错误                          | `proposed`  | `C0.7`                    | `G1`      |
 | `C1.3` | Pi child 退出时 fail pending command，并提供确定恢复路径          | `proposed`  | `C0.5`                    | `G1`      |
@@ -265,11 +265,17 @@ commands 宣称为稳定支持。
       [run `30642047986`](https://github.com/Eric-Song-Nop/pi-acp/actions/runs/30642047986)
       对 exact implementation head
       [`1a6a00c1f62bcb165b9738ef308f2f9d73151953`](https://github.com/Eric-Song-Nop/pi-acp/commit/1a6a00c1f62bcb165b9738ef308f2f9d73151953)
-      的全部 distinct gates 与 stable `required` job 全绿。`C0.3` 在 independent
-      review 绑定该 exact implementation head/run 前保持 `in_review`；后续
-      documentation-only publication commit 不替换这个 run-scoped identity。C0.7
-      自身 replacement head 已独立复验，无 unresolved review thread，仅在该 C0.3
-      复验完成前保持 `blocked`。
+      的全部 distinct gates 与 stable `required` job 全绿。independent review
+      已将 no-P1/P2/Low disposition 绑定该 exact implementation head/run，并
+      resolved
+      [PR #9 唯一 review thread](https://github.com/Eric-Song-Nop/pi-acp/pull/9#discussion_r3691265707)，
+      因此 `C0.3` 为 `verified`。后续
+      documentation-only publication head
+      [`e4cdeec`](https://github.com/Eric-Song-Nop/pi-acp/commit/e4cdeecd64f2652d1bc32f1a26844ec2f8dc4c8b)
+      的全部八个 jobs 也在
+      [run `30642477922`](https://github.com/Eric-Song-Nop/pi-acp/actions/runs/30642477922)
+      全绿，但不替换这个 run-scoped implementation identity。C0.7 自身
+      replacement head 已独立复验；其唯一 operational blocker 已解除。
 
 证据：
 [`.github/workflows/ci.yml`](../../.github/workflows/ci.yml)、
@@ -389,10 +395,11 @@ ancestor symlink 与替换成另一 real directory 的 adversarial checks 均通
 [GitHub review `4827962159`](https://github.com/Eric-Song-Nop/pi-acp/pull/5#pullrequestreview-4827962159)。
 
 边界：本 checkpoint 证明 configured loopback provider 零 request，但
-`PI_OFFLINE`/telemetry flags 与空 `PATH` 不是 OS egress sandbox；C0.3 的独立
-run-scoped Linux evidence 正在 stacked PR #9 复验，不会 retroactively 扩大 C0.6
-artifact 的结论。Windows `.cmd`/shell env、grandchild containment 与 no-follow
-等价保证也必须等 Windows matrix 后再认证。
+`PI_OFFLINE`/telemetry flags 与空 `PATH` 不是 OS egress sandbox；C0.3 的
+run-scoped Linux evidence 已在 stacked PR #9 对
+`1a6a00c…@30642047986` 独立复验，不会 retroactively 扩大 C0.6 artifact 的
+结论。Windows `.cmd`/shell env、grandchild containment 与 no-follow 等价保证
+也必须等 Windows matrix 后再认证。
 fixture command 的 ACP catalog/execution/UI 行为仍由 `FX-01..12`、`C2.x` 和
 `C3.x` 验证，本 checkpoint 不把“真实 Pi 已加载 extension”扩大成公开 command
 compatibility 声明。global fixture 与同一 private root 内的 Pi process 是本测试
@@ -414,10 +421,12 @@ TOCTOU hardening，不是 hostile-child executed-code attestation。
       的 pushed stable-`required`
       [run `30642047986`](https://github.com/Eric-Song-Nop/pi-acp/actions/runs/30642047986)
       全绿。
-- [ ] `C0.3` exact pushed network-denied CI evidence 尚待 independent verification，
-      已修正的 repository-independent provenance head/run 尚待复验；C0.7 即使本地
-      artifacts/gates 全绿也保持 `blocked`。blocker owner 为 task #2，复查日期
-      `2026-08-07`。
+- [x] `C0.3` exact pushed network-denied CI evidence
+      `1a6a00c…@30642047986` 已 independent verification，无 P1/P2/Low，且 PR #9
+      [唯一 review thread](https://github.com/Eric-Song-Nop/pi-acp/pull/9#discussion_r3691265707)
+      已 resolved；C0.7 的唯一 operational blocker 已解除，checkpoint 为
+      `verified`。checked-in manifest 仍保留 capture-time blocker 与
+      `2026-08-07` recheck date，不被这项外部证据改写。
 - [x] C0.7 replacement head
       [`f95df57`](https://github.com/Eric-Song-Nop/pi-acp/commit/f95df57d56497753c12beb864903c02e7ceb99d6)
       已 independent verification accepted-partial-request control；原 GitHub
