@@ -2,9 +2,9 @@ import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
 import { execFile } from 'node:child_process'
 import { rmSync } from 'node:fs'
-import { mkdtemp, readFile, writeFile } from 'node:fs/promises'
+import { mkdtemp, readFile, realpath, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { isAbsolute, join, resolve } from 'node:path'
+import { dirname, isAbsolute, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { promisify } from 'node:util'
 import {
@@ -59,9 +59,12 @@ export function sanitizedCommandEnvironment(cacheDir: string): NodeJS.ProcessEnv
     LC_ALL: 'C',
     TZ: 'UTC',
     GIT_CONFIG_NOSYSTEM: '1',
+    GIT_CONFIG_SYSTEM: '/dev/null',
     GIT_CONFIG_GLOBAL: '/dev/null',
+    GIT_CONFIG_COUNT: '0',
     GIT_TERMINAL_PROMPT: '0',
     GIT_ASKPASS: '',
+    GIT_OPTIONAL_LOCKS: '0',
     npm_config_registry: 'https://registry.npmjs.org/',
     npm_config_userconfig: join(cacheDir, 'npm-userconfig'),
     npm_config_globalconfig: join(cacheDir, 'npm-globalconfig'),
@@ -76,13 +79,14 @@ async function runCommand(
   args: readonly string[],
   options: {
     allowedExitCodes?: readonly number[]
+    cwd?: string
     maxBuffer?: number
     env: NodeJS.ProcessEnv
   }
 ): Promise<CommandResult> {
   try {
     const { stdout } = await execFileAsync(file, [...args], {
-      cwd: repositoryRoot,
+      cwd: options.cwd ?? repositoryRoot,
       encoding: 'utf8',
       env: options.env,
       timeout: COMMAND_TIMEOUT_MS,
@@ -102,6 +106,32 @@ async function runCommand(
       cause: error
     })
   }
+}
+
+export function isolatedGitNetworkEnvironment(cacheDir: string): NodeJS.ProcessEnv {
+  assert.ok(isAbsolute(cacheDir), 'C0.3 isolated Git cwd must be absolute')
+  return {
+    ...sanitizedCommandEnvironment(cacheDir),
+    GIT_CEILING_DIRECTORIES: dirname(cacheDir),
+    GIT_DISCOVERY_ACROSS_FILESYSTEM: '0',
+    GIT_ALLOW_PROTOCOL: 'https'
+  }
+}
+
+export async function runIsolatedGitNetworkCommand(
+  cacheDir: string,
+  args: readonly string[],
+  options: {
+    allowedExitCodes?: readonly number[]
+    maxBuffer?: number
+  } = {}
+): Promise<CommandResult> {
+  assert.equal(await realpath(cacheDir), cacheDir, 'C0.3 isolated Git cwd must be canonical')
+  return runCommand('git', args, {
+    ...options,
+    cwd: cacheDir,
+    env: isolatedGitNetworkEnvironment(cacheDir)
+  })
 }
 
 async function fetchJson(url: URL, headers: Record<string, string> = {}): Promise<unknown> {
@@ -135,8 +165,8 @@ async function assertNpmPin(expected: NpmPinExpectation): Promise<void> {
   validateNpmPackagePin(expected, await fetchJson(registryVersionUrl(expected.package, expected.version)))
 }
 
-async function githubTagCommit(repository: string, ref: string, env: NodeJS.ProcessEnv): Promise<string> {
-  const result = await runCommand('git', gitLsRemoteTagArgs(repository, ref), { env })
+async function githubTagCommit(repository: string, ref: string, cacheDir: string): Promise<string> {
+  const result = await runIsolatedGitNetworkCommand(cacheDir, gitLsRemoteTagArgs(repository, ref))
   return resolveGitLsRemoteTagCommit(ref, result.stdout)
 }
 
@@ -180,10 +210,11 @@ async function mutableObservations(matrix: ReturnType<typeof readCompatibilityMa
 async function main(): Promise<void> {
   const options = parseArgs(process.argv.slice(2))
   const matrix = readCompatibilityMatrix()
-  const cacheDir =
+  const cacheDir = await realpath(
     process.env.RUNNER_TEMP && isAbsolute(process.env.RUNNER_TEMP)
       ? await mkdtemp(join(process.env.RUNNER_TEMP, 'pi-acp-c0.3-provenance-'))
       : await mkdtemp(join(tmpdir(), 'pi-acp-c0.3-provenance-'))
+  )
   process.once('exit', () => rmSync(cacheDir, { recursive: true, force: true }))
   await Promise.all([
     writeFile(join(cacheDir, 'npm-userconfig'), '', { encoding: 'utf8', flag: 'wx', mode: 0o600 }),
@@ -284,7 +315,7 @@ async function main(): Promise<void> {
   for (const pin of tagPins) {
     observedTagCommits.push({
       ...pin,
-      observed: await githubTagCommit(pin.repository, pin.ref, env)
+      observed: await githubTagCommit(pin.repository, pin.ref, cacheDir)
     })
   }
   for (const pin of observedTagCommits) {

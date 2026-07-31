@@ -1,7 +1,16 @@
 import assert from 'node:assert/strict'
-import { join } from 'node:path'
+import { execFile } from 'node:child_process'
+import { mkdir, mkdtemp, realpath, rm } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { dirname, join } from 'node:path'
 import test from 'node:test'
-import { parseArgs, sanitizedCommandEnvironment } from '../../scripts/check-ci-provenance.js'
+import { promisify } from 'node:util'
+import {
+  isolatedGitNetworkEnvironment,
+  parseArgs,
+  runIsolatedGitNetworkCommand,
+  sanitizedCommandEnvironment
+} from '../../scripts/check-ci-provenance.js'
 import {
   assertAuditSnapshot,
   assertExactToolchain,
@@ -49,6 +58,7 @@ const HIGH_COUNTS: AuditCounts = {
   critical: 0,
   total: 1
 }
+const execFileAsync = promisify(execFile)
 
 function auditSource(counts: AuditCounts, vulnerabilities: Record<string, unknown> = {}): string {
   return JSON.stringify({
@@ -93,7 +103,7 @@ test('C0.3 provenance binds the exact clean checkout and strict CLI input', () =
   assert.throws(() => assertGitCheckout('not-a-sha', EXPECTED_SHA, ''))
 })
 
-test('C0.3 npm subprocesses use distinct isolated user and global configuration', () => {
+test('C0.3 provenance subprocesses isolate configuration and reject ambient transport hooks', () => {
   const cacheDir = join('/tmp', 'c0.3-provenance-test')
   const env = sanitizedCommandEnvironment(cacheDir)
 
@@ -101,13 +111,45 @@ test('C0.3 npm subprocesses use distinct isolated user and global configuration'
   assert.equal(env.npm_config_globalconfig, join(cacheDir, 'npm-globalconfig'))
   assert.notEqual(env.npm_config_userconfig, env.npm_config_globalconfig)
   assert.equal(env.npm_config_registry, 'https://registry.npmjs.org/')
+  assert.equal(env.GIT_CONFIG_NOSYSTEM, '1')
+  assert.equal(env.GIT_CONFIG_SYSTEM, '/dev/null')
   assert.equal(env.GIT_CONFIG_GLOBAL, '/dev/null')
+  assert.equal(env.GIT_CONFIG_COUNT, '0')
   assert.equal(env.GIT_TERMINAL_PROMPT, '0')
   assert.equal(env.GIT_ASKPASS, '')
-  assert.equal(Object.hasOwn(env, 'GITHUB_TOKEN'), false)
-  assert.equal(Object.hasOwn(env, 'GH_TOKEN'), false)
-  assert.equal(Object.hasOwn(env, 'HTTPS_PROXY'), false)
-  assert.equal(Object.hasOwn(env, 'http_proxy'), false)
+  assert.equal(env.GIT_OPTIONAL_LOCKS, '0')
+  for (const key of [
+    'GIT_CONFIG',
+    'GIT_CONFIG_PARAMETERS',
+    'GIT_CONFIG_KEY_0',
+    'GIT_CONFIG_VALUE_0',
+    'GIT_DIR',
+    'GIT_WORK_TREE',
+    'GIT_COMMON_DIR',
+    'GIT_SSH',
+    'GIT_SSH_COMMAND',
+    'GIT_PROXY_COMMAND',
+    'GIT_SSL_NO_VERIFY',
+    'SSH_ASKPASS',
+    'SSH_ASKPASS_REQUIRE',
+    'GITHUB_TOKEN',
+    'GH_TOKEN',
+    'HTTP_PROXY',
+    'HTTPS_PROXY',
+    'ALL_PROXY',
+    'NO_PROXY',
+    'http_proxy',
+    'https_proxy',
+    'all_proxy',
+    'no_proxy'
+  ]) {
+    assert.equal(Object.hasOwn(env, key), false, `${key} must not reach provenance subprocesses`)
+  }
+
+  const gitEnv = isolatedGitNetworkEnvironment(cacheDir)
+  assert.equal(gitEnv.GIT_CEILING_DIRECTORIES, dirname(cacheDir))
+  assert.equal(gitEnv.GIT_DISCOVERY_ACROSS_FILESYSTEM, '0')
+  assert.equal(gitEnv.GIT_ALLOW_PROTOCOL, 'https')
 })
 
 test('C0.3 provenance canonicalizes GitHub event and run identities without credentials', () => {
@@ -312,12 +354,15 @@ test('C0.3 Git smart-HTTP tag provenance accepts canonical lightweight and annot
   assert.equal(githubRepositoryUrl('example/project'), 'https://github.com/example/project.git')
   assert.equal(directRef, 'refs/tags/v1.2.3')
   assert.deepEqual(gitLsRemoteTagArgs('example/project', tag), [
+    '--git-dir=/dev/null',
     '-c',
     'credential.helper=',
     '-c',
     'core.askPass=',
     '-c',
     'http.extraHeader=',
+    '-c',
+    'http.proxy=',
     'ls-remote',
     '--exit-code',
     '--tags',
@@ -330,6 +375,76 @@ test('C0.3 Git smart-HTTP tag provenance accepts canonical lightweight and annot
     resolveGitLsRemoteTagCommit(tag, `${EXPECTED_SHA}\t${directRef}\n${OTHER_SHA}\t${peeledRef}\n`),
     OTHER_SHA
   )
+})
+
+test('C0.3 Git smart-HTTP provenance excludes repository-local scoped transport configuration', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'pi-acp-c0.3-git-config-'))
+  t.after(async () => {
+    await rm(root, { recursive: true, force: true })
+  })
+  const checkout = join(root, 'checkout')
+  const isolatedCwd = join(checkout, 'network-git')
+  await mkdir(isolatedCwd, { recursive: true })
+  await execFileAsync('git', ['init', '--quiet'], { cwd: checkout })
+
+  const canonicalUrl = githubRepositoryUrl('example/project')
+  const poisonBase = 'file:///controlled-mirror/'
+  const poisonEntries = [
+    ['credential.https://github.com.helper', '!printf credential-poison'],
+    ['http.https://github.com/.extraHeader', 'Authorization: header-poison'],
+    ['http.https://github.com/.proxy', 'http://127.0.0.1:1'],
+    [`url.${poisonBase}.insteadOf`, 'https://github.com/']
+  ] as const
+  for (const [key, value] of poisonEntries) {
+    await execFileAsync('git', ['config', '--local', key, value], { cwd: checkout })
+  }
+
+  const unisolatedEnv = sanitizedCommandEnvironment(await realpath(isolatedCwd))
+  const unisolatedOptions = { cwd: isolatedCwd, env: unisolatedEnv, encoding: 'utf8' as const }
+  assert.equal(
+    (
+      await execFileAsync('git', ['config', '--get-urlmatch', 'credential.helper', canonicalUrl], unisolatedOptions)
+    ).stdout.trim(),
+    '!printf credential-poison'
+  )
+  assert.equal(
+    (
+      await execFileAsync('git', ['config', '--get-urlmatch', 'http.extraHeader', canonicalUrl], unisolatedOptions)
+    ).stdout.trim(),
+    'Authorization: header-poison'
+  )
+  assert.equal(
+    (
+      await execFileAsync('git', ['config', '--get-urlmatch', 'http.proxy', canonicalUrl], unisolatedOptions)
+    ).stdout.trim(),
+    'http://127.0.0.1:1'
+  )
+
+  const productionArgs = gitLsRemoteTagArgs('example/project', 'v1.2.3')
+  const lsRemoteIndex = productionArgs.indexOf('ls-remote')
+  assert.notEqual(lsRemoteIndex, -1)
+  const getUrlArgs = [...productionArgs.slice(0, lsRemoteIndex + 1), '--get-url', canonicalUrl]
+  const vulnerableGetUrlArgs = getUrlArgs.filter(arg => arg !== '--git-dir=/dev/null')
+  assert.equal(
+    (await execFileAsync('git', vulnerableGetUrlArgs, unisolatedOptions)).stdout.trim(),
+    `${poisonBase}example/project.git`
+  )
+  assert.equal((await execFileAsync('git', getUrlArgs, unisolatedOptions)).stdout.trim(), canonicalUrl)
+
+  const canonicalIsolatedCwd = await realpath(isolatedCwd)
+  assert.equal((await runIsolatedGitNetworkCommand(canonicalIsolatedCwd, getUrlArgs)).stdout.trim(), canonicalUrl)
+  for (const match of [
+    ['credential.helper', canonicalUrl],
+    ['http.extraHeader', canonicalUrl],
+    ['http.proxy', canonicalUrl]
+  ] as const) {
+    assert.deepEqual(
+      await runIsolatedGitNetworkCommand(canonicalIsolatedCwd, ['config', '--get-urlmatch', match[0], match[1]], {
+        allowedExitCodes: [1]
+      }),
+      { code: 1, stdout: '' }
+    )
+  }
 })
 
 test('C0.3 Git smart-HTTP tag provenance rejects path escape and ambiguous output', () => {

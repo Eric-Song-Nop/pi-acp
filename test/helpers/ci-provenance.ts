@@ -147,12 +147,15 @@ export function githubTagRef(refValue: string): string {
 export function gitLsRemoteTagArgs(repositoryValue: string, refValue: string): string[] {
   const directRef = githubTagRef(refValue)
   return [
+    '--git-dir=/dev/null',
     '-c',
     'credential.helper=',
     '-c',
     'core.askPass=',
     '-c',
     'http.extraHeader=',
+    '-c',
+    'http.proxy=',
     'ls-remote',
     '--exit-code',
     '--tags',
