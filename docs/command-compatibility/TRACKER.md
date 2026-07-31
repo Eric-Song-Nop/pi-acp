@@ -252,8 +252,13 @@ commands 宣称为稳定支持。
       agent turn 都在相同 loopback-only execution boundary 运行。positive turn 只向
       one-shot loopback provider 发出一个 bounded request，得到固定 ACP text 与
       `end_turn`，随后 clean exit/teardown，不使用真实模型账户。
-- [ ] 尚无 pushed CI URL 证明 stable `required` job 对本 event head 全绿；在该证据
-      到达前 `C0.3` 保持 `in_review`，`C0.7` 保持 `blocked`。
+- [x] pushed CI
+      [run `30636901392`](https://github.com/Eric-Song-Nop/pi-acp/actions/runs/30636901392)
+      对 exact event head
+      [`1b21be38e992f96b406c7a8d5d1f740384e32b02`](https://github.com/Eric-Song-Nop/pi-acp/commit/1b21be38e992f96b406c7a8d5d1f740384e32b02)
+      的全部 distinct gates 与 stable `required` job 全绿。`C0.3` 在 independent
+      review 绑定该 exact head/run 前保持 `in_review`；`C0.7` 在该复验与自身 review
+      均解决前保持 `blocked`。
 
 证据：
 [`.github/workflows/ci.yml`](../../.github/workflows/ci.yml)、
@@ -373,9 +378,9 @@ ancestor symlink 与替换成另一 real directory 的 adversarial checks 均通
 
 边界：本 checkpoint 证明 configured loopback provider 零 request，但
 `PI_OFFLINE`/telemetry flags 与空 `PATH` 不是 OS egress sandbox；后续 C0.3
-execution-only Linux boundary 是独立的 run-scoped 证据，尚待 pushed CI，不会
-retroactively 扩大 C0.6 artifact 的结论。Windows `.cmd`/shell env、grandchild
-containment 与 no-follow 等价保证也必须等 Windows matrix 后再认证。
+execution-only Linux boundary 是独立的 pushed run-scoped 证据，不会 retroactively
+扩大 C0.6 artifact 的结论。Windows `.cmd`/shell env、grandchild containment 与
+no-follow 等价保证也必须等 Windows matrix 后再认证。
 fixture command 的 ACP catalog/execution/UI 行为仍由 `FX-01..12`、`C2.x` 和
 `C3.x` 验证，本 checkpoint 不把“真实 Pi 已加载 extension”扩大成公开 command
 compatibility 声明。global fixture 与同一 private root 内的 Pi process 是本测试
@@ -391,8 +396,13 @@ TOCTOU hardening，不是 hostile-child executed-code attestation。
 - [x] checked-in ACP transcript 使用 canonical LF NDJSON、只允许 `cwd`/`sessionId` 的 exact root/session substitution、递归 key order、完整 wire order 与最终 process exit；manifest 绑定 runtime/capture commit、Pi/ACP package-lock + source Git + clean-`npm ci` own-package tree、raw/strict client sources、两份 fixture sources、Node/platform/arch、owner、recheck trigger、capture bounds、configured loopback count 和 artifact SHA-256。
 - [x] normal tests 不改写 evidence；bounded lstat → `O_NOFOLLOW` open → fstat/path identity → digest/canonical parse 接受 fresh Git `0644`，但拒绝 group/world write。credential signatures、24/32-hex nonce、UUID、absolute path、loopback host/port、XF02 canary（含 ordered text-chunk reconstruction）、reserved-token placement、leaf/ancestor symlink、hardlink、非 canonical bytes、malicious historical orphan、CAS/active/stale lock、crash temp/link-before-unlink 与 live-reader retry 都有回归。
 - [x] 显式 Linux/Darwin updater 要求 exact Node `22.19.0`、全仓 clean Git、全部三个 case、旧 manifest SHA、未来有效 recheck date 与 `--accept-baseline-change`；每个 case fresh capture 两次且 bytes/outcome 完全相同，30s fixture hard deadline 在 teardown race 中也不能接受 late success。artifact 采用 no-clobber content address，manifest 采用 cooperative lock、双重 CAS、atomic rename 与 directory `fsync`。stale-lock recovery 仅限同一 local filesystem、host 与 PID namespace；不覆盖 NFS/shared-host 或 hostile same-UID actor。
-- [ ] `C0.3` implementation 已进入 `in_review`，但尚无 pushed stable-`required`
-      CI evidence；因此 C0.7 即使本地 artifacts/gates 全绿也保持 `blocked`。
+- [x] `C0.3` exact head
+      [`1b21be38e992f96b406c7a8d5d1f740384e32b02`](https://github.com/Eric-Song-Nop/pi-acp/commit/1b21be38e992f96b406c7a8d5d1f740384e32b02)
+      的 pushed stable-`required`
+      [run `30636901392`](https://github.com/Eric-Song-Nop/pi-acp/actions/runs/30636901392)
+      全绿。
+- [ ] `C0.3` 尚待 independent review 绑定上述 exact head/run；C0.7 即使本地
+      artifacts/gates 全绿也保持 `blocked`，直到该复验与 C0.7 自身 review 都解决。
       blocker owner 为 task #2，复查日期 `2026-08-07`。
 
 | Failure ID  | 当前行为                                           | Future owner           | Artifact SHA-256                                                   |
