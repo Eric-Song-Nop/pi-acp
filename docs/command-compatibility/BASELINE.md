@@ -27,13 +27,14 @@ Pinned source identities:
 - ACP SDK `0.26.0`: `73bc30649b650de320340c782733bf69a545bd28`
 - Zed `v1.9.0`: `ced90fc636c4ede05402befc38a63bae7fd741bd`
 
-## Support window
+## Target test window
 
 - Pi `0.80.5` is the minimum matrix version. The previously documented
   `0.80.4` is not available from the npm registry.
 - Pi `0.83.0` is the baseline version.
 - Pi releases between the minimum and baseline are inside the target window.
-  Releases outside that window are best effort until added to the matrix.
+  This is not a completed compatibility claim; certification remains gated by
+  `G5`. Releases outside that window are best effort until added to the matrix.
 - Pi `main` is informational and may fail without blocking a release.
 - Pi and the ACP SDK must never be upgraded in the same pull request.
 - The ACP SDK dependency and lockfile remain pinned to `0.26.0`; migration to 1.x

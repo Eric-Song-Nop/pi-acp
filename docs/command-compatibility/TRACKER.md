@@ -60,17 +60,17 @@
 
 ## 2. 当前基线
 
-| 组件               | 已知基线                          | 状态/证据                                              |
-| ------------------ | --------------------------------- | ------------------------------------------------------ |
-| fork               | `Eric-Song-Nop/pi-acp@d1cffc0`    | 与 `svkozak/pi-acp` 主分支差异 `0 0`                   |
-| pi-acp package     | `0.0.33`                          | 当前源码基线                                           |
-| ACP SDK            | `@agentclientprotocol/sdk@0.26.0` | 已含 experimental elicitation；升级到 1.x 必须单独进行 |
-| Pi                 | `0.80.5`–`0.83.0`                 | `C0.2` 固定目标窗口；完整兼容性由 `G5` 证明            |
-| Node               | `>=22.19.0`                       | 与受测 Pi 的最低 engine 一致；E2E 单独建矩阵           |
-| existing tests     | 98/98 通过                        | 含 3 个 C0.2 manifest tests；尚不能证明真实插件兼容    |
-| Pi built-ins       | 22 个                             | pi-acp 只公布 8 个 adapter commands，精确重合 5 个     |
-| extension commands | Pi RPC 可发现                     | pi-acp 在 new/load 两处显式过滤                        |
-| GitHub Issues      | enabled                           | `DEC-001` accepted；总控 issue `#1`                    |
+| 组件               | 已知基线                          | 状态/证据                                                |
+| ------------------ | --------------------------------- | -------------------------------------------------------- |
+| fork               | `Eric-Song-Nop/pi-acp@d1cffc0`    | 与 `svkozak/pi-acp` 主分支差异 `0 0`                     |
+| pi-acp package     | `0.0.33`                          | 当前源码基线                                             |
+| ACP SDK            | `@agentclientprotocol/sdk@0.26.0` | 已含 experimental elicitation；升级到 1.x 必须单独进行   |
+| Pi                 | `0.80.5`–`0.83.0`                 | `C0.2` 固定目标窗口；完整兼容性由 `G5` 证明              |
+| Node               | `>=22.19.0`                       | 与受测 Pi 的最低 engine 一致；E2E 单独建矩阵             |
+| existing tests     | 99/99 通过                        | 含 4 个 C0.2 manifest/docs tests；尚不能证明真实插件兼容 |
+| Pi built-ins       | 22 个                             | pi-acp 只公布 8 个 adapter commands，精确重合 5 个       |
+| extension commands | Pi RPC 可发现                     | pi-acp 在 new/load 两处显式过滤                          |
+| GitHub Issues      | enabled                           | `DEC-001` accepted；总控 issue `#1`                      |
 
 每次发布必须记录完整 compatibility tuple：
 
@@ -221,10 +221,12 @@ commands 宣称为稳定支持。
 - [x] 记录 adapter、Pi、ACP SDK、Node、Zed 和另一客户端的精确版本/SHA。
 - [x] 将开放式 Pi 版本改成 `0.80.5`–`0.83.0` 窗口，超出窗口 best effort。
 - [x] 本 checkpoint 未升级 Pi 或 ACP SDK；两条版本轴仍要求使用独立 PR。
+- [x] runtime Zod schema 严格拒绝未知字段/畸形 pin，并验证 package/lock/docs 一致性。
 
 证据：
 [`BASELINE.md`](BASELINE.md)、
 [`test/e2e/compatibility-matrix.json`](../../test/e2e/compatibility-matrix.json)
+、`test/helpers/compatibility-matrix.ts`
 和 `test/unit/compatibility-matrix.test.ts`。
 
 #### `C0.3–C0.7` Harness 与失败基线
