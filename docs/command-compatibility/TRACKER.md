@@ -67,7 +67,7 @@
 | ACP SDK            | `@agentclientprotocol/sdk@0.26.0` | 已含 experimental elicitation；升级到 1.x 必须单独进行 |
 | Pi                 | `0.80.5`–`0.83.0`                 | `C0.2` 固定目标窗口；完整兼容性由 `G5` 证明            |
 | Node               | `>=22.19.0`                       | 与受测 Pi 的最低 engine 一致；E2E 单独建矩阵           |
-| existing tests     | 104/104 通过                      | 含 C0.2/C0.4 contract tests；尚不能证明真实插件兼容    |
+| existing tests     | 105/105 通过                      | 含 C0.2/C0.4 contract tests；尚不能证明真实插件兼容    |
 | Pi built-ins       | 22 个                             | pi-acp 只公布 8 个 adapter commands，精确重合 5 个     |
 | extension commands | Pi RPC 可发现                     | pi-acp 在 new/load 两处显式过滤                        |
 | GitHub Issues      | enabled                           | `DEC-001` accepted；总控 issue `#1`                    |
@@ -221,10 +221,12 @@ commands 宣称为稳定支持。
 - [x] 记录 adapter、Pi、ACP SDK、Node、Zed 和另一客户端的精确版本/SHA。
 - [x] 将开放式 Pi 版本改成 `0.80.5`–`0.83.0` 窗口，超出窗口 best effort。
 - [x] 本 checkpoint 未升级 Pi 或 ACP SDK；两条版本轴仍要求使用独立 PR。
+- [x] runtime Zod schema 严格拒绝未知字段/畸形 pin，并验证 package/lock/docs 一致性。
 
 证据：
 [`BASELINE.md`](BASELINE.md)、
 [`test/e2e/compatibility-matrix.json`](../../test/e2e/compatibility-matrix.json)
+、`test/helpers/compatibility-matrix.ts`
 和 `test/unit/compatibility-matrix.test.ts`。
 
 #### `C0.4` Command compatibility schema

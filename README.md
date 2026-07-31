@@ -38,11 +38,11 @@ compatibility is maintained in the
 Make sure pi is installed
 
 ```bash
-npm install -g @earendil-works/pi-coding-agent
+npm install -g @earendil-works/pi-coding-agent@0.83.0
 ```
 
 - Node.js 22.19+
-- `pi` v0.80.5–0.83.0 installed and available on your `PATH` (the adapter runs the `pi` executable). Versions outside this validation window are best effort; see the [compatibility baseline](docs/command-compatibility/BASELINE.md).
+- `pi` v0.80.5–0.83.0 installed and available on your `PATH` (the adapter runs the `pi` executable). This is the target test window, not a completed compatibility claim; full certification is gated by G5. Versions outside the window are best effort; see the [compatibility baseline](docs/command-compatibility/BASELINE.md).
 - Configure `pi` separately for your model providers/API keys
 
 ## Install
