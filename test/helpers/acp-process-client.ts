@@ -148,6 +148,20 @@ export class AcpProcessExitError extends Error {
   }
 }
 
+export class AcpTransportClosedError extends Error {
+  readonly code = 'ACP_TRANSPORT_CLOSED'
+
+  constructor(
+    readonly operation: string,
+    readonly transportReason: unknown,
+    readonly transcript: string
+  ) {
+    const detail = transportReason instanceof Error ? `: ${transportReason.message}` : ''
+    super(`ACP transport closed during ${operation}${detail}`, { cause: transportReason })
+    this.name = 'AcpTransportClosedError'
+  }
+}
+
 export class AcpMalformedMessageError extends Error {
   readonly code = 'ACP_MALFORMED_MESSAGE'
   transcript = ''
@@ -433,6 +447,8 @@ export class AcpProcessClient {
   private lastProcessError: string | undefined
   private malformedMessageError: AcpMalformedMessageError | undefined
   private terminalLifecycle: AcpTerminalLifecycle | undefined
+  private fatalLifecycleTranscript: string | undefined
+  private terminalLifecycleTranscript: string | undefined
   private spawned = false
   private closedSettled = false
   private unusable = false
@@ -658,6 +674,9 @@ export class AcpProcessClient {
       throw this.fatalLifecycleReason('session/update')
     }
     if (this.exitInfo) throw new AcpProcessExitError('session/update', this.exitInfo, this.transcriptNdjson())
+    if (this.terminalLifecycleController.signal.aborted) {
+      throw this.terminalLifecycleReason('session/update')
+    }
 
     const timeoutMs = requirePositiveInteger(options.timeoutMs ?? this.updateTimeoutMs, 'timeoutMs')
     return await new Promise<SessionNotification>((resolve, reject) => {
@@ -668,6 +687,9 @@ export class AcpProcessClient {
       const fatalLifecycleListener = (): void => {
         finish(() => reject(this.fatalLifecycleReason('session/update')))
       }
+      const terminalLifecycleListener = (): void => {
+        finish(() => reject(this.terminalLifecycleReason('session/update')))
+      }
       const finish = (complete: () => void): void => {
         if (settled) return
         settled = true
@@ -675,6 +697,7 @@ export class AcpProcessClient {
         this.updateListeners.delete(listener)
         this.exitListeners.delete(exitListener)
         this.fatalLifecycleController.signal.removeEventListener('abort', fatalLifecycleListener)
+        this.terminalLifecycleController.signal.removeEventListener('abort', terminalLifecycleListener)
         complete()
       }
       const listener: SessionUpdateListener = notification => {
@@ -691,6 +714,10 @@ export class AcpProcessClient {
       this.updateListeners.add(listener)
       this.exitListeners.add(exitListener)
       this.fatalLifecycleController.signal.addEventListener('abort', fatalLifecycleListener, { once: true })
+      this.terminalLifecycleController.signal.addEventListener('abort', terminalLifecycleListener, {
+        once: true
+      })
+      if (this.terminalLifecycleController.signal.aborted) terminalLifecycleListener()
     })
   }
 
@@ -861,6 +888,7 @@ export class AcpProcessClient {
   private beginFatalLifecycle(reason: Error): void {
     this.unusable = true
     if (!this.fatalLifecycleController.signal.aborted) {
+      this.fatalLifecycleTranscript = this.transcriptNdjson()
       this.fatalLifecycleController.abort(reason)
     }
     this.beginTerminalLifecycle({ cause: reason })
@@ -874,6 +902,7 @@ export class AcpProcessClient {
       cause: terminal.cause,
       exit: terminal.exit ? clone(terminal.exit) : undefined
     }
+    this.terminalLifecycleTranscript = this.transcriptNdjson()
     const abortReason =
       terminal.cause ??
       (terminal.exit
@@ -892,7 +921,13 @@ export class AcpProcessClient {
       reason instanceof Error
         ? reason
         : new Error(`ACP process client entered a fatal lifecycle state during ${operation}`)
-    return new AcpClientLifecycleError(operation, fatalReason, this.transcriptNdjson())
+    return new AcpClientLifecycleError(operation, fatalReason, this.fatalLifecycleTranscript ?? this.transcriptNdjson())
+  }
+
+  private terminalLifecycleReason(operation: string): Error {
+    if (this.exitInfo) return new AcpProcessExitError(operation, this.exitInfo, this.transcriptNdjson())
+    const reason = this.terminalLifecycle?.cause ?? this.terminalLifecycleController.signal.reason
+    return new AcpTransportClosedError(operation, reason, this.terminalLifecycleTranscript ?? this.transcriptNdjson())
   }
 
   private finalizeMalformedMessageError(

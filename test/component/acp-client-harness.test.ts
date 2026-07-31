@@ -12,6 +12,7 @@ import {
   AcpMalformedMessageError,
   AcpProcessClient,
   AcpProcessExitError,
+  AcpTransportClosedError,
   AcpUpdateTimeoutError,
   type AcpProcessClientOptions
 } from '../helpers/acp-process-client.js'
@@ -880,10 +881,10 @@ test('early child exit reports code and bounded stderr diagnostics', { timeout: 
       timeoutMs: 800
     }),
     (error: unknown) => {
-      assert.ok(error instanceof AcpProcessExitError)
+      assert.ok(error instanceof AcpTransportClosedError)
       assert.equal(error.operation, 'session/update')
-      assert.equal(error.exit.code, 17)
-      assert.match(error.exit.stderrTail, /TAIL-MARKER/)
+      assert.ok(error.cause instanceof Error)
+      assert.equal(error.transcript.includes('"kind":"process_exit"'), false)
       return true
     }
   )
@@ -947,6 +948,20 @@ test('transport EOF waits for bounded teardown and preserves the final exit', { 
       return true
     }
   )
+  const pendingRawUpdateAssertion = assert.rejects(
+    fixture.client.waitForSessionUpdate(() => false, {
+      afterIndex: fixture.client.retainedSessionUpdateCount,
+      timeoutMs: 2_000
+    }),
+    (error: unknown) => {
+      assert.ok(error instanceof AcpTransportClosedError)
+      assert.equal(error.code, 'ACP_TRANSPORT_CLOSED')
+      assert.equal(error.operation, 'session/update')
+      assert.ok(error.cause instanceof Error)
+      assert.equal(error.transcript.includes('"kind":"process_exit"'), false)
+      return true
+    }
+  )
   const promptAssertion = assert.rejects(
     fixture.client.prompt({
       sessionId,
@@ -961,7 +976,7 @@ test('transport EOF waits for bounded teardown and preserves the final exit', { 
     }
   )
 
-  await pendingStrictCatalogAssertion
+  await Promise.all([pendingStrictCatalogAssertion, pendingRawUpdateAssertion])
   assert.equal(fixture.client.isRunning, false)
   assert.equal(closedSettled, false)
   assert.equal(
@@ -988,6 +1003,21 @@ test('transport EOF waits for bounded teardown and preserves the final exit', { 
   } finally {
     replayedStrict.dispose()
   }
+  await assert.rejects(
+    fixture.client.waitForSessionUpdate(() => false, {
+      afterIndex: fixture.client.retainedSessionUpdateCount,
+      timeoutMs: 2_000
+    }),
+    (error: unknown) => {
+      assert.ok(error instanceof AcpTransportClosedError)
+      assert.equal(error.code, 'ACP_TRANSPORT_CLOSED')
+      assert.equal(error.operation, 'session/update')
+      assert.ok(error.cause instanceof Error)
+      assert.equal(error.transcript.includes('"kind":"process_exit"'), false)
+      return true
+    }
+  )
+  assert.equal(closedSettled, false)
 
   await promptAssertion
   await fixture.client.closed
