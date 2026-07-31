@@ -151,7 +151,7 @@ commands 宣称为稳定支持。
 
 ## 6. Master checkpoint table
 
-| ID     | Outcome                                                           | 初始状态    | Hard dependencies         | Gate      |
+| ID     | Outcome                                                           | 当前状态    | Hard dependencies         | Gate      |
 | ------ | ----------------------------------------------------------------- | ----------- | ------------------------- | --------- |
 | `C0.1` | tracker 合入仓库并决定 Issues 策略                                | `in_review` | `DEC-001`                 | `G0`      |
 | `C0.2` | 固定 compatibility tuple 与受测版本窗口                           | `proposed`  | —                         | `G0`      |
