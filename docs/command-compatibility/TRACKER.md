@@ -155,7 +155,7 @@ commands 宣称为稳定支持。
 | ------ | ----------------------------------------------------------------- | ----------- | ------------------------- | --------- |
 | `C0.1` | tracker 合入仓库并决定 Issues 策略                                | `in_review` | `DEC-001`                 | `G0`      |
 | `C0.2` | 固定 compatibility tuple 与受测版本窗口                           | `in_review` | —                         | `G0`      |
-| `C0.3` | CI 跑 typecheck/lint/unit/build 和 E2E 基础矩阵                   | `proposed`  | `C0.2`                    | `G0`      |
+| `C0.3` | CI 跑 typecheck/lint/unit/build 和 E2E 基础矩阵                   | `in_review` | `C0.2`                    | `G0`      |
 | `C0.4` | 定义 command compatibility schema                                 | `verified`  | `DEC-003`                 | `G0`      |
 | `C0.5` | raw ACP + strict-client harness                                   | `verified`  | `DEC-005`                 | `G0`      |
 | `C0.6` | 建立真实 Pi fixture extension pack                                | `verified`  | `C0.5`                    | `G0`      |
@@ -228,6 +228,49 @@ commands 宣称为稳定支持。
 [`test/e2e/compatibility-matrix.json`](../../test/e2e/compatibility-matrix.json)
 、`test/helpers/compatibility-matrix.ts`
 和 `test/unit/compatibility-matrix.test.ts`。
+
+#### `C0.3` Network-denied CI gates and live provenance
+
+- [x] `ubuntu-24.04` 使用精确 Node `22.19.0`、npm `10.9.3`、固定 action SHA
+      与 digest-pinned `node:22.19.0-bookworm` image；`.node-version`、matrix、
+      workflow 和 lock metadata 由 unit regression 互相绑定。
+- [x] checkout 对 PR 使用 `github.event.pull_request.head.sha`，对 push 使用
+      `github.sha`；`fetch-depth: 0`、`persist-credentials: false`，provenance 每次
+      输出 `testedCheckoutSha` (`git rev-parse HEAD`) 与 `expectedCheckoutSha`，
+      run-scoped SHA 不写回历史 `adapter.baselineSha`。
+- [x] networked preflight 完成 checkout/setup、`npm ci`、image acquisition、npm
+      registry 与 peeled Git tag pin 验证，以及 npm `10.9.3` 的 runtime/full-tree
+      live audit；package name/version/`gitHead`/SHA-512 SRI、repository tag、全部
+      severity totals、sorted GHSA IDs 或验证可用性漂移都会 hard fail。latest 与 Pi
+      `main` 只是 warn-only observation，audit 不是 immutable evidence 或 waiver。
+- [x] `typecheck`、`lint`、`test`、`build` 与 `real-pi-e2e` execution 使用同一
+      `linux/amd64` container、`docker --network none`、只读 root/worktree、isolated
+      temp homes、unprivileged UID/GID、`--cap-drop ALL`、no-new-privileges 与
+      `env -i`。boundary preflight 证明仅有 loopback、loopback 可连接、外部 IPv4/IPv6
+      连接得到 kernel denial；stable `required` job 汇总所有 blocking gates。
+- [x] real-Pi load boundaries、C0.7 immutable xfails 与 positive deterministic
+      agent turn 都在相同 loopback-only execution boundary 运行。positive turn 只向
+      one-shot loopback provider 发出一个 bounded request，得到固定 ACP text 与
+      `end_turn`，随后 clean exit/teardown，不使用真实模型账户。
+- [ ] 尚无 pushed CI URL 证明 stable `required` job 对本 event head 全绿；在该证据
+      到达前 `C0.3` 保持 `in_review`，`C0.7` 保持 `blocked`。
+
+证据：
+[`.github/workflows/ci.yml`](../../.github/workflows/ci.yml)、
+[`compatibility-matrix.json`](../../test/e2e/compatibility-matrix.json)、
+`.github/scripts/assert-network-boundary.mjs`、
+`.github/scripts/run-network-denied-ci.sh`、
+`scripts/check-ci-provenance.ts`、
+`test/helpers/ci-provenance.ts`、
+`test/unit/compatibility-matrix.test.ts`
+和 `test/component/real-pi-agent-turn.test.ts`。
+
+边界：dependency acquisition 与 provenance/audit 明确联网；kernel-denied 结论只
+覆盖 blocking gate 的 Linux/x64 execution process tree，不覆盖整个 workflow、
+macOS、Windows 或人工运行。C0.3 实际执行的只有 pinned Pi `0.83.0`；`0.80.5`
+仅做 immutable provenance pin 与 target-window endpoint，不能称为已经执行的
+compatibility case。C0.7 checked-in manifest 是历史 immutable artifact，不因外部
+C0.3 run retroactively 改写其 `osEgressDenied: false` 边界。
 
 #### `C0.4` Command compatibility schema
 
@@ -329,9 +372,10 @@ ancestor symlink 与替换成另一 real directory 的 adversarial checks 均通
 [GitHub review `4827962159`](https://github.com/Eric-Song-Nop/pi-acp/pull/5#pullrequestreview-4827962159)。
 
 边界：本 checkpoint 证明 configured loopback provider 零 request，但
-`PI_OFFLINE`/telemetry flags 与空 `PATH` 不是 OS egress sandbox；`C0.3` 的
-network-denied CI 尚未落地，因此不得声称禁止所有外网。Windows `.cmd`/shell env、
-grandchild containment 与 no-follow 等价保证也必须等 Windows matrix 后再认证。
+`PI_OFFLINE`/telemetry flags 与空 `PATH` 不是 OS egress sandbox；后续 C0.3
+execution-only Linux boundary 是独立的 run-scoped 证据，尚待 pushed CI，不会
+retroactively 扩大 C0.6 artifact 的结论。Windows `.cmd`/shell env、grandchild
+containment 与 no-follow 等价保证也必须等 Windows matrix 后再认证。
 fixture command 的 ACP catalog/execution/UI 行为仍由 `FX-01..12`、`C2.x` 和
 `C3.x` 验证，本 checkpoint 不把“真实 Pi 已加载 extension”扩大成公开 command
 compatibility 声明。global fixture 与同一 private root 内的 Pi process 是本测试
@@ -347,7 +391,9 @@ TOCTOU hardening，不是 hostile-child executed-code attestation。
 - [x] checked-in ACP transcript 使用 canonical LF NDJSON、只允许 `cwd`/`sessionId` 的 exact root/session substitution、递归 key order、完整 wire order 与最终 process exit；manifest 绑定 runtime/capture commit、Pi/ACP package-lock + source Git + clean-`npm ci` own-package tree、raw/strict client sources、两份 fixture sources、Node/platform/arch、owner、recheck trigger、capture bounds、configured loopback count 和 artifact SHA-256。
 - [x] normal tests 不改写 evidence；bounded lstat → `O_NOFOLLOW` open → fstat/path identity → digest/canonical parse 接受 fresh Git `0644`，但拒绝 group/world write。credential signatures、24/32-hex nonce、UUID、absolute path、loopback host/port、XF02 canary（含 ordered text-chunk reconstruction）、reserved-token placement、leaf/ancestor symlink、hardlink、非 canonical bytes、malicious historical orphan、CAS/active/stale lock、crash temp/link-before-unlink 与 live-reader retry 都有回归。
 - [x] 显式 Linux/Darwin updater 要求 exact Node `22.19.0`、全仓 clean Git、全部三个 case、旧 manifest SHA、未来有效 recheck date 与 `--accept-baseline-change`；每个 case fresh capture 两次且 bytes/outcome 完全相同，30s fixture hard deadline 在 teardown race 中也不能接受 late success。artifact 采用 no-clobber content address，manifest 采用 cooperative lock、双重 CAS、atomic rename 与 directory `fsync`。stale-lock recovery 仅限同一 local filesystem、host 与 PID namespace；不覆盖 NFS/shared-host 或 hostile same-UID actor。
-- [ ] `C0.3` 的 network-denied CI 尚未实现；因此 C0.7 即使本地 artifacts/gates 全绿也保持 `blocked`。blocker owner 为 task #2，复查日期 `2026-08-07`。
+- [ ] `C0.3` implementation 已进入 `in_review`，但尚无 pushed stable-`required`
+      CI evidence；因此 C0.7 即使本地 artifacts/gates 全绿也保持 `blocked`。
+      blocker owner 为 task #2，复查日期 `2026-08-07`。
 
 | Failure ID  | 当前行为                                           | Future owner           | Artifact SHA-256                                                   |
 | ----------- | -------------------------------------------------- | ---------------------- | ------------------------------------------------------------------ |
@@ -375,13 +421,14 @@ Pi built-in fallthrough 与 adapter/prompt collision 继续由 `C1.5`、`C2.2`�
 
 #### `C0.3, C0.5–C0.7` Harness 与失败基线
 
-- [ ] CI 分别运行 `typecheck`, `lint`, `test`, `build`。
+- [x] CI 分别运行 `typecheck`, `lint`, `test`, `build`，并由 stable `required` gate 汇总。
 - [x] E2E 使用真实 Pi 子进程，不只使用 `FakePiRpcProcess`。
 - [x] 每个 case 使用独立 cwd 和 `PI_CODING_AGENT_DIR`，不读取开发者真实 Pi 配置。
-- [ ] 阻塞 CI 默认禁止外网；插件、Pi 和客户端版本全部 pin。
+- [x] 阻塞 gate execution 在 Linux/amd64 loopback-only kernel namespace 中禁止外部
+      egress；dependency acquisition/provenance 明确联网，插件、Pi 和客户端版本分别 pin。
 - [x] strict-client harness 会拒绝未出现在 `available_commands_update` 的 slash command。
 - [x] load-only real-Pi fixture 注册 deterministic loopback provider，并证明 `initialize` + `session/new` 期间零 provider request。
-- [ ] agent-turn fixture 使用 loopback deterministic provider 返回固定模型响应，不消耗真实模型账户。
+- [x] agent-turn fixture 使用 loopback deterministic provider 返回固定模型响应，不消耗真实模型账户。
 - [x] 所有当前 failure-baseline 中可能挂起的用例有独立 hard timeout，并保存 canonical NDJSON transcript。
 - [x] C0.7 范围内的当前已知失败被记录为 executable `xfail(issue)`，不以“人工知道会坏”代替。
 
@@ -536,7 +583,8 @@ Gate 不能靠“豁免通过”。如果某能力未达到 gate，只能：
 - cancel 到终态 `≤2s`；
 - catalog change 到 client update `≤1s`；
 - unknown/unsupported command 误送模型 `0`；
-- CI 访问真实账户、真实 Pi home 和外网 `0`；
+- CI execution gates 访问真实账户、真实 Pi home 和外部网络 `0`；acquisition 与
+  provenance 是显式 networked preflight；
 - session close 后遗留进程/端口 `0`。
 
 ## 10. 上游依赖账本

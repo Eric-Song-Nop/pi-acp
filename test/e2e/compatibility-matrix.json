@@ -1,8 +1,8 @@
 {
-  "schemaVersion": 1,
+  "schemaVersion": 2,
   "planId": "PACP-CMD-2026-01",
   "recordedAt": "2026-07-31",
-  "e2eStatus": "todo",
+  "e2eStatus": "in_review",
   "adapter": {
     "package": "pi-acp",
     "version": "0.0.33",
@@ -10,23 +10,29 @@
   },
   "pi": {
     "package": "@earendil-works/pi-coding-agent",
+    "repository": "earendil-works/pi",
     "minimumVersion": "0.80.5",
     "minimumGitHead": "cc62baa442b5c0333923fdfdcc1d7264f445b5b0",
+    "minimumIntegrity": "sha512-GPYFuHw1BN+3m5Gzw1HGH41WdFDzbplLauS0zYSf1ZOkgKFd6wtEAcjchB/vmz9YtTGbQOwECbsVj6GxZxungA==",
     "baselineVersion": "0.83.0",
     "baselineGitHead": "845d6ff1f6643aba440341cce877ce1c43ebbc39",
+    "baselineIntegrity": "sha512-uYhF+FsZxogoSX/AxBcUdiY+ZklubwaXyAoEGA2eQwsHcyEAhUYIKh/WLXe/a8+k8eTCmxb+ZN2Zo9mzQtzbWw==",
     "headRef": "main",
     "outsideWindow": "best-effort"
   },
   "acp": {
     "protocolVersion": 1,
     "sdkPackage": "@agentclientprotocol/sdk",
+    "repository": "agentclientprotocol/typescript-sdk",
     "sdkVersion": "0.26.0",
-    "sdkGitHead": "73bc30649b650de320340c782733bf69a545bd28"
+    "sdkGitHead": "73bc30649b650de320340c782733bf69a545bd28",
+    "sdkIntegrity": "sha512-ialrcI+RzKOYe+fw+TfpyTdRmEoqIkXLlwbTi6XgaXXfdhNcdod7TmE1VsTnG3yTlox8TMTSMQgWbLLbz3r86Q=="
   },
   "node": {
     "minimumVersion": "22.19.0",
     "baselineVersion": "24.18.1",
-    "recordedVersion": "26.5.0"
+    "recordedVersion": "26.5.0",
+    "npmVersion": "10.9.3"
   },
   "clients": {
     "zed": {
@@ -49,16 +55,56 @@
     }
   },
   "dependencyAudit": {
+    "tool": {
+      "name": "npm",
+      "version": "10.9.3",
+      "registry": "https://registry.npmjs.org/"
+    },
     "runtime": {
+      "info": 0,
+      "low": 0,
       "moderate": 0,
       "high": 0,
-      "critical": 0
+      "critical": 0,
+      "total": 0
     },
+    "runtimeAdvisories": [],
     "development": {
+      "info": 0,
+      "low": 0,
       "moderate": 0,
       "high": 6,
-      "critical": 0
+      "critical": 0,
+      "total": 6
     },
+    "developmentAdvisories": [
+      "GHSA-23c5-xmqv-rm74",
+      "GHSA-25h7-pfq9-p65f",
+      "GHSA-3jxr-9vmj-r5cp",
+      "GHSA-3ppc-4f35-3m26",
+      "GHSA-3v7f-55p6-f55p",
+      "GHSA-52cp-r559-cp3m",
+      "GHSA-7r86-cg39-jmmj",
+      "GHSA-c2c7-rcm5-vvqj",
+      "GHSA-f886-m6hf-6m8v",
+      "GHSA-h67p-54hq-rp68",
+      "GHSA-mh99-v99m-4gvg",
+      "GHSA-mw96-cpmx-2vgc",
+      "GHSA-rf6f-7fwh-wjgh"
+    ],
     "followUpCheckpoint": "C5.8"
+  },
+  "ci": {
+    "checkpoint": "C0.3",
+    "runner": "ubuntu-24.04",
+    "nodeVersion": "22.19.0",
+    "containerImage": "node:22.19.0-bookworm@sha256:afff6d8c97964a438d2e6a9c96509367e45d8bf93f790ad561a1eaea926303d9",
+    "checkoutActionSha": "11d5960a326750d5838078e36cf38b85af677262",
+    "setupNodeActionSha": "49933ea5288caeca8642d1e84afbd3f7d6820020",
+    "requiredGates": ["provenance", "typecheck", "lint", "test", "build", "real-pi-e2e"],
+    "dependencyAcquisitionNetwork": "networked-preflight",
+    "executionNetwork": "docker-none-loopback-only",
+    "testedAdapterShaSource": "git-rev-parse-head",
+    "expectedAdapterShaSource": "github-event-head-sha"
   }
 }
