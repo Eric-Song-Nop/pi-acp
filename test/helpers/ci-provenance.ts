@@ -13,6 +13,7 @@ const githubRepositorySchema = z
     value => value.split('/').every(segment => segment !== '.' && segment !== '..'),
     'GitHub repository segments must not traverse paths'
   )
+const gitVersionTagSchema = z.string().regex(/^v\d+\.\d+\.\d+$/u)
 const githubRunIdSchema = z.string().regex(/^[1-9]\d*$/u)
 const sha512IntegritySchema = z.string().superRefine((value, context) => {
   const match = /^sha512-([A-Za-z0-9+/]{86}==)$/u.exec(value)
@@ -97,26 +98,6 @@ const lockedNpmPackageSchema = z
     integrity: sha512IntegritySchema
   })
   .passthrough()
-const gitHubObjectSchema = z
-  .object({
-    type: z.enum(['commit', 'tag']),
-    sha: gitShaSchema,
-    url: z.string().url()
-  })
-  .strict()
-const gitHubRefSchema = z
-  .object({
-    object: gitHubObjectSchema
-  })
-  .passthrough()
-const gitHubAnnotatedTagSchema = z
-  .object({
-    sha: gitShaSchema,
-    url: z.string().url(),
-    object: gitHubObjectSchema
-  })
-  .passthrough()
-
 export type AuditCounts = z.infer<typeof auditCountsSchema>
 
 export type AuditObservation = {
@@ -153,6 +134,57 @@ export function githubRunUrl(repository: string | undefined, runId: string | und
   const parsedRepository = githubRepositorySchema.parse(repository)
   const parsedRunId = githubRunIdSchema.parse(runId)
   return `https://github.com/${parsedRepository}/actions/runs/${parsedRunId}`
+}
+
+export function githubRepositoryUrl(repositoryValue: string): string {
+  return `https://github.com/${githubRepositorySchema.parse(repositoryValue)}.git`
+}
+
+export function githubTagRef(refValue: string): string {
+  return `refs/tags/${gitVersionTagSchema.parse(refValue)}`
+}
+
+export function gitLsRemoteTagArgs(repositoryValue: string, refValue: string): string[] {
+  const directRef = githubTagRef(refValue)
+  return [
+    '-c',
+    'credential.helper=',
+    '-c',
+    'core.askPass=',
+    '-c',
+    'http.extraHeader=',
+    'ls-remote',
+    '--exit-code',
+    '--tags',
+    githubRepositoryUrl(repositoryValue),
+    directRef,
+    `${directRef}^{}`
+  ]
+}
+
+export function resolveGitLsRemoteTagCommit(refValue: string, source: string): string {
+  const directRef = githubTagRef(refValue)
+  const peeledRef = `${directRef}^{}`
+  if (source.length === 0 || source.includes('\0') || source.includes('\r')) {
+    throw new Error(`git ls-remote returned malformed output for ${directRef}`)
+  }
+
+  const lines = (source.endsWith('\n') ? source.slice(0, -1) : source).split('\n')
+  const observed = new Map<string, string>()
+  for (const line of lines) {
+    const match = /^([0-9a-f]{40})\t(.+)$/u.exec(line)
+    if (!match || (match[2] !== directRef && match[2] !== peeledRef)) {
+      throw new Error(`git ls-remote returned an unexpected record for ${directRef}`)
+    }
+    if (observed.has(match[2])) {
+      throw new Error(`git ls-remote returned a duplicate record for ${match[2]}`)
+    }
+    observed.set(match[2], match[1])
+  }
+
+  const direct = observed.get(directRef)
+  if (!direct) throw new Error(`git ls-remote did not return ${directRef}`)
+  return observed.get(peeledRef) ?? direct
 }
 
 export function classifyMutableIdentity(
@@ -310,45 +342,4 @@ export function assertAuditSnapshot(
   )
   assert.deepEqual(observed.counts, expectedCounts, `${label} audit severity counts drifted`)
   assert.deepEqual(observed.advisories, expectedAdvisories, `${label} audit advisory identities drifted`)
-}
-
-function assertGitHubObjectUrl(repository: string, object: z.infer<typeof gitHubObjectSchema>): void {
-  const url = new URL(object.url)
-  const objectKind = object.type === 'commit' ? 'commits' : 'tags'
-  const expectedPath = `/repos/${repository}/git/${objectKind}/${object.sha}`
-  if (
-    url.origin !== 'https://api.github.com' ||
-    url.username !== '' ||
-    url.password !== '' ||
-    url.pathname !== expectedPath ||
-    url.search !== '' ||
-    url.hash !== ''
-  ) {
-    throw new Error(`GitHub ${object.type} object escaped the canonical ${repository} API path`)
-  }
-}
-
-export async function resolveGitHubTagCommit(
-  repositoryValue: string,
-  initialValue: unknown,
-  loadTag: (url: string) => Promise<unknown>
-): Promise<string> {
-  const repository = githubRepositorySchema.parse(repositoryValue)
-  let current = gitHubRefSchema.parse(initialValue).object
-  const seenTagObjects = new Set<string>()
-
-  for (let depth = 0; depth < 4; depth += 1) {
-    assertGitHubObjectUrl(repository, current)
-    if (current.type === 'commit') return current.sha
-    if (seenTagObjects.has(current.sha)) {
-      throw new Error(`GitHub tag for ${repository} contains a peel cycle`)
-    }
-    seenTagObjects.add(current.sha)
-
-    const tag = gitHubAnnotatedTagSchema.parse(await loadTag(current.url))
-    assert.equal(tag.sha, current.sha, `GitHub tag response SHA changed while peeling ${repository}`)
-    assert.equal(tag.url, current.url, `GitHub tag response URL changed while peeling ${repository}`)
-    current = tag.object
-  }
-  throw new Error(`GitHub tag for ${repository} exceeded the maximum peel depth`)
 }

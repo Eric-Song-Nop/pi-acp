@@ -7,13 +7,16 @@ import {
   assertExactToolchain,
   assertGitCheckout,
   classifyMutableIdentity,
+  githubRepositoryUrl,
   githubRunUrl,
+  githubTagRef,
+  gitLsRemoteTagArgs,
   parseAuditReport,
   parseOptionalGitSha,
   registryTagUrl,
   registryTarballUrl,
   registryVersionUrl,
-  resolveGitHubTagCommit,
+  resolveGitLsRemoteTagCommit,
   validateLockedNpmPackagePin,
   validateNpmPackagePin,
   type AuditCounts,
@@ -23,7 +26,6 @@ import { readCompatibilityMatrix } from '../helpers/compatibility-matrix.js'
 
 const EXPECTED_SHA = '1234567890abcdef1234567890abcdef12345678'
 const OTHER_SHA = 'abcdef1234567890abcdef1234567890abcdef12'
-const THIRD_SHA = 'fedcba0987654321fedcba0987654321fedcba09'
 const INTEGRITY = 'sha512-uYhF+FsZxogoSX/AxBcUdiY+ZklubwaXyAoEGA2eQwsHcyEAhUYIKh/WLXe/a8+k8eTCmxb+ZN2Zo9mzQtzbWw=='
 const PACKAGE_PIN: NpmPinExpectation = {
   package: '@earendil-works/pi-coding-agent',
@@ -59,15 +61,6 @@ function auditSource(counts: AuditCounts, vulnerabilities: Record<string, unknow
       }
     }
   })
-}
-
-function githubObject(type: 'commit' | 'tag', sha: string, repository = 'example/project') {
-  const kind = type === 'commit' ? 'commits' : 'tags'
-  return {
-    type,
-    sha,
-    url: `https://api.github.com/repos/${repository}/git/${kind}/${sha}`
-  }
 }
 
 test('C0.3 provenance requires the exact matrix Node and npm identities', () => {
@@ -109,7 +102,12 @@ test('C0.3 npm subprocesses use distinct isolated user and global configuration'
   assert.notEqual(env.npm_config_userconfig, env.npm_config_globalconfig)
   assert.equal(env.npm_config_registry, 'https://registry.npmjs.org/')
   assert.equal(env.GIT_CONFIG_GLOBAL, '/dev/null')
+  assert.equal(env.GIT_TERMINAL_PROMPT, '0')
+  assert.equal(env.GIT_ASKPASS, '')
   assert.equal(Object.hasOwn(env, 'GITHUB_TOKEN'), false)
+  assert.equal(Object.hasOwn(env, 'GH_TOKEN'), false)
+  assert.equal(Object.hasOwn(env, 'HTTPS_PROXY'), false)
+  assert.equal(Object.hasOwn(env, 'http_proxy'), false)
 })
 
 test('C0.3 provenance canonicalizes GitHub event and run identities without credentials', () => {
@@ -306,85 +304,53 @@ test('C0.3 audit snapshot rejects both count and advisory substitution', () => {
   assert.throws(() => assertAuditSnapshot('development', { ...HIGH_COUNTS, total: 2 }, observed.advisories, observed))
 })
 
-test('C0.3 GitHub tag provenance accepts canonical lightweight and annotated tags', async () => {
-  let lightweightLoads = 0
-  assert.equal(
-    await resolveGitHubTagCommit('example/project', { object: githubObject('commit', EXPECTED_SHA) }, async () => {
-      lightweightLoads += 1
-      throw new Error('lightweight tags must not be peeled')
-    }),
-    EXPECTED_SHA
-  )
-  assert.equal(lightweightLoads, 0)
+test('C0.3 Git smart-HTTP tag provenance accepts canonical lightweight and annotated tags', () => {
+  const tag = 'v1.2.3'
+  const directRef = githubTagRef(tag)
+  const peeledRef = `${directRef}^{}`
 
-  const firstTag = githubObject('tag', EXPECTED_SHA)
-  const secondTag = githubObject('tag', OTHER_SHA)
-  const commit = githubObject('commit', THIRD_SHA)
-  const requested: string[] = []
+  assert.equal(githubRepositoryUrl('example/project'), 'https://github.com/example/project.git')
+  assert.equal(directRef, 'refs/tags/v1.2.3')
+  assert.deepEqual(gitLsRemoteTagArgs('example/project', tag), [
+    '-c',
+    'credential.helper=',
+    '-c',
+    'core.askPass=',
+    '-c',
+    'http.extraHeader=',
+    'ls-remote',
+    '--exit-code',
+    '--tags',
+    'https://github.com/example/project.git',
+    directRef,
+    peeledRef
+  ])
+  assert.equal(resolveGitLsRemoteTagCommit(tag, `${EXPECTED_SHA}\t${directRef}\n`), EXPECTED_SHA)
   assert.equal(
-    await resolveGitHubTagCommit('example/project', { object: firstTag }, async url => {
-      requested.push(url)
-      if (url === firstTag.url) {
-        return { sha: firstTag.sha, url: firstTag.url, object: secondTag }
-      }
-      if (url === secondTag.url) {
-        return { sha: secondTag.sha, url: secondTag.url, object: commit }
-      }
-      throw new Error(`unexpected tag URL: ${url}`)
-    }),
-    THIRD_SHA
+    resolveGitLsRemoteTagCommit(tag, `${EXPECTED_SHA}\t${directRef}\n${OTHER_SHA}\t${peeledRef}\n`),
+    OTHER_SHA
   )
-  assert.deepEqual(requested, [firstTag.url, secondTag.url])
 })
 
-test('C0.3 GitHub tag provenance rejects path escape, response swap, cycle, and excessive depth', async () => {
-  const tag = githubObject('tag', EXPECTED_SHA)
+test('C0.3 Git smart-HTTP tag provenance rejects path escape and ambiguous output', () => {
+  const tag = 'v1.2.3'
+  const directRef = githubTagRef(tag)
+  const peeledRef = `${directRef}^{}`
 
-  await assert.rejects(() =>
-    resolveGitHubTagCommit(
-      'example/project',
-      {
-        object: {
-          ...githubObject('commit', OTHER_SHA),
-          url: `https://api.github.com/repos/attacker/project/git/commits/${OTHER_SHA}`
-        }
-      },
-      async () => ({})
-    )
+  assert.throws(() => githubRepositoryUrl('../escape'))
+  assert.throws(() => githubTagRef('../escape'))
+  assert.throws(() => gitLsRemoteTagArgs('../escape', tag))
+  assert.throws(() => gitLsRemoteTagArgs('example/project', '../escape'))
+  assert.throws(() => resolveGitLsRemoteTagCommit(tag, ''))
+  assert.throws(() => resolveGitLsRemoteTagCommit(tag, `${OTHER_SHA}\t${peeledRef}\n`), /did not return/u)
+  assert.throws(() => resolveGitLsRemoteTagCommit(tag, `${EXPECTED_SHA}\trefs/tags/v9.9.9\n`), /unexpected record/u)
+  assert.throws(
+    () => resolveGitLsRemoteTagCommit(tag, `${EXPECTED_SHA}\t${directRef}\n${OTHER_SHA}\t${directRef}\n`),
+    /duplicate record/u
   )
-  await assert.rejects(
-    () =>
-      resolveGitHubTagCommit('example/project', { object: tag }, async () => ({
-        sha: OTHER_SHA,
-        url: tag.url,
-        object: githubObject('commit', THIRD_SHA)
-      })),
-    /response SHA changed/u
+  assert.throws(
+    () => resolveGitLsRemoteTagCommit(tag, `${EXPECTED_SHA.toUpperCase()}\t${directRef}\n`),
+    /unexpected record/u
   )
-  await assert.rejects(
-    () =>
-      resolveGitHubTagCommit('example/project', { object: tag }, async () => ({
-        sha: tag.sha,
-        url: tag.url,
-        object: tag
-      })),
-    /peel cycle/u
-  )
-
-  const tagShas = [EXPECTED_SHA, OTHER_SHA, THIRD_SHA, '0'.repeat(40), '1'.repeat(40)]
-  const tags = tagShas.map(sha => githubObject('tag', sha))
-  await assert.rejects(
-    () =>
-      resolveGitHubTagCommit('example/project', { object: tags[0] }, async url => {
-        const index = tags.findIndex(candidate => candidate.url === url)
-        const current = tags[index]
-        assert.ok(current)
-        return {
-          sha: current.sha,
-          url: current.url,
-          object: tags[index + 1] ?? githubObject('commit', '2'.repeat(40))
-        }
-      }),
-    /maximum peel depth/u
-  )
+  assert.throws(() => resolveGitLsRemoteTagCommit(tag, `${EXPECTED_SHA}\t${directRef}\r\n`), /malformed output/u)
 })

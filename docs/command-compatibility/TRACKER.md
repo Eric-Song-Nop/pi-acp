@@ -239,10 +239,11 @@ commands 宣称为稳定支持。
       输出 `testedCheckoutSha` (`git rev-parse HEAD`) 与 `expectedCheckoutSha`，
       run-scoped SHA 不写回历史 `adapter.baselineSha`。
 - [x] networked preflight 完成 checkout/setup、`npm ci`、image acquisition、npm
-      registry 与 peeled Git tag pin 验证，以及 npm `10.9.3` 的 runtime/full-tree
-      live audit；package name/version/`gitHead`/SHA-512 SRI、repository tag、全部
-      severity totals、sorted GHSA IDs 或验证可用性漂移都会 hard fail。latest 与 Pi
-      `main` 只是 warn-only observation，audit 不是 immutable evidence 或 waiver。
+      registry 与 credential-neutralized Git smart-HTTP `ls-remote` peeled tag pin
+      验证，以及 npm `10.9.3` 的 runtime/full-tree live audit；package
+      name/version/`gitHead`/SHA-512 SRI、repository tag、全部 severity totals、
+      sorted GHSA IDs 或验证可用性漂移都会 hard fail。latest 与 Pi `main` 只是
+      warn-only observation，audit 不是 immutable evidence 或 waiver。
 - [x] `typecheck`、`lint`、`test`、`build` 与 `real-pi-e2e` execution 使用同一
       `linux/amd64` container、`docker --network none`、只读 root/worktree、isolated
       temp homes、unprivileged UID/GID、`--cap-drop ALL`、no-new-privileges 与

@@ -13,11 +13,12 @@ import {
   assertGitCheckout,
   classifyMutableIdentity,
   githubRunUrl,
+  gitLsRemoteTagArgs,
   parseAuditReport,
   parseOptionalGitSha,
   registryTagUrl,
   registryVersionUrl,
-  resolveGitHubTagCommit,
+  resolveGitLsRemoteTagCommit,
   validateLockedNpmPackagePin,
   validateNpmPackagePin,
   type NpmPinExpectation
@@ -134,21 +135,9 @@ async function assertNpmPin(expected: NpmPinExpectation): Promise<void> {
   validateNpmPackagePin(expected, await fetchJson(registryVersionUrl(expected.package, expected.version)))
 }
 
-async function githubTagCommit(repository: string, ref: string): Promise<string> {
-  const headers = githubHeaders()
-  const initial = await fetchJson(
-    new URL(`https://api.github.com/repos/${repository}/git/ref/tags/${encodeURIComponent(ref)}`),
-    headers
-  )
-  return await resolveGitHubTagCommit(repository, initial, async url => {
-    const parsed = new URL(url)
-    if (parsed.origin !== 'https://api.github.com') {
-      throw new Error(`C0.3 tag peel escaped api.github.com: ${url}`)
-    }
-    const value = await fetchJson(parsed, headers)
-    if (!value || typeof value !== 'object') throw new Error('C0.3 GitHub tag object is malformed')
-    return value
-  })
+async function githubTagCommit(repository: string, ref: string, env: NodeJS.ProcessEnv): Promise<string> {
+  const result = await runCommand('git', gitLsRemoteTagArgs(repository, ref), { env })
+  return resolveGitLsRemoteTagCommit(ref, result.stdout)
 }
 
 async function mutableObservations(matrix: ReturnType<typeof readCompatibilityMatrix>) {
@@ -291,12 +280,13 @@ async function main(): Promise<void> {
       commit: matrix.clients.nonZed.commit
     }
   ] as const
-  const observedTagCommits = await Promise.all(
-    tagPins.map(async pin => ({
+  const observedTagCommits: Array<(typeof tagPins)[number] & { observed: string }> = []
+  for (const pin of tagPins) {
+    observedTagCommits.push({
       ...pin,
-      observed: await githubTagCommit(pin.repository, pin.ref)
-    }))
-  )
+      observed: await githubTagCommit(pin.repository, pin.ref, env)
+    })
+  }
   for (const pin of observedTagCommits) {
     assert.equal(pin.observed, pin.commit, `${pin.repository} ${pin.ref} moved`)
   }

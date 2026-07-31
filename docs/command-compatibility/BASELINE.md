@@ -97,10 +97,11 @@ Exact CI toolchain and policy pins:
 Checkout, Node setup, `npm ci`, image acquisition, registry/GitHub provenance,
 and both npm audits run in the explicitly networked preflight. The provenance
 step hard-fails when an immutable package name/version/npm `gitHead`/SHA-512 SRI,
-peeled repository tag, exact audit severity total, or sorted GHSA identity
-drifts or cannot be verified. The audit is a live mutable-policy check under npm
-`10.9.3`, not reproducible immutable evidence and not a vulnerability waiver.
-Latest package versions and Pi `main` are warn-only observations.
+credential-neutralized Git smart-HTTP peeled repository tag, exact audit severity
+total, or sorted GHSA identity drifts or cannot be verified. The audit is a live
+mutable-policy check under npm `10.9.3`, not reproducible immutable evidence and
+not a vulnerability waiver. Latest package versions and Pi `main` are warn-only
+observations.
 
 Each provenance run emits its own `testedCheckoutSha` from `git rev-parse HEAD`
 and compares it with `expectedCheckoutSha` from the GitHub event. The historical
