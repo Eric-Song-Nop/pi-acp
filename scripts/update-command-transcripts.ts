@@ -477,7 +477,7 @@ async function main(): Promise<void> {
     status: 'blocked',
     blockedBy: {
       checkpoint: 'C0.3',
-      reason: 'C0.7 cannot pass G0 until C0.3 wires the required CI gates and proves OS-level network denial.',
+      reason: "C0.7 cannot pass G0 until C0.3's exact pushed network-denied CI evidence is independently verified.",
       owner: '@Hiton (#Pi-ACP task #2)',
       trackingUrl: 'https://github.com/Eric-Song-Nop/pi-acp/issues/7',
       recheckDate: options.recheckDate
