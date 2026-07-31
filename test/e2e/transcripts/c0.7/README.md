@@ -32,5 +32,14 @@ expected failures frozen by checkpoint C0.7.
   a stale recoverable view. These guarantees do not cover NFS/shared-host
   publication or a hostile process with the same UID.
 
-The manifest remains `blocked` on C0.3 until network-denied CI exists. These
-artifacts prove configured loopback request counts, not OS-level egress denial.
+The listener records each HTTP-handler-accepted request once before body
+completion and terminalizes that record exactly once as `end`, `timeout`,
+`aborted`, or `error`. Completed and partial-request controls prevent an
+accepted incomplete request from disappearing behind a false zero count; only
+a completed `end` body may contribute XF02 derived evidence. Outcomes and
+bodies remain test-internal and are not added to the persisted artifact surface.
+
+The manifest remains `blocked` pending independent verification of C0.3's exact
+pushed network-denied CI evidence. These artifacts prove configured loopback
+request counts, not OS-level egress denial, and external run-scoped evidence
+does not rewrite that boundary retroactively.
