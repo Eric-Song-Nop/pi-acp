@@ -255,9 +255,9 @@ Prettier 与 production audit `0` 全部通过，六条 review threads 全部 re
 - [x] operation、session update、catalog wait 和 test case 都有硬 timeout；operation timeout 会同步进入 client-owned fatal lifecycle，拒绝所有并发 operation/live wait、隔离 teardown 后到达的 update，并在有界 teardown 后向 timeout owner 返回最终 transcript。
 - [x] cleanup 按 stdin EOF → SIGTERM → SIGKILL 执行且幂等；POSIX 会清理 detached process group，并以 same-process-group TERM-resistant descendant 回归证明。
 - [x] session updates 保留 immutable pre-fatal replay；observer/predicate 的同步或异步失败不会破坏后续订阅者或缓存，child exit/fatal lifecycle 会立即结束 live update wait；fatal 后的 wire update 只保留 transcript 证据，不进入 retained/live/strict state。
-- [x] raw harness 提供 replay-safe、可取消订阅的 terminal lifecycle boundary；它与最终 `closed`/process-exit evidence 分离。strict wrapper 不公开 raw transport；pending 和 boundary 后新建的 unsatisfied catalog wait 会在 fatal 或普通 transport EOF 时立即、因果性地失败，不会等待 teardown 或误报 catalog timeout；已缓存的 pre-terminal catalog 仍可作为 immutable diagnostic replay。
+- [x] raw harness 提供 replay-safe、可取消订阅的 terminal lifecycle boundary；它与最终 `closed`/process-exit evidence 分离。pending 和 boundary 后新建的 raw update wait，以及 strict unsatisfied catalog wait，都会在 fatal 或普通 transport EOF 时立即、因果性地失败，不会等待 teardown 或误报 timeout；strict wrapper 不公开 raw transport，已缓存的 pre-terminal catalog 仍可作为 immutable diagnostic replay。
 - [x] 每个 session 的 strict 目录是全量 replacement（含 empty），未广告 slash command 在任何 prompt write 前本地拒绝；terminal 后即使目录已缓存也不会写入新的 prompt，disposed wrapper 不会被 raw lifecycle promise 永久保留。
-- [x] 覆盖 fragmented multibyte NDJSON、malformed inbound/outbound envelope、early/reentrant replay、多 session isolation、replacement/empty、raw/strict timeout、并发 fatal timeout、pending/post-boundary strict wait、late-message quarantine、pre-exit transport EOF、early exit、UTF-8 stderr byte cap、high-operation close 和 same-process-group descendant cleanup。
+- [x] 覆盖 fragmented multibyte NDJSON、malformed inbound/outbound envelope、early/reentrant replay、多 session isolation、replacement/empty、raw/strict timeout、并发 fatal timeout、pending/post-boundary raw/strict wait、late-message quarantine、pre-exit transport EOF、early exit、UTF-8 stderr byte cap、high-operation close 和 same-process-group descendant cleanup。
 
 证据：
 [`test/helpers/acp-process-client.ts`](../../test/helpers/acp-process-client.ts)、
@@ -272,8 +272,10 @@ adversarial review fixes 固定为
 [`70274a0`](https://github.com/Eric-Song-Nop/pi-acp/commit/70274a050cb9de937c8c10cb8bfeabb1fb85b2ac)
 、
 [`74c41a1`](https://github.com/Eric-Song-Nop/pi-acp/commit/74c41a1ba38dacd1f83f654b4e4064601fe0308a)
+、
+[`99390c4`](https://github.com/Eric-Song-Nop/pi-acp/commit/99390c46d3557c4a56bf89a0842fa4cfbadec3cc)
 和
-[`99390c4`](https://github.com/Eric-Song-Nop/pi-acp/commit/99390c46d3557c4a56bf89a0842fa4cfbadec3cc)。
+[`f9e231c`](https://github.com/Eric-Song-Nop/pi-acp/commit/f9e231cdd103d2649ad5522d79ee1d61b62edeec)。
 Author validation runtime 为 Node `26.5.0` / `darwin` / `arm64`：focused harness
 `10/10`、全量测试 `117/117`、typecheck、lint、build、Prettier 与 production
 audit `0` 全部通过；最低 Node `22.19.0` focused harness `10/10`、全量测试
