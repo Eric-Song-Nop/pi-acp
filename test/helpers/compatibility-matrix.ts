@@ -3,7 +3,7 @@ import { z } from 'zod'
 
 const exactVersionSchema = z.string().regex(/^\d+\.\d+\.\d+$/)
 const gitShaSchema = z.string().regex(/^[0-9a-f]{40}$/)
-const verificationStatusSchema = z.enum(['planned', 'in-progress', 'verified', 'regressed'])
+const workflowStatusSchema = z.enum(['proposed', 'ready', 'active', 'blocked', 'in_review', 'verified', 'deferred'])
 const auditCountsSchema = z
   .object({
     moderate: z.number().int().nonnegative(),
@@ -35,7 +35,7 @@ export const compatibilityMatrixSchema = z
     schemaVersion: z.literal(1),
     planId: z.literal('PACP-CMD-2026-01'),
     recordedAt: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
-    e2eStatus: verificationStatusSchema,
+    e2eStatus: workflowStatusSchema,
     adapter: z
       .object({
         package: z.literal('pi-acp'),
@@ -78,7 +78,7 @@ export const compatibilityMatrixSchema = z
             repository: z.literal('zed-industries/zed'),
             ref: z.string(),
             commit: gitShaSchema,
-            status: verificationStatusSchema,
+            status: workflowStatusSchema,
             verification: z.literal('manual')
           })
           .strict(),
@@ -89,7 +89,7 @@ export const compatibilityMatrixSchema = z
             version: exactVersionSchema,
             ref: z.string(),
             commit: gitShaSchema,
-            status: verificationStatusSchema,
+            status: workflowStatusSchema,
             verification: z.literal('manual')
           })
           .strict()

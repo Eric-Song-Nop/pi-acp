@@ -37,7 +37,7 @@ test('compatibility matrix strictly matches locked package metadata', () => {
   assert.equal(matrix.acp.sdkVersion, lock.packages['node_modules/@agentclientprotocol/sdk']?.version)
 })
 
-test('compatibility matrix rejects unknown fields and malformed source identities', () => {
+test('compatibility matrix rejects unknown fields, malformed identities, and non-workflow statuses', () => {
   const matrix = readCompatibilityMatrix()
 
   assert.equal(
@@ -54,6 +54,13 @@ test('compatibility matrix rejects unknown fields and malformed source identitie
         ...matrix.pi,
         baselineGitHead: 'not-a-git-sha'
       }
+    }).success,
+    false
+  )
+  assert.equal(
+    compatibilityMatrixSchema.safeParse({
+      ...matrix,
+      e2eStatus: 'planned'
     }).success,
     false
   )

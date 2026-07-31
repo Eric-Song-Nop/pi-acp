@@ -18,7 +18,7 @@ pi-acp 0.0.33 @ d1cffc047ab37a096ee70ca39cfc1de463db8d12
 The Pi package versions were installation/version-probed with an isolated
 `PI_PACKAGE_DIR`. Full command and extension compatibility is not claimed until
 the relevant G5 matrix case is verified. The machine-readable matrix therefore
-starts with `e2eStatus: planned`.
+starts with `e2eStatus: proposed`, using the tracker workflow vocabulary.
 
 Pinned source identities:
 
