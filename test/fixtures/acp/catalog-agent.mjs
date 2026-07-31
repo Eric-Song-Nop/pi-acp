@@ -6,12 +6,24 @@ import { Readable as NodeReadable } from 'node:stream'
 
 const mode = process.argv.find(argument => argument.startsWith('--mode='))?.slice('--mode='.length) ?? 'default'
 const fragmentBytes = Number.parseInt(process.env.ACP_FIXTURE_FRAGMENT_BYTES ?? '0', 10)
+const malformedPayloads = new Map([
+  ['malformed-primitive', 42],
+  ['malformed-null', null],
+  ['malformed-array', []],
+  ['malformed-response', { id: 0, error: null }],
+  ['malformed-error-object', { jsonrpc: '2.0', id: 0, error: null }]
+])
+const malformedPayload = malformedPayloads.get(mode)
 
 if (!Number.isInteger(fragmentBytes) || fragmentBytes < 0) {
   throw new Error('ACP_FIXTURE_FRAGMENT_BYTES must be a non-negative integer')
 }
 
-const stubbornMode = mode === 'hang-prompt' || mode === 'close-output-on-prompt'
+if (process.env.ACP_HARNESS_PARENT_MARKER !== undefined) {
+  process.stderr.write(`unexpected inherited marker: ${process.env.ACP_HARNESS_PARENT_MARKER}\n`)
+}
+
+const stubbornMode = mode === 'hang-prompt' || mode === 'close-output-on-prompt' || malformedPayloads.has(mode)
 if (stubbornMode) {
   if (process.platform !== 'win32') process.on('SIGTERM', () => {})
   setInterval(() => {}, 1_000)
@@ -141,6 +153,9 @@ class CatalogAgent {
   }
 
   async extMethod(method, params) {
+    if (method === 'test/ping') {
+      return { sequence: params.sequence }
+    }
     if (method !== 'test/set_catalog') throw new Error(`Unknown fixture extension method ${method}`)
 
     const sessionId = params.sessionId
@@ -173,8 +188,12 @@ class CatalogAgent {
   }
 }
 
-new AgentSideConnection(connection => new CatalogAgent(connection), stream)
+if (malformedPayloads.has(mode)) {
+  await writeStdout(`${JSON.stringify(malformedPayload)}\n`)
+} else {
+  new AgentSideConnection(connection => new CatalogAgent(connection), stream)
+}
 
 process.stdout.on('error', () => {
-  process.exit(0)
+  if (!stubbornMode) process.exit(0)
 })

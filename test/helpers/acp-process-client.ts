@@ -86,7 +86,8 @@ export type AcpOperationOptions = {
   timeoutMs?: number
 }
 
-type SessionUpdateListener = (notification: SessionNotification) => void
+type SessionUpdateListener = (notification: SessionNotification) => void | PromiseLike<void>
+type ProcessExitListener = (exit: AcpProcessExit) => void
 
 export class AcpOperationTimeoutError extends Error {
   teardownError?: unknown
@@ -128,9 +129,48 @@ export class AcpProcessExitError extends Error {
   }
 }
 
+export class AcpMalformedMessageError extends Error {
+  readonly code = 'ACP_MALFORMED_MESSAGE'
+  transcript = ''
+  exit?: AcpProcessExit
+  teardownError?: unknown
+
+  constructor(
+    readonly reason: string,
+    readonly receivedKind: string
+  ) {
+    super(`Rejected malformed ACP JSON-RPC message (${receivedKind}): ${reason}`)
+    this.name = 'AcpMalformedMessageError'
+  }
+}
+
 function requirePositiveInteger(value: number, name: string): number {
   if (!Number.isInteger(value) || value <= 0) throw new TypeError(`${name} must be a positive integer`)
   return value
+}
+
+function requireExplicitEnvironment(env: NodeJS.ProcessEnv | undefined): NodeJS.ProcessEnv {
+  if (env === undefined || env === null || typeof env !== 'object' || Array.isArray(env)) {
+    throw new TypeError('ACP harness env must be an explicitly supplied plain object')
+  }
+
+  const prototype = Object.getPrototypeOf(env)
+  if (prototype !== Object.prototype && prototype !== null) {
+    throw new TypeError('ACP harness env must be an explicitly supplied plain object')
+  }
+  if (Object.getOwnPropertySymbols(env).length > 0) {
+    throw new TypeError('ACP harness env must not contain symbol keys')
+  }
+
+  const normalized: NodeJS.ProcessEnv = Object.create(null)
+  for (const key of Object.keys(env)) {
+    const value = env[key]
+    if (value !== undefined && typeof value !== 'string') {
+      throw new TypeError(`ACP harness env.${key} must be a string or undefined`)
+    }
+    normalized[key] = value
+  }
+  return normalized
 }
 
 function clone<T>(value: T): T {
@@ -172,7 +212,12 @@ function canonicalizeTranscriptMetadata(metadata: AcpTranscriptMetadata): AcpTra
 
       const result: Record<string, AcpTranscriptJsonValue> = {}
       for (const key of Object.keys(value).sort()) {
-        result[key] = visit((value as Record<string, unknown>)[key], `${path}.${key}`)
+        Object.defineProperty(result, key, {
+          value: visit((value as Record<string, unknown>)[key], `${path}.${key}`),
+          enumerable: true,
+          configurable: true,
+          writable: true
+        })
       }
       return result
     } finally {
@@ -183,6 +228,129 @@ function canonicalizeTranscriptMetadata(metadata: AcpTranscriptMetadata): AcpTra
   return visit(metadata, 'metadata') as AcpTranscriptMetadata
 }
 
+function receivedKind(value: unknown): string {
+  if (value === null) return 'null'
+  if (Array.isArray(value)) return 'array'
+  return typeof value
+}
+
+function canonicalizeOutgoingJsonValue(
+  value: unknown,
+  path: string,
+  ancestors = new Set<object>()
+): AcpTranscriptJsonValue {
+  if (value === null || typeof value === 'string' || typeof value === 'boolean') return value
+  if (typeof value === 'number') {
+    if (!Number.isFinite(value)) throw new TypeError(`${path} must be a finite number`)
+    return Object.is(value, -0) ? 0 : value
+  }
+  if (typeof value !== 'object') throw new TypeError(`${path} must be JSON-safe`)
+  if (ancestors.has(value)) throw new TypeError(`${path} must not contain cycles`)
+
+  ancestors.add(value)
+  try {
+    if (Array.isArray(value)) {
+      const result: AcpTranscriptJsonValue[] = []
+      for (let index = 0; index < value.length; index += 1) {
+        if (!(index in value)) throw new TypeError(`${path}[${String(index)}] must not be sparse`)
+        result.push(canonicalizeOutgoingJsonValue(value[index], `${path}[${String(index)}]`, ancestors))
+      }
+      return result
+    }
+
+    const prototype = Object.getPrototypeOf(value)
+    if (prototype !== Object.prototype && prototype !== null) {
+      throw new TypeError(`${path} must contain only plain objects`)
+    }
+    if (Object.getOwnPropertySymbols(value).length > 0) {
+      throw new TypeError(`${path} must not contain symbol keys`)
+    }
+
+    const result: Record<string, AcpTranscriptJsonValue> = {}
+    for (const key of Object.keys(value).sort()) {
+      const propertyValue = (value as Record<string, unknown>)[key]
+      if (propertyValue === undefined) continue
+      Object.defineProperty(result, key, {
+        value: canonicalizeOutgoingJsonValue(propertyValue, `${path}.${key}`, ancestors),
+        enumerable: true,
+        configurable: true,
+        writable: true
+      })
+    }
+    return result
+  } finally {
+    ancestors.delete(value)
+  }
+}
+
+function isRequestId(value: unknown): value is string | number | null {
+  return value === null || typeof value === 'string' || (typeof value === 'number' && Number.isFinite(value))
+}
+
+function validateIncomingMessage(value: unknown): AnyMessage {
+  const kind = receivedKind(value)
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+    throw new AcpMalformedMessageError('expected a JSON object envelope', kind)
+  }
+
+  const message = value as Record<string, unknown>
+  if (!Object.hasOwn(message, 'jsonrpc') || message.jsonrpc !== '2.0') {
+    throw new AcpMalformedMessageError('jsonrpc must equal "2.0"', kind)
+  }
+
+  const hasMethod = Object.hasOwn(message, 'method')
+  const hasId = Object.hasOwn(message, 'id')
+  const hasResult = Object.hasOwn(message, 'result')
+  const hasError = Object.hasOwn(message, 'error')
+
+  if (hasMethod) {
+    if (typeof message.method !== 'string') {
+      throw new AcpMalformedMessageError('request/notification method must be a string', kind)
+    }
+    if (hasId && !isRequestId(message.id)) {
+      throw new AcpMalformedMessageError('request id must be a string, finite number, or null', kind)
+    }
+    if (hasResult || hasError) {
+      throw new AcpMalformedMessageError('request/notification must not contain result or error', kind)
+    }
+    return message as AnyMessage
+  }
+
+  if (!hasId || !isRequestId(message.id)) {
+    throw new AcpMalformedMessageError('response id must be a string, finite number, or null', kind)
+  }
+  if (hasResult === hasError) {
+    throw new AcpMalformedMessageError('response must contain exactly one of result or error', kind)
+  }
+  if (hasError) {
+    const error = message.error
+    if (error === null || typeof error !== 'object' || Array.isArray(error)) {
+      throw new AcpMalformedMessageError('response error must be a JSON object', kind)
+    }
+    const errorRecord = error as Record<string, unknown>
+    if (
+      !Object.hasOwn(errorRecord, 'code') ||
+      !Object.hasOwn(errorRecord, 'message') ||
+      !Number.isInteger(errorRecord.code) ||
+      typeof errorRecord.message !== 'string'
+    ) {
+      throw new AcpMalformedMessageError('response error requires an integer code and string message', kind)
+    }
+  }
+
+  return message as AnyMessage
+}
+
+function canonicalizeOutgoingMessage(value: unknown): AnyMessage {
+  try {
+    return validateIncomingMessage(canonicalizeOutgoingJsonValue(value, 'outgoing message'))
+  } catch (error) {
+    if (error instanceof AcpMalformedMessageError) throw error
+    const reason = error instanceof Error ? error.message : String(error)
+    throw new AcpMalformedMessageError(reason, receivedKind(value))
+  }
+}
+
 function tapStream(stream: Stream, record: (direction: AcpTranscriptDirection, message: AnyMessage) => void): Stream {
   const writer = stream.writable.getWriter()
   const reader = stream.readable.getReader()
@@ -190,8 +358,9 @@ function tapStream(stream: Stream, record: (direction: AcpTranscriptDirection, m
   return {
     writable: new WritableStream<AnyMessage>({
       async write(message) {
-        record('client_to_agent', message)
-        await writer.write(message)
+        const canonicalMessage = canonicalizeOutgoingMessage(message)
+        record('client_to_agent', canonicalMessage)
+        await writer.write(canonicalMessage)
       },
       async close() {
         await writer.close()
@@ -208,8 +377,9 @@ function tapStream(stream: Stream, record: (direction: AcpTranscriptDirection, m
           return
         }
 
-        record('agent_to_client', result.value)
-        controller.enqueue(result.value)
+        const message = validateIncomingMessage(result.value)
+        record('agent_to_client', message)
+        controller.enqueue(message)
       },
       async cancel(reason) {
         await reader.cancel(reason)
@@ -230,9 +400,8 @@ export class AcpProcessClient {
   private readonly transcriptEntries: AcpTranscriptEntry[]
   private readonly sessionUpdates: SessionNotification[] = []
   private readonly updateListeners = new Set<SessionUpdateListener>()
-  private readonly exitPromise: Promise<AcpProcessExit>
+  private readonly exitListeners = new Set<ProcessExitListener>()
   private readonly closedPromise: Promise<AcpProcessExit>
-  private resolveExit!: (exit: AcpProcessExit) => void
   private resolveClosed!: (exit: AcpProcessExit) => void
   private rejectClosed!: (error: Error) => void
   private stderrTail = Buffer.alloc(0)
@@ -240,6 +409,7 @@ export class AcpProcessClient {
   private exitInfo: AcpProcessExit | undefined
   private closePromise: Promise<AcpProcessExit> | undefined
   private lastProcessError: string | undefined
+  private malformedMessageError: AcpMalformedMessageError | undefined
   private spawned = false
   private closedSettled = false
   private unusable = false
@@ -247,7 +417,11 @@ export class AcpProcessClient {
   constructor(options: AcpProcessClientOptions) {
     if (!isAbsolute(options.command)) throw new TypeError('ACP harness command must be an absolute path')
     if (!isAbsolute(options.cwd)) throw new TypeError('ACP harness cwd must be an absolute path')
+    if (!Object.hasOwn(options, 'env')) {
+      throw new TypeError('ACP harness env must be an explicitly supplied plain object')
+    }
 
+    const env = requireExplicitEnvironment(options.env)
     this.cwd = options.cwd
     this.requestTimeoutMs = requirePositiveInteger(
       options.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS,
@@ -276,9 +450,6 @@ export class AcpProcessClient {
         metadata: canonicalizeTranscriptMetadata(options.transcriptMetadata ?? {})
       }
     ]
-    this.exitPromise = new Promise(resolve => {
-      this.resolveExit = resolve
-    })
     this.closedPromise = new Promise((resolve, reject) => {
       this.resolveClosed = resolve
       this.rejectClosed = reject
@@ -287,7 +458,7 @@ export class AcpProcessClient {
 
     this.child = spawn(options.command, [...(options.args ?? [])], {
       cwd: options.cwd,
-      env: options.env,
+      env,
       stdio: ['pipe', 'pipe', 'pipe'],
       shell: false,
       detached: process.platform !== 'win32'
@@ -326,7 +497,9 @@ export class AcpProcessClient {
       sessionUpdate: async notification => {
         const retained = clone(notification)
         this.sessionUpdates.push(retained)
-        for (const listener of this.updateListeners) listener(clone(retained))
+        for (const listener of [...this.updateListeners]) {
+          this.deliverSessionUpdate(listener, retained)
+        }
       }
     }
 
@@ -334,6 +507,8 @@ export class AcpProcessClient {
     this.connection.signal.addEventListener(
       'abort',
       () => {
+        const reason = this.connection.signal.reason
+        if (reason instanceof AcpMalformedMessageError) this.malformedMessageError = reason
         if (!this.closePromise && !this.exitInfo) void this.close().catch(() => undefined)
       },
       { once: true }
@@ -366,12 +541,22 @@ export class AcpProcessClient {
 
   subscribeSessionUpdates(listener: SessionUpdateListener, replay = true): () => void {
     if (replay) {
-      for (const notification of this.sessionUpdates) listener(clone(notification))
+      for (const notification of this.sessionUpdates) this.deliverSessionUpdate(listener, notification)
     }
 
     this.updateListeners.add(listener)
     return () => {
       this.updateListeners.delete(listener)
+    }
+  }
+
+  private deliverSessionUpdate(listener: SessionUpdateListener, notification: SessionNotification): void {
+    try {
+      const delivery = listener(clone(notification))
+      if (delivery) void Promise.resolve(delivery).catch(() => undefined)
+    } catch {
+      // A diagnostic observer must not prevent later stateful subscribers
+      // from receiving the authoritative catalog/update.
     }
   }
 
@@ -382,6 +567,11 @@ export class AcpProcessClient {
     const afterIndex = options.afterIndex ?? 0
     if (!Number.isInteger(afterIndex) || afterIndex < 0)
       throw new TypeError('afterIndex must be a non-negative integer')
+    if (afterIndex > this.sessionUpdates.length) {
+      throw new RangeError(
+        `afterIndex ${String(afterIndex)} exceeds retained session update count ${String(this.sessionUpdates.length)}`
+      )
+    }
 
     for (const notification of this.sessionUpdates.slice(afterIndex)) {
       if (predicate(clone(notification))) return clone(notification)
@@ -391,11 +581,15 @@ export class AcpProcessClient {
     const timeoutMs = requirePositiveInteger(options.timeoutMs ?? this.updateTimeoutMs, 'timeoutMs')
     return await new Promise<SessionNotification>((resolve, reject) => {
       let settled = false
+      const exitListener: ProcessExitListener = exit => {
+        finish(() => reject(new AcpProcessExitError('session/update', exit, this.transcriptNdjson())))
+      }
       const finish = (complete: () => void): void => {
         if (settled) return
         settled = true
         clearTimeout(timer)
         this.updateListeners.delete(listener)
+        this.exitListeners.delete(exitListener)
         complete()
       }
       const listener: SessionUpdateListener = notification => {
@@ -410,9 +604,7 @@ export class AcpProcessClient {
         finish(() => reject(new AcpUpdateTimeoutError(timeoutMs, this.transcriptNdjson())))
       }, timeoutMs)
       this.updateListeners.add(listener)
-      void this.exitPromise.then(exit => {
-        finish(() => reject(new AcpProcessExitError('session/update', exit, this.transcriptNdjson())))
-      })
+      this.exitListeners.add(exitListener)
     })
   }
 
@@ -470,7 +662,7 @@ export class AcpProcessClient {
     invoke: () => Promise<T>,
     timeoutMs = this.requestTimeoutMs
   ): Promise<T> {
-    if (this.unusable || this.closePromise || this.connection.signal.aborted) {
+    if (this.unusable || this.closePromise || this.connection.signal.aborted || this.exitInfo) {
       let closeError: unknown
       if (!this.exitInfo && (this.closePromise || this.connection.signal.aborted)) {
         try {
@@ -478,6 +670,9 @@ export class AcpProcessClient {
         } catch (error) {
           closeError = error
         }
+      }
+      if (this.malformedMessageError) {
+        throw this.finalizeMalformedMessageError(this.malformedMessageError, closeError)
       }
       if (this.exitInfo) throw new AcpProcessExitError(operation, this.exitInfo, this.transcriptNdjson())
       if (closeError) throw closeError
@@ -490,8 +685,12 @@ export class AcpProcessClient {
         reject(new AcpOperationTimeoutError(operation, timeoutMs, this.transcriptNdjson()))
       }, timeoutMs)
     })
-    const exitPromise = this.exitPromise.then(exit => {
-      throw new AcpProcessExitError(operation, exit, this.transcriptNdjson())
+    let exitListener: ProcessExitListener | undefined
+    const exitPromise = new Promise<never>((_resolve, reject) => {
+      exitListener = exit => {
+        reject(new AcpProcessExitError(operation, exit, this.transcriptNdjson()))
+      }
+      this.exitListeners.add(exitListener)
     })
 
     try {
@@ -501,6 +700,17 @@ export class AcpProcessClient {
       }
       return result
     } catch (error) {
+      const malformedError = error instanceof AcpMalformedMessageError ? error : this.malformedMessageError
+      if (malformedError) {
+        this.unusable = true
+        let teardownError: unknown
+        try {
+          await this.close()
+        } catch (closeError) {
+          teardownError = closeError
+        }
+        throw this.finalizeMalformedMessageError(malformedError, teardownError)
+      }
       if (error instanceof AcpOperationTimeoutError) {
         this.unusable = true
         try {
@@ -526,7 +736,18 @@ export class AcpProcessClient {
       throw error
     } finally {
       if (timeout) clearTimeout(timeout)
+      if (exitListener) this.exitListeners.delete(exitListener)
     }
+  }
+
+  private finalizeMalformedMessageError(
+    error: AcpMalformedMessageError,
+    teardownError?: unknown
+  ): AcpMalformedMessageError {
+    error.exit = this.exitInfo
+    error.teardownError = teardownError
+    error.transcript = this.transcriptNdjson()
+    return error
   }
 
   private recordMessage(direction: AcpTranscriptDirection, message: AnyMessage): void {
@@ -569,7 +790,15 @@ export class AcpProcessClient {
       code: exit.code,
       signal: exit.signal
     })
-    this.resolveExit(exit)
+    const exitListeners = [...this.exitListeners]
+    this.exitListeners.clear()
+    for (const listener of exitListeners) {
+      try {
+        listener(exit)
+      } catch {
+        // Exit delivery must reach every active waiter/operation.
+      }
+    }
     if (!this.closePromise) void this.close().catch(() => undefined)
   }
 

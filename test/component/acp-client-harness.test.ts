@@ -3,10 +3,12 @@ import assert from 'node:assert/strict'
 import { mkdtemp, readFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { performance } from 'node:perf_hooks'
 import test from 'node:test'
 import { fileURLToPath } from 'node:url'
 import {
   AcpOperationTimeoutError,
+  AcpMalformedMessageError,
   AcpProcessClient,
   AcpProcessExitError,
   AcpUpdateTimeoutError,
@@ -23,7 +25,17 @@ const fixturePath = fileURLToPath(new URL('../fixtures/acp/catalog-agent.mjs', i
 const TEST_TIMEOUT_MS = 10_000
 
 type FixtureOptions = {
-  mode?: 'default' | 'no-catalog' | 'hang-prompt' | 'exit-on-prompt' | 'close-output-on-prompt'
+  mode?:
+    | 'default'
+    | 'no-catalog'
+    | 'hang-prompt'
+    | 'exit-on-prompt'
+    | 'close-output-on-prompt'
+    | 'malformed-primitive'
+    | 'malformed-null'
+    | 'malformed-array'
+    | 'malformed-response'
+    | 'malformed-error-object'
   fragmentBytes?: number
   client?: Partial<
     Pick<
@@ -125,8 +137,43 @@ test(
   'raw process client handles fragmented NDJSON and records structured transcripts',
   { timeout: TEST_TIMEOUT_MS },
   async t => {
+    const previousParentMarker = process.env.ACP_HARNESS_PARENT_MARKER
+    process.env.ACP_HARNESS_PARENT_MARKER = 'parent-only-credential-marker'
+    t.after(() => {
+      if (previousParentMarker === undefined) delete process.env.ACP_HARNESS_PARENT_MARKER
+      else process.env.ACP_HARNESS_PARENT_MARKER = previousParentMarker
+    })
     const fixture = await startFixture({ fragmentBytes: 2 })
     t.after(fixture.cleanup)
+    assert.throws(
+      () =>
+        new AcpProcessClient({
+          command: process.execPath,
+          args: [fixturePath],
+          cwd: fixture.cwd
+        } as unknown as AcpProcessClientOptions),
+      /env must be an explicitly supplied plain object/
+    )
+    assert.throws(
+      () =>
+        new AcpProcessClient({
+          command: process.execPath,
+          args: [fixturePath],
+          cwd: fixture.cwd,
+          env: undefined
+        } as unknown as AcpProcessClientOptions),
+      /env must be an explicitly supplied plain object/
+    )
+    assert.throws(
+      () =>
+        new AcpProcessClient({
+          command: process.execPath,
+          args: [fixturePath],
+          cwd: fixture.cwd,
+          env: new (class FixtureEnvironment {})()
+        } as unknown as AcpProcessClientOptions),
+      /env must be an explicitly supplied plain object/
+    )
     assert.throws(
       () =>
         new AcpProcessClient({
@@ -154,9 +201,17 @@ test(
     const missingProcess = new AcpProcessClient({
       command: join(fixture.cwd, 'missing-acp-executable'),
       cwd: fixture.cwd,
-      env: isolatedFixtureEnvironment(0)
+      env: isolatedFixtureEnvironment(0),
+      transcriptMetadata: JSON.parse('{"z":1,"__proto__":{"marker":true}}')
     })
     t.after(() => missingProcess.close().catch(() => undefined))
+    const missingProcessMeta = missingProcess.transcript()[0]
+    assert.equal(missingProcessMeta.kind, 'meta')
+    if (missingProcessMeta.kind === 'meta') {
+      assert.equal(Object.hasOwn(missingProcessMeta.metadata, '__proto__'), true)
+      assert.deepEqual(missingProcessMeta.metadata, JSON.parse('{"__proto__":{"marker":true},"z":1}'))
+    }
+    assert.match(missingProcess.transcriptNdjson(), /"__proto__":\{"marker":true\}/)
     await assert.rejects(missingProcess.initialize(), (error: unknown) => {
       assert.ok(error instanceof AcpProcessExitError)
       assert.match(error.exit.spawnError ?? '', /ENOENT/)
@@ -172,6 +227,12 @@ test(
         ? catalog.update.availableCommands.map(command => command.name)
         : [],
       ['alpha']
+    )
+    await assert.rejects(
+      fixture.client.waitForSessionUpdate(() => true, {
+        afterIndex: fixture.client.retainedSessionUpdateCount + 1
+      }),
+      /exceeds retained session update count/
     )
     await assert.rejects(
       fixture.client.waitForSessionUpdate(notification => {
@@ -237,8 +298,152 @@ test(
     assert.equal(serialized.includes('"timestamp"'), false)
     assert.equal(serialized.includes('"pid"'), false)
     assert.equal(serialized.includes('"env"'), false)
+    const exit = await fixture.client.close()
+    assert.equal(exit.stderrTail.includes('parent-only-credential-marker'), false)
   }
 )
+
+test('completed operations do not amplify bounded close work', { timeout: 20_000 }, async t => {
+  const fixture = await startFixture({
+    client: {
+      requestTimeoutMs: 5_000,
+      shutdownTimeoutMs: 250
+    }
+  })
+  t.after(fixture.cleanup)
+
+  await initializeSession(fixture.client, fixture.cwd)
+  const padding = 'x'.repeat(384)
+  for (let sequence = 0; sequence < 1_500; sequence += 1) {
+    const result = await fixture.client.extMethod('test/ping', { sequence, padding })
+    assert.equal(result.sequence, sequence)
+  }
+
+  const transcriptBytes = Buffer.byteLength(fixture.client.transcriptNdjson())
+  assert.ok(transcriptBytes > 500_000, `expected a substantial transcript, received ${String(transcriptBytes)} bytes`)
+  const closeStartedAt = performance.now()
+  await fixture.client.close()
+  const closeDurationMs = performance.now() - closeStartedAt
+  assert.ok(closeDurationMs < 2_000, `close took ${closeDurationMs.toFixed(1)}ms after completed operations`)
+})
+
+test('live update fanout snapshots reentrant strict subscribers', { timeout: TEST_TIMEOUT_MS }, async t => {
+  const fixture = await startFixture({ client: { clientBehavior: 'strict' } })
+  t.after(fixture.cleanup)
+
+  let strict: StrictCatalogClient | undefined
+  const unsubscribe = fixture.client.subscribeSessionUpdates(notification => {
+    if (notification.update.sessionUpdate === 'available_commands_update' && strict === undefined) {
+      strict = new StrictCatalogClient(fixture.client, 500)
+    }
+  }, false)
+  t.after(unsubscribe)
+  t.after(() => strict?.dispose())
+
+  const sessionId = await initializeSession(fixture.client, fixture.cwd)
+  await fixture.client.waitForSessionUpdate(isCatalogUpdate)
+  assert.ok(strict)
+  assert.equal(strict.catalog(sessionId)?.revision, 1)
+
+  await fixture.client.extMethod('test/set_catalog', { sessionId, names: ['beta'] })
+  const replacement = await strict.waitForCatalog(sessionId, { afterRevision: 1 })
+  assert.equal(replacement.revision, 2)
+  assert.deepEqual(
+    replacement.commands.map(command => command.name),
+    ['beta']
+  )
+})
+
+test('malformed JSON-RPC envelopes fail closed without reaching the SDK', { timeout: TEST_TIMEOUT_MS }, async () => {
+  const cases: Array<{
+    mode: NonNullable<FixtureOptions['mode']>
+    receivedKind: string
+    reason: RegExp
+  }> = [
+    { mode: 'malformed-primitive', receivedKind: 'number', reason: /expected a JSON object envelope/ },
+    { mode: 'malformed-null', receivedKind: 'null', reason: /expected a JSON object envelope/ },
+    { mode: 'malformed-array', receivedKind: 'array', reason: /expected a JSON object envelope/ },
+    { mode: 'malformed-response', receivedKind: 'object', reason: /jsonrpc must equal "2\.0"/ },
+    { mode: 'malformed-error-object', receivedKind: 'object', reason: /response error must be a JSON object/ }
+  ]
+
+  for (const malformedCase of cases) {
+    const fixture = await startFixture({
+      mode: malformedCase.mode,
+      client: {
+        requestTimeoutMs: 2_000,
+        shutdownTimeoutMs: 50
+      }
+    })
+    try {
+      await assert.rejects(fixture.client.initialize(), (error: unknown) => {
+        assert.ok(error instanceof AcpMalformedMessageError)
+        assert.equal(error.code, 'ACP_MALFORMED_MESSAGE')
+        assert.equal(error.receivedKind, malformedCase.receivedKind)
+        assert.match(error.reason, malformedCase.reason)
+        assert.equal(error.teardownError, undefined)
+        assert.match(error.transcript, /"kind":"process_exit"/)
+        if (process.platform !== 'win32') assert.equal(error.exit?.signal, 'SIGKILL')
+        return true
+      })
+      await fixture.client.closed
+      assert.equal(
+        fixture.client.transcript().some(entry => entry.kind === 'message' && entry.direction === 'agent_to_client'),
+        false
+      )
+    } finally {
+      await fixture.cleanup()
+    }
+  }
+
+  const cyclicPayload: Record<string, unknown> = {}
+  cyclicPayload.self = cyclicPayload
+  const outgoingCases: Array<{ payload: unknown; reason: RegExp }> = [
+    { payload: { sequence: 1n }, reason: /must be JSON-safe/ },
+    { payload: cyclicPayload, reason: /must not contain cycles/ }
+  ]
+
+  for (const outgoingCase of outgoingCases) {
+    const fixture = await startFixture({
+      client: {
+        requestTimeoutMs: 2_000,
+        shutdownTimeoutMs: 50
+      }
+    })
+    try {
+      await fixture.client.initialize()
+      await assert.rejects(
+        fixture.client.extMethod('test/ping', {
+          payload: outgoingCase.payload
+        }),
+        (error: unknown) => {
+          assert.ok(error instanceof AcpMalformedMessageError)
+          assert.equal(error.code, 'ACP_MALFORMED_MESSAGE')
+          assert.equal(error.receivedKind, 'object')
+          assert.match(error.reason, outgoingCase.reason)
+          assert.equal(error.teardownError, undefined)
+          assert.match(error.transcript, /"kind":"process_exit"/)
+          return true
+        }
+      )
+      await fixture.client.closed
+      assert.doesNotThrow(() => fixture.client.transcriptNdjson())
+      assert.equal(
+        fixture.client.transcript().some(entry => {
+          return (
+            entry.kind === 'message' &&
+            entry.direction === 'client_to_agent' &&
+            'method' in entry.message &&
+            entry.message.method === 'test/ping'
+          )
+        }),
+        false
+      )
+    } finally {
+      await fixture.cleanup()
+    }
+  }
+})
 
 test(
   'strict client atomically replaces catalogs and never writes refused commands',
@@ -249,6 +454,14 @@ test(
 
     const sessionId = await initializeSession(fixture.client, fixture.cwd)
     await fixture.client.waitForSessionUpdate(isCatalogUpdate)
+    let throwingObserverCalls = 0
+    const unsubscribeThrowingObserver = fixture.client.subscribeSessionUpdates(notification => {
+      if (notification.sessionId !== sessionId || notification.update.sessionUpdate !== 'available_commands_update')
+        return
+      throwingObserverCalls += 1
+      return Promise.reject(new Error('async diagnostic observer failure'))
+    }, false)
+    t.after(unsubscribeThrowingObserver)
     const strict = new StrictCatalogClient(fixture.client, 500)
     t.after(() => strict.dispose())
     const initial = await strict.waitForCatalog(sessionId)
@@ -300,6 +513,7 @@ test(
     await livePredicateFailure
     const replacement = await strict.waitForCatalog(sessionId, { afterRevision: initial.revision })
     assert.equal(replacement.revision, 2)
+    assert.equal(throwingObserverCalls, 1)
     assert.deepEqual(
       replacement.commands.map(command => command.name),
       ['beta']
@@ -318,6 +532,7 @@ test(
     await fixture.client.extMethod('test/set_catalog', { sessionId, names: [] })
     const empty = await strict.waitForCatalog(sessionId, { afterRevision: replacement.revision })
     assert.equal(empty.revision, 3)
+    assert.equal(throwingObserverCalls, 2)
     assert.deepEqual(empty.commands, [])
     await assert.rejects(strict.promptCommand({ sessionId, name: 'beta' }), CommandNotAdvertisedError)
     assert.equal(outboundPromptCount(fixture.client), 2)
