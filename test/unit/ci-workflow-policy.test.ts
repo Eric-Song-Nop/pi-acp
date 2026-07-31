@@ -138,6 +138,8 @@ test('the checked-in network and suite scripts make the workflow policy executab
   assert.match(boundaryScript, /network-denied CI must expose only the loopback interface/u)
   assert.match(boundaryScript, /CapEff/u)
   assert.match(boundaryScript, /NoNewPrivs/u)
+  assert.match(boundaryScript, /readlink\('\/proc\/self\/ns\/net'\)/u)
+  assert.match(boundaryScript, /assert\.match\(networkNamespace, \/\^net:/u)
   assert.match(boundaryScript, /process\.getuid\(\) > 0/u)
   assert.match(boundaryScript, /process\.getgid\(\) > 0/u)
   assert.match(boundaryScript, /assertReadOnlyWorkspace/u)

@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { open, readFile, readdir, realpath, unlink } from 'node:fs/promises'
+import { open, readFile, readdir, readlink, unlink } from 'node:fs/promises'
 import { createServer } from 'node:net'
 import { networkInterfaces } from 'node:os'
 import { isAbsolute, join, relative, resolve, sep } from 'node:path'
@@ -66,7 +66,8 @@ async function assertNoEffectiveCapabilities() {
   assert.ok(capabilities, 'Linux process status must expose CapEff')
   assert.equal(/^0+$/u.test(capabilities), true, 'network-denied gate must run with zero effective capabilities')
   assert.equal(noNewPrivileges, '1', 'network-denied gate must enforce no-new-privileges')
-  await realpath('/proc/self/ns/net')
+  const networkNamespace = await readlink('/proc/self/ns/net')
+  assert.match(networkNamespace, /^net:\[\d+\]$/u, 'Linux process status must expose a network namespace')
 }
 
 async function assertReadOnlyWorkspace() {
