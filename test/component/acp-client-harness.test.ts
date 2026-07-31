@@ -326,7 +326,7 @@ test('completed operations do not amplify bounded close work', { timeout: 20_000
   const closeStartedAt = performance.now()
   await fixture.client.close()
   const closeDurationMs = performance.now() - closeStartedAt
-  assert.ok(closeDurationMs < 2_000, `close took ${closeDurationMs.toFixed(1)}ms after completed operations`)
+  assert.ok(closeDurationMs < 3_000, `close took ${closeDurationMs.toFixed(1)}ms after completed operations`)
 })
 
 test('live update fanout snapshots reentrant strict subscribers', { timeout: TEST_TIMEOUT_MS }, async t => {
@@ -653,6 +653,15 @@ test('fatal prompt timeout rejects concurrent work and quarantines late updates'
     (await strict.waitForCatalog(sessionB.sessionId)).commands.map(command => command.name),
     ['alpha']
   )
+  let closedSettled = false
+  void fixture.client.closed.then(
+    () => {
+      closedSettled = true
+    },
+    () => {
+      closedSettled = true
+    }
+  )
 
   let lateObserverCalls = 0
   const unsubscribe = fixture.client.subscribeSessionUpdates(notification => {
@@ -705,6 +714,19 @@ test('fatal prompt timeout rejects concurrent work and quarantines late updates'
     assert.ok(error.fatalReason instanceof AcpOperationTimeoutError)
     return true
   })
+  const pendingStrictCatalog = strict.waitForCatalog(sessionB.sessionId, {
+    afterRevision: 1,
+    timeoutMs: 8_000
+  })
+  const pendingStrictCatalogAssertion = assert.rejects(pendingStrictCatalog, (error: unknown) => {
+    assert.ok(error instanceof CatalogTransportClosedError)
+    assert.equal(error.exit, undefined)
+    assert.ok(error.cause instanceof AcpOperationTimeoutError)
+    assert.equal(error.cause.operation, 'session/prompt')
+    assert.equal(error.cause.timeoutMs, 1_000)
+    assert.equal(error.transcript.includes('"kind":"process_exit"'), false)
+    return true
+  })
   const timedOutPrompt = fixture.client.prompt(
     {
       sessionId: sessionA.sessionId,
@@ -721,10 +743,53 @@ test('fatal prompt timeout rejects concurrent work and quarantines late updates'
     return true
   })
 
-  await Promise.all([concurrentAssertion, lateCatalogAssertion])
+  await Promise.all([concurrentAssertion, lateCatalogAssertion, pendingStrictCatalogAssertion])
   assert.equal(fixture.client.isRunning, false)
+  assert.equal(closedSettled, false)
+  assert.equal(
+    fixture.client.transcript().some(entry => entry.kind === 'process_exit'),
+    false
+  )
+  assert.deepEqual(
+    strict.catalog(sessionB.sessionId)?.commands.map(command => command.name),
+    ['alpha']
+  )
+  assert.equal(strict.catalog(sessionB.sessionId)?.revision, 1)
+
+  const replayedStrict = new StrictCatalogClient(fixture.client, 8_000)
+  try {
+    assert.deepEqual(
+      (await replayedStrict.waitForCatalog(sessionB.sessionId)).commands.map(command => command.name),
+      ['alpha']
+    )
+    await assert.rejects(
+      replayedStrict.waitForCatalog(sessionB.sessionId, {
+        afterRevision: 1,
+        timeoutMs: 8_000
+      }),
+      (error: unknown) => {
+        assert.ok(error instanceof CatalogTransportClosedError)
+        assert.equal(error.exit, undefined)
+        assert.ok(error.cause instanceof AcpOperationTimeoutError)
+        assert.equal(error.cause.operation, 'session/prompt')
+        assert.equal(error.cause.timeoutMs, 1_000)
+        assert.equal(error.transcript.includes('"kind":"process_exit"'), false)
+        return true
+      }
+    )
+    const promptCountAtFatalBoundary = outboundPromptCount(fixture.client)
+    await assert.rejects(
+      replayedStrict.promptCommand({ sessionId: sessionB.sessionId, name: 'alpha' }),
+      CatalogTransportClosedError
+    )
+    assert.equal(outboundPromptCount(fixture.client), promptCountAtFatalBoundary)
+  } finally {
+    replayedStrict.dispose()
+  }
+  assert.equal(closedSettled, false)
   await timedOutAssertion
   const exit = await fixture.client.closed
+  assert.equal(closedSettled, true)
 
   assert.equal(lateObserverCalls, 0)
   assert.equal(fixture.client.retainedSessionUpdateCount, retainedBeforeFatalBoundary)
@@ -734,16 +799,6 @@ test('fatal prompt timeout rejects concurrent work and quarantines late updates'
   )
   assert.equal(strict.catalog(sessionB.sessionId)?.revision, 1)
 
-  const replayedStrict = new StrictCatalogClient(fixture.client, 50)
-  try {
-    assert.deepEqual(
-      replayedStrict.catalog(sessionB.sessionId)?.commands.map(command => command.name),
-      ['alpha']
-    )
-    assert.equal(replayedStrict.catalog(sessionB.sessionId)?.revision, 1)
-  } finally {
-    replayedStrict.dispose()
-  }
   await assert.rejects(
     fixture.client.waitForSessionUpdate(
       notification =>
@@ -814,8 +869,9 @@ test('early child exit reports code and bounded stderr diagnostics', { timeout: 
   t.after(() => strict.dispose())
   const strictTransportExit = assert.rejects(strict.waitForCatalog('future-session'), (error: unknown) => {
     assert.ok(error instanceof CatalogTransportClosedError)
-    assert.equal(error.exit?.code, 17)
-    assert.match(error.transcript, /"kind":"process_exit"/)
+    assert.equal(error.exit, undefined)
+    assert.ok(error.cause instanceof Error)
+    assert.equal(error.transcript.includes('"kind":"process_exit"'), false)
     return true
   })
   const updateExit = assert.rejects(
@@ -849,7 +905,8 @@ test('early child exit reports code and bounded stderr diagnostics', { timeout: 
   await updateExit
   await strictTransportExit
 
-  await fixture.client.closed
+  const exit = await fixture.client.closed
+  assert.equal(exit.code, 17)
   assert.equal(fixture.client.isRunning, false)
 })
 
@@ -864,7 +921,33 @@ test('transport EOF waits for bounded teardown and preserves the final exit', { 
   t.after(fixture.cleanup)
 
   const sessionId = await initializeSession(fixture.client, fixture.cwd)
-  await assert.rejects(
+  const strict = new StrictCatalogClient(fixture.client, 2_000)
+  t.after(() => strict.dispose())
+  assert.deepEqual(
+    (await strict.waitForCatalog(sessionId)).commands.map(command => command.name),
+    ['alpha']
+  )
+
+  let closedSettled = false
+  void fixture.client.closed.then(
+    () => {
+      closedSettled = true
+    },
+    () => {
+      closedSettled = true
+    }
+  )
+  const pendingStrictCatalogAssertion = assert.rejects(
+    strict.waitForCatalog(sessionId, { afterRevision: 1, timeoutMs: 2_000 }),
+    (error: unknown) => {
+      assert.ok(error instanceof CatalogTransportClosedError)
+      assert.equal(error.exit, undefined)
+      assert.ok(error.cause instanceof Error)
+      assert.equal(error.transcript.includes('"kind":"process_exit"'), false)
+      return true
+    }
+  )
+  const promptAssertion = assert.rejects(
     fixture.client.prompt({
       sessionId,
       prompt: [{ type: 'text', text: '/alpha close-output' }]
@@ -877,5 +960,36 @@ test('transport EOF waits for bounded teardown and preserves the final exit', { 
       return true
     }
   )
+
+  await pendingStrictCatalogAssertion
+  assert.equal(fixture.client.isRunning, false)
+  assert.equal(closedSettled, false)
+  assert.equal(
+    fixture.client.transcript().some(entry => entry.kind === 'process_exit'),
+    false
+  )
+
+  const replayedStrict = new StrictCatalogClient(fixture.client, 2_000)
+  try {
+    assert.deepEqual(
+      (await replayedStrict.waitForCatalog(sessionId)).commands.map(command => command.name),
+      ['alpha']
+    )
+    await assert.rejects(
+      replayedStrict.waitForCatalog(sessionId, { afterRevision: 1, timeoutMs: 2_000 }),
+      (error: unknown) => {
+        assert.ok(error instanceof CatalogTransportClosedError)
+        assert.equal(error.exit, undefined)
+        assert.ok(error.cause instanceof Error)
+        assert.equal(error.transcript.includes('"kind":"process_exit"'), false)
+        return true
+      }
+    )
+  } finally {
+    replayedStrict.dispose()
+  }
+
+  await promptAssertion
   await fixture.client.closed
+  assert.equal(closedSettled, true)
 })

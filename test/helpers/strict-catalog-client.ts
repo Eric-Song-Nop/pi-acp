@@ -1,5 +1,5 @@
 import type { AvailableCommand, PromptResponse, SessionNotification } from '@agentclientprotocol/sdk'
-import { AcpProcessClient, type AcpProcessExit } from './acp-process-client.js'
+import { AcpProcessClient, type AcpProcessExit, type AcpTerminalLifecycle } from './acp-process-client.js'
 
 const DEFAULT_CATALOG_TIMEOUT_MS = 1_000
 
@@ -73,6 +73,13 @@ export class CatalogTransportClosedError extends Error {
   }
 }
 
+export class StrictCatalogClientDisposedError extends Error {
+  constructor() {
+    super('StrictCatalogClient is disposed')
+    this.name = 'StrictCatalogClientDisposedError'
+  }
+}
+
 function cloneSnapshot(catalog: InternalCatalog): CatalogSnapshot {
   return {
     sessionId: catalog.sessionId,
@@ -92,7 +99,9 @@ function normalizeCommandName(name: string): string {
 export class StrictCatalogClient {
   private readonly catalogs = new Map<string, InternalCatalog>()
   private readonly waiters = new Map<string, Set<CatalogWaiter>>()
-  private readonly unsubscribe: () => void
+  private readonly unsubscribeUpdates: () => void
+  private readonly unsubscribeTerminal: () => void
+  private terminal: AcpTerminalLifecycle | undefined
   private disposed = false
 
   constructor(
@@ -103,15 +112,10 @@ export class StrictCatalogClient {
       throw new TypeError('catalogTimeoutMs must be a positive integer')
     }
 
-    this.unsubscribe = raw.subscribeSessionUpdates(notification => this.handleSessionUpdate(notification), true)
-    void raw.closed.then(
-      exit => {
-        this.rejectAllWaiters({ exit })
-      },
-      cause => {
-        this.rejectAllWaiters({ cause })
-      }
-    )
+    this.unsubscribeUpdates = raw.subscribeSessionUpdates(notification => this.handleSessionUpdate(notification), true)
+    this.unsubscribeTerminal = raw.subscribeTerminalLifecycle(terminal => {
+      this.handleTerminalLifecycle(terminal)
+    })
   }
 
   catalog(sessionId: string): CatalogSnapshot | undefined {
@@ -120,27 +124,26 @@ export class StrictCatalogClient {
   }
 
   async waitForCatalog(sessionId: string, options: WaitForCatalogOptions = {}): Promise<CatalogSnapshot> {
-    if (this.disposed) throw new Error('StrictCatalogClient is disposed')
+    if (this.disposed) throw new StrictCatalogClientDisposedError()
 
     const afterRevision = options.afterRevision ?? 0
     if (!Number.isInteger(afterRevision) || afterRevision < 0) {
       throw new TypeError('afterRevision must be a non-negative integer')
     }
+    const timeoutMs = options.timeoutMs ?? this.catalogTimeoutMs
+    if (!Number.isInteger(timeoutMs) || timeoutMs <= 0) throw new TypeError('timeoutMs must be a positive integer')
 
     const existing = this.catalogs.get(sessionId)
     if (existing && existing.revision > afterRevision) return cloneSnapshot(existing)
+    if (this.terminal) throw this.transportClosedError(sessionId)
     if (!this.raw.isRunning) {
-      let exit: AcpProcessExit
-      try {
-        exit = await this.raw.closed
-      } catch (cause) {
-        throw new CatalogTransportClosedError(sessionId, this.raw.transcriptNdjson(), undefined, cause)
-      }
-      throw new CatalogTransportClosedError(sessionId, this.raw.transcriptNdjson(), exit)
+      throw new CatalogTransportClosedError(
+        sessionId,
+        this.raw.transcriptNdjson(),
+        undefined,
+        this.raw.terminalLifecycleSignal.reason
+      )
     }
-
-    const timeoutMs = options.timeoutMs ?? this.catalogTimeoutMs
-    if (!Number.isInteger(timeoutMs) || timeoutMs <= 0) throw new TypeError('timeoutMs must be a positive integer')
 
     return await new Promise<CatalogSnapshot>((resolve, reject) => {
       const waiter: CatalogWaiter = {
@@ -161,6 +164,8 @@ export class StrictCatalogClient {
   async promptCommand(request: PromptCommandRequest): Promise<PromptResponse> {
     const name = normalizeCommandName(request.name)
     await this.waitForCatalog(request.sessionId, { timeoutMs: request.catalogTimeoutMs })
+    if (this.disposed) throw new StrictCatalogClientDisposedError()
+    if (this.terminal) throw this.transportClosedError(request.sessionId)
     const catalog = this.catalogs.get(request.sessionId)
     if (!catalog?.byName.has(name)) {
       throw new CommandNotAdvertisedError(request.sessionId, name, catalog?.commands.map(command => command.name) ?? [])
@@ -181,17 +186,13 @@ export class StrictCatalogClient {
   dispose(): void {
     if (this.disposed) return
     this.disposed = true
-    this.unsubscribe()
-    const exit: AcpProcessExit = {
-      code: null,
-      signal: null,
-      stderrTail: '',
-      spawnError: 'strict catalog client disposed'
-    }
-    this.rejectAllWaiters({ exit })
+    this.unsubscribeUpdates()
+    this.unsubscribeTerminal()
+    this.rejectAllWaiters(() => new StrictCatalogClientDisposedError())
   }
 
   private handleSessionUpdate(notification: SessionNotification): void {
+    if (this.disposed || this.terminal) return
     if (notification.update.sessionUpdate !== 'available_commands_update') return
 
     const previous = this.catalogs.get(notification.sessionId)
@@ -214,6 +215,16 @@ export class StrictCatalogClient {
     }
   }
 
+  private handleTerminalLifecycle(terminal: AcpTerminalLifecycle): void {
+    if (this.terminal) return
+    this.terminal = terminal
+    this.unsubscribeUpdates()
+    const transcript = this.raw.transcriptNdjson()
+    this.rejectAllWaiters(
+      sessionId => new CatalogTransportClosedError(sessionId, transcript, terminal.exit, terminal.cause)
+    )
+  }
+
   private removeWaiter(sessionId: string, waiter: CatalogWaiter): void {
     const sessionWaiters = this.waiters.get(sessionId)
     if (!sessionWaiters) return
@@ -221,13 +232,21 @@ export class StrictCatalogClient {
     if (sessionWaiters.size === 0) this.waiters.delete(sessionId)
   }
 
-  private rejectAllWaiters(reason: { exit?: AcpProcessExit; cause?: unknown }): void {
+  private transportClosedError(sessionId: string): CatalogTransportClosedError {
+    return new CatalogTransportClosedError(
+      sessionId,
+      this.raw.transcriptNdjson(),
+      this.terminal?.exit,
+      this.terminal?.cause
+    )
+  }
+
+  private rejectAllWaiters(createError: (sessionId: string) => Error): void {
     for (const [sessionId, sessionWaiters] of this.waiters) {
+      const error = createError(sessionId)
       for (const waiter of sessionWaiters) {
         clearTimeout(waiter.timer)
-        waiter.reject(
-          new CatalogTransportClosedError(sessionId, this.raw.transcriptNdjson(), reason.exit, reason.cause)
-        )
+        waiter.reject(error)
       }
     }
     this.waiters.clear()

@@ -64,6 +64,11 @@ export type AcpProcessExit = {
   spawnError?: string
 }
 
+export type AcpTerminalLifecycle = {
+  cause?: unknown
+  exit?: AcpProcessExit
+}
+
 export type AcpProcessClientOptions = {
   command: string
   args?: readonly string[]
@@ -88,6 +93,7 @@ export type AcpOperationOptions = {
 
 type SessionUpdateListener = (notification: SessionNotification) => void | PromiseLike<void>
 type ProcessExitListener = (exit: AcpProcessExit) => void
+type TerminalLifecycleListener = (terminal: AcpTerminalLifecycle) => void
 
 export class AcpOperationTimeoutError extends Error {
   teardownError?: unknown
@@ -414,7 +420,9 @@ export class AcpProcessClient {
   private readonly sessionUpdates: SessionNotification[] = []
   private readonly updateListeners = new Set<SessionUpdateListener>()
   private readonly exitListeners = new Set<ProcessExitListener>()
+  private readonly terminalLifecycleListeners = new Set<TerminalLifecycleListener>()
   private readonly fatalLifecycleController = new AbortController()
+  private readonly terminalLifecycleController = new AbortController()
   private readonly closedPromise: Promise<AcpProcessExit>
   private resolveClosed!: (exit: AcpProcessExit) => void
   private rejectClosed!: (error: Error) => void
@@ -424,6 +432,7 @@ export class AcpProcessClient {
   private closePromise: Promise<AcpProcessExit> | undefined
   private lastProcessError: string | undefined
   private malformedMessageError: AcpMalformedMessageError | undefined
+  private terminalLifecycle: AcpTerminalLifecycle | undefined
   private spawned = false
   private closedSettled = false
   private unusable = false
@@ -509,7 +518,12 @@ export class AcpProcessClient {
     const client: Client = {
       requestPermission: async () => ({ outcome: { outcome: 'cancelled' } }),
       sessionUpdate: async notification => {
-        if (this.fatalLifecycleController.signal.aborted || this.closePromise || this.exitInfo) {
+        if (
+          this.terminalLifecycleController.signal.aborted ||
+          this.fatalLifecycleController.signal.aborted ||
+          this.closePromise ||
+          this.exitInfo
+        ) {
           return
         }
         const retained = clone(notification)
@@ -528,6 +542,10 @@ export class AcpProcessClient {
         if (reason instanceof AcpMalformedMessageError) {
           this.malformedMessageError = reason
           this.beginFatalLifecycle(reason)
+        } else {
+          this.beginTerminalLifecycle({
+            cause: reason instanceof Error ? reason : new Error('ACP transport entered a terminal lifecycle state')
+          })
         }
         if (!this.closePromise && !this.exitInfo) void this.ensureClose().catch(() => undefined)
       },
@@ -543,9 +561,20 @@ export class AcpProcessClient {
     return this.child.pid
   }
 
+  get fatalLifecycleSignal(): AbortSignal {
+    return this.fatalLifecycleController.signal
+  }
+
+  get terminalLifecycleSignal(): AbortSignal {
+    return this.terminalLifecycleController.signal
+  }
+
   get isRunning(): boolean {
     return (
+      !this.terminalLifecycleController.signal.aborted &&
       !this.fatalLifecycleController.signal.aborted &&
+      !this.closePromise &&
+      !this.connection.signal.aborted &&
       this.exitInfo === undefined &&
       this.child.exitCode === null &&
       this.child.signalCode === null
@@ -575,6 +604,19 @@ export class AcpProcessClient {
     }
   }
 
+  subscribeTerminalLifecycle(listener: TerminalLifecycleListener, replay = true): () => void {
+    const terminal = this.terminalLifecycle
+    if (terminal) {
+      if (replay) this.deliverTerminalLifecycle(listener, terminal)
+      return () => undefined
+    }
+
+    this.terminalLifecycleListeners.add(listener)
+    return () => {
+      this.terminalLifecycleListeners.delete(listener)
+    }
+  }
+
   private deliverSessionUpdate(listener: SessionUpdateListener, notification: SessionNotification): void {
     try {
       const delivery = listener(clone(notification))
@@ -582,6 +624,17 @@ export class AcpProcessClient {
     } catch {
       // A diagnostic observer must not prevent later stateful subscribers
       // from receiving the authoritative catalog/update.
+    }
+  }
+
+  private deliverTerminalLifecycle(listener: TerminalLifecycleListener, terminal: AcpTerminalLifecycle): void {
+    try {
+      listener({
+        cause: terminal.cause,
+        exit: terminal.exit ? clone(terminal.exit) : undefined
+      })
+    } catch {
+      // Lifecycle delivery must reach every active stateful subscriber.
     }
   }
 
@@ -810,6 +863,27 @@ export class AcpProcessClient {
     if (!this.fatalLifecycleController.signal.aborted) {
       this.fatalLifecycleController.abort(reason)
     }
+    this.beginTerminalLifecycle({ cause: reason })
+  }
+
+  private beginTerminalLifecycle(terminal: AcpTerminalLifecycle): void {
+    this.unusable = true
+    if (this.terminalLifecycle) return
+
+    this.terminalLifecycle = {
+      cause: terminal.cause,
+      exit: terminal.exit ? clone(terminal.exit) : undefined
+    }
+    const abortReason =
+      terminal.cause ??
+      (terminal.exit
+        ? new Error(`ACP process exited (code ${String(terminal.exit.code)}, signal ${String(terminal.exit.signal)})`)
+        : new Error('ACP transport entered a terminal lifecycle state'))
+    this.terminalLifecycleController.abort(abortReason)
+
+    const listeners = [...this.terminalLifecycleListeners]
+    this.terminalLifecycleListeners.clear()
+    for (const listener of listeners) this.deliverTerminalLifecycle(listener, this.terminalLifecycle)
   }
 
   private fatalLifecycleReason(operation: string): Error {
@@ -880,6 +954,7 @@ export class AcpProcessClient {
         // Exit delivery must reach every active waiter/operation.
       }
     }
+    this.beginTerminalLifecycle({ exit })
     if (!this.closePromise) void this.ensureClose().catch(() => undefined)
   }
 
