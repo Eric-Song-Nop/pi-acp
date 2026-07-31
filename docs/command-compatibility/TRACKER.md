@@ -157,7 +157,7 @@ commands 宣称为稳定支持。
 | `C0.2` | 固定 compatibility tuple 与受测版本窗口                           | `in_review` | —                         | `G0`      |
 | `C0.3` | CI 跑 typecheck/lint/unit/build 和 E2E 基础矩阵                   | `proposed`  | `C0.2`                    | `G0`      |
 | `C0.4` | 定义 command compatibility schema                                 | `verified`  | `DEC-003`                 | `G0`      |
-| `C0.5` | raw ACP + strict-client harness                                   | `active`    | `DEC-005`                 | `G0`      |
+| `C0.5` | raw ACP + strict-client harness                                   | `in_review` | `DEC-005`                 | `G0`      |
 | `C0.6` | 建立真实 Pi fixture extension pack                                | `proposed`  | `C0.5`                    | `G0`      |
 | `C0.7` | 记录当前失败基线和 immutable transcripts                          | `proposed`  | `C0.3`, `C0.6`            | `G0`      |
 | `C1.1` | extension stderr/load diagnostics 可见且安全限长                  | `proposed`  | `C0.7`                    | `G1`      |
@@ -264,8 +264,12 @@ Prettier 与 production audit `0` 全部通过，六条 review threads 全部 re
 [`test/fixtures/acp/catalog-agent.mjs`](../../test/fixtures/acp/catalog-agent.mjs)
 和
 [`test/component/acp-client-harness.test.ts`](../../test/component/acp-client-harness.test.ts)。
-Focused harness `6/6`、全量测试 `113/113`、typecheck、lint、build 和 Prettier
-通过。
+[PR #4](https://github.com/Eric-Song-Nop/pi-acp/pull/4) stacked 在
+`agent/c0.4-command-schema@ee05cbb`，实现 commit 固定为
+[`75fea0a`](https://github.com/Eric-Song-Nop/pi-acp/commit/75fea0a598e95ad9695a552a23457f87d5455c31)。
+Author validation runtime 为 Node `26.5.0` / `darwin` / `arm64`：focused harness
+`6/6`、全量测试 `113/113`、typecheck、lint、build、Prettier 与 production
+audit `0` 全部通过。
 
 边界：本 checkpoint 使用 pinned SDK fixture，不等同真实 Pi/provider/client
 认证；真实 Pi 隔离属于 `C0.6`，immutable persisted transcripts 属于 `C0.7`。
