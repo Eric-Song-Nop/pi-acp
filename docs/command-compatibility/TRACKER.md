@@ -62,12 +62,12 @@
 
 | 组件               | 已知基线                          | 状态/证据                                              |
 | ------------------ | --------------------------------- | ------------------------------------------------------ |
-| fork               | `Eric-Song-Nop/pi-acp@d1cffc0`    | 与 `svkozak/pi-acp` 主分支差异 `0 0`                   |
+| upstream/fork base | `Eric-Song-Nop/pi-acp@d1cffc0`    | 与 `svkozak/pi-acp` 主分支差异 `0 0`                   |
 | pi-acp package     | `0.0.33`                          | 当前源码基线                                           |
 | ACP SDK            | `@agentclientprotocol/sdk@0.26.0` | 已含 experimental elicitation；升级到 1.x 必须单独进行 |
 | Pi                 | `0.80.5`–`0.83.0`                 | `C0.2` 固定目标窗口；完整兼容性由 `G5` 证明            |
 | Node               | `>=22.19.0`                       | 与受测 Pi 的最低 engine 一致；E2E 单独建矩阵           |
-| existing tests     | 107/107 通过                      | 含 C0.2/C0.4 contract tests；尚不能证明真实插件兼容    |
+| existing tests     | 117/117 通过                      | 当前 C0.5 stacked head；尚不能证明真实插件兼容         |
 | Pi built-ins       | 22 个                             | pi-acp 只公布 8 个 adapter commands，精确重合 5 个     |
 | extension commands | Pi RPC 可发现                     | pi-acp 在 new/load 两处显式过滤                        |
 | GitHub Issues      | enabled                           | `DEC-001` accepted；总控 issue `#1`                    |
@@ -156,8 +156,8 @@ commands 宣称为稳定支持。
 | `C0.1` | tracker 合入仓库并决定 Issues 策略                                | `in_review` | `DEC-001`                 | `G0`      |
 | `C0.2` | 固定 compatibility tuple 与受测版本窗口                           | `in_review` | —                         | `G0`      |
 | `C0.3` | CI 跑 typecheck/lint/unit/build 和 E2E 基础矩阵                   | `proposed`  | `C0.2`                    | `G0`      |
-| `C0.4` | 定义 command compatibility schema                                 | `in_review` | `DEC-003`                 | `G0`      |
-| `C0.5` | raw ACP + strict-client harness                                   | `proposed`  | `DEC-005`                 | `G0`      |
+| `C0.4` | 定义 command compatibility schema                                 | `verified`  | `DEC-003`                 | `G0`      |
+| `C0.5` | raw ACP + strict-client harness                                   | `in_review` | `DEC-005`                 | `G0`      |
 | `C0.6` | 建立真实 Pi fixture extension pack                                | `proposed`  | `C0.5`                    | `G0`      |
 | `C0.7` | 记录当前失败基线和 immutable transcripts                          | `proposed`  | `C0.3`, `C0.6`            | `G0`      |
 | `C1.1` | extension stderr/load diagnostics 可见且安全限长                  | `proposed`  | `C0.7`                    | `G1`      |
@@ -243,6 +243,53 @@ commands 宣称为稳定支持。
 [`command-compatibility.schema.json`](command-compatibility.schema.json)、
 `src/acp/command-compatibility.ts`
 和 `test/unit/command-compatibility.test.ts`。
+独立复验固定在
+[PR #3 head `ee05cbb`](https://github.com/Eric-Song-Nop/pi-acp/commit/ee05cbb120264758af3df0b6c738cf7f2051568e)：
+focused `8/8`（含 Node `22.19.0`）、全量 `107/107`、typecheck、lint、build、
+Prettier 与 production audit `0` 全部通过，六条 review threads 全部 resolved。
+
+#### `C0.5` Raw ACP and strict-client harness
+
+- [x] 使用固定 ACP SDK 的 `ClientSideConnection` + NDJSON stream 启动真实子进程；command/cwd 必须为绝对路径，禁用 shell，并要求调用方显式提供 env；本 fixture 提供最小隔离 env。
+- [x] transcript 保留有序 request/response/notification 与最终 process exit；harness 不自动记录 timestamp、PID、env 或 stderr，caller metadata 与 outbound envelope 在写入前必须 canonical JSON-safe，且 metadata 必须预先脱敏。
+- [x] operation、session update、catalog wait 和 test case 都有硬 timeout；operation timeout 会同步进入 client-owned fatal lifecycle，拒绝所有并发 operation/live wait、隔离 teardown 后到达的 update，并在有界 teardown 后向 timeout owner 返回最终 transcript；任一 operation race outcome settle 时都会先幂等解除 losing timeout/exit/fatal resources，随后才进入可能较长的 teardown。
+- [x] cleanup 按 stdin EOF → SIGTERM → SIGKILL 执行且幂等；POSIX 会清理 detached process group，并以 same-process-group TERM-resistant descendant 回归证明。
+- [x] session updates 保留 immutable pre-fatal replay；observer/predicate 的同步或异步失败不会破坏后续订阅者或缓存，child exit/fatal lifecycle 会立即结束 live update wait；fatal 后的 wire update 只保留 transcript 证据，不进入 retained/live/strict state。
+- [x] raw harness 提供 replay-safe、可取消订阅的 terminal lifecycle boundary；它与最终 `closed`/process-exit evidence 分离。pending 和 boundary 后新建的 raw update wait，以及 strict unsatisfied catalog wait，都会在 fatal 或普通 transport EOF 时立即、因果性地失败，不会等待 teardown 或误报 timeout；strict wrapper 不公开 raw transport，已缓存的 pre-terminal catalog 仍可作为 immutable diagnostic replay。
+- [x] 每个 session 的 strict 目录是全量 replacement（含 empty），未广告 slash command 在任何 prompt write 前本地拒绝；terminal 后即使目录已缓存也不会写入新的 prompt，disposed wrapper 不会被 raw lifecycle promise 永久保留。
+- [x] 覆盖 fragmented multibyte NDJSON、malformed inbound/outbound envelope、early/reentrant replay、多 session isolation、replacement/empty、raw/strict timeout、并发 fatal timeout、pending/post-boundary raw/strict wait、late-message quarantine、pre-exit transport EOF、early exit、UTF-8 stderr byte cap、high-operation close 和 same-process-group descendant cleanup；generic EOF race 会跨过已结束 operation 的短 request deadline，同时证明 `closed` 仍 pending、fatal 未 armed，且 raw/strict cause 仍与原始 terminal reason 同一对象。
+
+证据：
+[`test/helpers/acp-process-client.ts`](../../test/helpers/acp-process-client.ts)、
+[`test/helpers/strict-catalog-client.ts`](../../test/helpers/strict-catalog-client.ts)、
+[`test/fixtures/acp/catalog-agent.mjs`](../../test/fixtures/acp/catalog-agent.mjs)
+和
+[`test/component/acp-client-harness.test.ts`](../../test/component/acp-client-harness.test.ts)。
+[PR #4](https://github.com/Eric-Song-Nop/pi-acp/pull/4) stacked 在
+`agent/c0.4-command-schema@ee05cbb`，实现 commit 固定为
+[`75fea0a`](https://github.com/Eric-Song-Nop/pi-acp/commit/75fea0a598e95ad9695a552a23457f87d5455c31)，
+adversarial review fixes 固定为
+[`70274a0`](https://github.com/Eric-Song-Nop/pi-acp/commit/70274a050cb9de937c8c10cb8bfeabb1fb85b2ac)
+、
+[`74c41a1`](https://github.com/Eric-Song-Nop/pi-acp/commit/74c41a1ba38dacd1f83f654b4e4064601fe0308a)
+、
+[`99390c4`](https://github.com/Eric-Song-Nop/pi-acp/commit/99390c46d3557c4a56bf89a0842fa4cfbadec3cc)
+和
+[`f9e231c`](https://github.com/Eric-Song-Nop/pi-acp/commit/f9e231cdd103d2649ad5522d79ee1d61b62edeec)
+、
+[`d6947bb`](https://github.com/Eric-Song-Nop/pi-acp/commit/d6947bb680ec67656dd200ccdc1142a2b050bf8b)。
+Author validation runtime 为 Node `26.5.0` / `darwin` / `arm64`：focused harness
+`10/10`、全量测试 `117/117`、typecheck、lint、build、Prettier 与 production
+audit `0` 全部通过；最低 Node `22.19.0` focused harness `10/10`、全量测试
+`117/117`。
+两个 runtime 各自额外并发运行六轮 focused harness，全部 `10/10`。
+
+边界：本 checkpoint 使用 pinned SDK fixture，不等同真实 Pi/provider/client
+认证；真实 Pi 隔离属于 `C0.6`，immutable persisted transcripts 属于 `C0.7`。
+cleanup 的可移植保证仅包括直接 child，以及仍留在其 inherited POSIX process
+group 的 descendants；主动创建新 session/process group 的 descendant 可以逃逸。
+更强的 POSIX/Windows containment 延后到 real E2E/platform work，以 OS supervisor、
+container/cgroup 或 job object 证明，不在本 harness 中使用不安全的 `/proc` tree walk。
 
 #### `C0.3, C0.5–C0.7` Harness 与失败基线
 
@@ -251,7 +298,7 @@ commands 宣称为稳定支持。
 - [ ] 每个 case 使用独立 cwd 和 `PI_CODING_AGENT_DIR`，不读取开发者真实 Pi 配置。
 - [ ] agent-turn fixture 使用 loopback deterministic provider，不消耗真实模型账户。
 - [ ] 阻塞 CI 默认禁止外网；插件、Pi 和客户端版本全部 pin。
-- [ ] strict-client harness 会拒绝未出现在 `available_commands_update` 的 slash command。
+- [x] strict-client harness 会拒绝未出现在 `available_commands_update` 的 slash command。
 - [ ] 所有可能挂起的用例有硬 timeout，并保存 NDJSON transcript。
 - [ ] 当前已知失败被记录为测试，不以“人工知道会坏”代替。
 
@@ -395,7 +442,7 @@ Gate 不能靠“豁免通过”。如果某能力未达到 gate，只能：
 | `G2 Catalog`       | 严格客户端目录正确；collision/动态刷新/来源/兼容级别一致                                                            |
 | `G3 Execution`     | no-LLM、agent-run、throw、cancel、reload、handled input 均 exactly once；PR 100 次、nightly 1000 次无挂起或重复终态 |
 | `G4 Interaction`   | elicitation 与 fallback 可验证；关键生态 built-ins 可用；TUI-only 不误宣传                                          |
-| `G5 Compatibility` | 现有 95 tests + fixture + pinned real plugins；raw、Zed、另一客户端完成矩阵                                         |
+| `G5 Compatibility` | 仓库全量 tests + fixture + pinned real plugins；raw、Zed、另一客户端完成矩阵                                        |
 | `G6 Delivery`      | 文档、compat tuple、changelog、升级/回滚、upstream 状态和 RC 安装验证齐全                                           |
 
 核心量化指标：
