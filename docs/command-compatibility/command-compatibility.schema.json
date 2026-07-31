@@ -18,14 +18,17 @@
   ],
   "properties": {
     "schemaVersion": {
+      "type": "integer",
       "const": 1
     },
     "id": {
       "type": "string",
+      "maxLength": 268,
       "pattern": "^[a-z][a-z0-9-]*(?::[a-z0-9][a-z0-9._-]*){2,}$"
     },
     "name": {
       "type": "string",
+      "maxLength": 128,
       "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
     },
     "source": {
@@ -33,6 +36,7 @@
     },
     "sourceId": {
       "type": "string",
+      "maxLength": 139,
       "pattern": "^[a-z][a-z0-9-]*:[a-z0-9][a-z0-9._-]{0,127}$"
     },
     "compatibility": {
@@ -58,39 +62,51 @@
       }
     },
     "description": {
-      "type": "string",
-      "minLength": 1,
-      "maxLength": 512
+      "$ref": "#/$defs/visibleText512"
     },
     "argumentHint": {
-      "type": "string",
-      "minLength": 1,
-      "maxLength": 256
+      "$ref": "#/$defs/visibleText256"
     },
     "warning": {
-      "type": "string",
-      "minLength": 1,
-      "maxLength": 512
+      "$ref": "#/$defs/visibleText512"
     }
   },
   "$defs": {
     "source": {
+      "type": "string",
       "enum": ["adapter", "pi-builtin", "extension", "prompt", "skill"]
     },
     "compatibility": {
+      "type": "string",
       "enum": ["rpc-native", "basic-dialog", "external-ui", "tui-only", "unknown"]
     },
     "execution": {
+      "type": "string",
       "enum": ["local", "agent", "session", "unknown"]
     },
     "exposure": {
+      "type": "string",
       "enum": ["stable", "experimental", "hidden"]
     },
     "interaction": {
+      "type": "string",
       "enum": ["notify", "select", "confirm", "input", "editor", "external-url", "custom-tui"]
     },
     "evidenceKind": {
+      "type": "string",
       "enum": ["fixture", "unit", "e2e", "manual", "upstream"]
+    },
+    "visibleText512": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 512,
+      "pattern": "^(?=\\S)(?=[\\s\\S]*[\\p{L}\\p{N}\\p{P}\\p{S}])(?![\\s\\S]*[\\p{C}\\p{Default_Ignorable_Code_Point}\\u2028\\u2029\\u2800])[\\s\\S]*\\S$"
+    },
+    "visibleText256": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256,
+      "pattern": "^(?=\\S)(?=[\\s\\S]*[\\p{L}\\p{N}\\p{P}\\p{S}])(?![\\s\\S]*[\\p{C}\\p{Default_Ignorable_Code_Point}\\u2028\\u2029\\u2800])[\\s\\S]*\\S$"
     },
     "evidence": {
       "type": "object",
@@ -101,14 +117,10 @@
           "$ref": "#/$defs/evidenceKind"
         },
         "ref": {
-          "type": "string",
-          "minLength": 1,
-          "maxLength": 512
+          "$ref": "#/$defs/visibleText512"
         },
         "verifiedAgainst": {
-          "type": "string",
-          "minLength": 1,
-          "maxLength": 512
+          "$ref": "#/$defs/visibleText512"
         }
       }
     }
@@ -161,6 +173,11 @@
         "required": ["compatibility", "exposure"]
       },
       "then": {
+        "properties": {
+          "warning": {
+            "$ref": "#/$defs/visibleText512"
+          }
+        },
         "required": ["warning"]
       }
     },
@@ -178,7 +195,11 @@
           "compatibility": {
             "enum": ["rpc-native", "basic-dialog", "external-ui"]
           },
+          "execution": {
+            "enum": ["local", "agent", "session"]
+          },
           "evidence": {
+            "type": "array",
             "minItems": 1
           }
         }
@@ -196,6 +217,7 @@
       "then": {
         "properties": {
           "interactions": {
+            "type": "array",
             "items": {
               "const": "notify"
             }
@@ -215,6 +237,7 @@
       "then": {
         "properties": {
           "interactions": {
+            "type": "array",
             "contains": {
               "enum": ["select", "confirm", "input", "editor"]
             },
@@ -235,6 +258,7 @@
       "then": {
         "properties": {
           "interactions": {
+            "type": "array",
             "contains": {
               "const": "external-url"
             },
@@ -247,6 +271,7 @@
       "if": {
         "properties": {
           "interactions": {
+            "type": "array",
             "contains": {
               "const": "custom-tui"
             }
@@ -258,6 +283,26 @@
         "properties": {
           "compatibility": {
             "const": "tui-only"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "interactions": {
+            "type": "array",
+            "contains": {
+              "const": "external-url"
+            }
+          }
+        },
+        "required": ["interactions"]
+      },
+      "then": {
+        "properties": {
+          "compatibility": {
+            "const": "external-ui"
           }
         }
       }

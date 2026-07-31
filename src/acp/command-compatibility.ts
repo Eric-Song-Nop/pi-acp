@@ -31,20 +31,28 @@ export type CommandExposure = z.infer<typeof commandExposureSchema>
 export type CommandInteraction = z.infer<typeof commandInteractionSchema>
 export type CommandEvidenceKind = z.infer<typeof commandEvidenceKindSchema>
 
+export const COMMAND_NAME_MAX_LENGTH = 128
+export const COMMAND_SOURCE_ID_MAX_LENGTH =
+  Math.max(...COMMAND_SOURCES.map(source => source.length)) + 1 + COMMAND_NAME_MAX_LENGTH
+export const COMMAND_ID_MAX_LENGTH = COMMAND_SOURCE_ID_MAX_LENGTH + 1 + COMMAND_NAME_MAX_LENGTH
+
 const COMMAND_NAME_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/
 const OPAQUE_SOURCE_ID_PATTERN = /^[a-z][a-z0-9-]*:[a-z0-9][a-z0-9._-]{0,127}$/
 const STABLE_COMMAND_ID_PATTERN = /^[a-z][a-z0-9-]*(?::[a-z0-9][a-z0-9._-]*){2,}$/
+const NON_RENDERING_TEXT_PATTERN = /[\p{C}\p{Default_Ignorable_Code_Point}\u2028\u2029\u2800]/u
+const VISIBLE_CODE_POINT_PATTERN = /[\p{L}\p{N}\p{P}\p{S}]/u
 
 function isVisibleText(value: string): boolean {
-  for (const character of value) {
-    const codePoint = character.codePointAt(0)
-    if (codePoint !== undefined && (codePoint <= 0x1f || codePoint === 0x7f)) return false
-  }
-  return true
+  return !NON_RENDERING_TEXT_PATTERN.test(value) && VISIBLE_CODE_POINT_PATTERN.test(value)
 }
 
 function visibleText(maxLength: number) {
-  return z.string().trim().min(1).max(maxLength).refine(isVisibleText, 'must not contain control characters')
+  return z
+    .string()
+    .min(1)
+    .refine(value => Array.from(value).length <= maxLength, `must contain at most ${maxLength} Unicode code points`)
+    .refine(value => value === value.trim(), 'must not contain leading or trailing whitespace')
+    .refine(isVisibleText, 'must contain visible text without control or formatting characters')
 }
 
 const commandEvidenceSchema = z
@@ -58,15 +66,15 @@ const commandEvidenceSchema = z
 const commandCompatibilityObjectSchema = z
   .object({
     schemaVersion: z.literal(COMMAND_COMPATIBILITY_SCHEMA_VERSION),
-    id: z.string().regex(STABLE_COMMAND_ID_PATTERN),
+    id: z.string().max(COMMAND_ID_MAX_LENGTH).regex(STABLE_COMMAND_ID_PATTERN),
     name: z.string().regex(COMMAND_NAME_PATTERN),
     source: commandSourceSchema,
-    sourceId: z.string().regex(OPAQUE_SOURCE_ID_PATTERN),
+    sourceId: z.string().max(COMMAND_SOURCE_ID_MAX_LENGTH).regex(OPAQUE_SOURCE_ID_PATTERN),
     compatibility: commandCompatibilityTierSchema,
     execution: commandExecutionKindSchema,
     exposure: commandExposureSchema,
-    interactions: z.array(commandInteractionSchema).default([]),
-    evidence: z.array(commandEvidenceSchema).default([]),
+    interactions: z.array(commandInteractionSchema),
+    evidence: z.array(commandEvidenceSchema),
     description: visibleText(512).optional(),
     argumentHint: visibleText(256).optional(),
     warning: visibleText(512).optional()
@@ -143,6 +151,14 @@ export const commandCompatibilitySchema = commandCompatibilityObjectSchema.super
         message: 'stable commands require verification evidence'
       })
     }
+
+    if (command.execution === 'unknown') {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['execution'],
+        message: 'stable commands require a known completion lifecycle'
+      })
+    }
   }
 
   if (command.compatibility === 'rpc-native' && command.interactions.some(interaction => interaction !== 'notify')) {
@@ -172,6 +188,14 @@ export const commandCompatibilitySchema = commandCompatibilityObjectSchema.super
     })
   }
 
+  if (interactionSet.has('external-url') && command.compatibility !== 'external-ui') {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['compatibility'],
+      message: 'external-url interactions require the external-ui tier'
+    })
+  }
+
   if (interactionSet.has('custom-tui') && command.compatibility !== 'tui-only') {
     context.addIssue({
       code: z.ZodIssueCode.custom,
@@ -185,16 +209,28 @@ export type CommandCompatibility = z.infer<typeof commandCompatibilitySchema>
 
 export type SafeCommandMetadata = Pick<
   CommandCompatibility,
-  'schemaVersion' | 'id' | 'source' | 'sourceId' | 'compatibility' | 'execution' | 'exposure' | 'interactions'
+  | 'schemaVersion'
+  | 'id'
+  | 'source'
+  | 'sourceId'
+  | 'compatibility'
+  | 'execution'
+  | 'exposure'
+  | 'interactions'
+  | 'warning'
 >
 
-export function defaultCommandExposure(compatibility: CommandCompatibilityTier, hasEvidence: boolean): CommandExposure {
+export function defaultCommandExposure(
+  compatibility: CommandCompatibilityTier,
+  execution: CommandExecutionKind,
+  hasEvidence: boolean
+): CommandExposure {
   if (compatibility === 'tui-only' || compatibility === 'unknown') return 'hidden'
-  return hasEvidence ? 'stable' : 'experimental'
+  return hasEvidence && execution !== 'unknown' ? 'stable' : 'experimental'
 }
 
 export function toSafeCommandMetadata(command: CommandCompatibility): SafeCommandMetadata {
-  return {
+  const metadata: SafeCommandMetadata = {
     schemaVersion: command.schemaVersion,
     id: command.id,
     source: command.source,
@@ -204,4 +240,7 @@ export function toSafeCommandMetadata(command: CommandCompatibility): SafeComman
     exposure: command.exposure,
     interactions: [...command.interactions]
   }
+
+  if (command.warning) metadata.warning = command.warning
+  return metadata
 }
