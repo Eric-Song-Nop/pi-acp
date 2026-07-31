@@ -67,7 +67,7 @@
 | ACP SDK            | `@agentclientprotocol/sdk@0.26.0` | 已含 experimental elicitation；升级到 1.x 必须单独进行 |
 | Pi                 | `0.80.5`–`0.83.0`                 | `C0.2` 固定目标窗口；完整兼容性由 `G5` 证明            |
 | Node               | `>=22.19.0`                       | 与受测 Pi 的最低 engine 一致；E2E 单独建矩阵           |
-| existing tests     | 113/113 通过                      | 当前 C0.5 stacked head；尚不能证明真实插件兼容         |
+| existing tests     | 117/117 通过                      | 当前 C0.5 stacked head；尚不能证明真实插件兼容         |
 | Pi built-ins       | 22 个                             | pi-acp 只公布 8 个 adapter commands，精确重合 5 个     |
 | extension commands | Pi RPC 可发现                     | pi-acp 在 new/load 两处显式过滤                        |
 | GitHub Issues      | enabled                           | `DEC-001` accepted；总控 issue `#1`                    |
@@ -251,12 +251,12 @@ Prettier 与 production audit `0` 全部通过，六条 review threads 全部 re
 #### `C0.5` Raw ACP and strict-client harness
 
 - [x] 使用固定 ACP SDK 的 `ClientSideConnection` + NDJSON stream 启动真实子进程；command/cwd 必须为绝对路径，禁用 shell，并要求调用方显式提供 env；本 fixture 提供最小隔离 env。
-- [x] transcript 保留有序 request/response/notification 与最终 process exit；harness 不自动记录 timestamp、PID、env 或 stderr，caller metadata 仅接受 canonical JSON-safe 值且必须预先脱敏。
-- [x] operation、session update、catalog wait 和 test case 都有硬 timeout；operation timeout 完成有界 teardown 后再返回最终 transcript。
-- [x] cleanup 按 stdin EOF → SIGTERM → SIGKILL 执行且幂等；POSIX 会清理 detached process group，并以 TERM-resistant descendant 回归证明。
-- [x] session updates 保留 immutable replay；predicate 失败不会破坏缓存或退化成假 timeout，child exit 会立即结束 update/catalog wait。
+- [x] transcript 保留有序 request/response/notification 与最终 process exit；harness 不自动记录 timestamp、PID、env 或 stderr，caller metadata 与 outbound envelope 在写入前必须 canonical JSON-safe，且 metadata 必须预先脱敏。
+- [x] operation、session update、catalog wait 和 test case 都有硬 timeout；operation timeout 会同步进入 client-owned fatal lifecycle，拒绝所有并发 operation/live wait、隔离 teardown 后到达的 update，并在有界 teardown 后向 timeout owner 返回最终 transcript。
+- [x] cleanup 按 stdin EOF → SIGTERM → SIGKILL 执行且幂等；POSIX 会清理 detached process group，并以 same-process-group TERM-resistant descendant 回归证明。
+- [x] session updates 保留 immutable pre-fatal replay；observer/predicate 的同步或异步失败不会破坏后续订阅者或缓存，child exit/fatal lifecycle 会立即结束 live update wait；fatal 后的 wire update 只保留 transcript 证据，不进入 retained/live/strict state。
 - [x] strict wrapper 不公开 raw transport；每个 session 的目录是全量 replacement（含 empty），未广告 slash command 在任何 prompt write 前本地拒绝。
-- [x] 覆盖 fragmented multibyte NDJSON、early replay、多 session isolation、replacement/empty、raw/strict timeout、transport EOF、early exit、UTF-8 stderr byte cap 和 process-tree cleanup。
+- [x] 覆盖 fragmented multibyte NDJSON、malformed inbound/outbound envelope、early/reentrant replay、多 session isolation、replacement/empty、raw/strict timeout、并发 fatal timeout、late-message quarantine、transport EOF、early exit、UTF-8 stderr byte cap、high-operation close 和 same-process-group descendant cleanup。
 
 证据：
 [`test/helpers/acp-process-client.ts`](../../test/helpers/acp-process-client.ts)、
@@ -266,15 +266,23 @@ Prettier 与 production audit `0` 全部通过，六条 review threads 全部 re
 [`test/component/acp-client-harness.test.ts`](../../test/component/acp-client-harness.test.ts)。
 [PR #4](https://github.com/Eric-Song-Nop/pi-acp/pull/4) stacked 在
 `agent/c0.4-command-schema@ee05cbb`，实现 commit 固定为
-[`75fea0a`](https://github.com/Eric-Song-Nop/pi-acp/commit/75fea0a598e95ad9695a552a23457f87d5455c31)。
+[`75fea0a`](https://github.com/Eric-Song-Nop/pi-acp/commit/75fea0a598e95ad9695a552a23457f87d5455c31)，
+adversarial review fixes 固定为
+[`70274a0`](https://github.com/Eric-Song-Nop/pi-acp/commit/70274a050cb9de937c8c10cb8bfeabb1fb85b2ac)
+和
+[`74c41a1`](https://github.com/Eric-Song-Nop/pi-acp/commit/74c41a1ba38dacd1f83f654b4e4064601fe0308a)。
 Author validation runtime 为 Node `26.5.0` / `darwin` / `arm64`：focused harness
-`6/6`、全量测试 `113/113`、typecheck、lint、build、Prettier 与 production
-audit `0` 全部通过。
+`10/10`、全量测试 `117/117`、typecheck、lint、build、Prettier 与 production
+audit `0` 全部通过；最低 Node `22.19.0` focused harness `10/10`、全量测试
+`117/117`。
+两个 runtime 各自额外并发运行六轮 focused harness，全部 `10/10`。
 
 边界：本 checkpoint 使用 pinned SDK fixture，不等同真实 Pi/provider/client
 认证；真实 Pi 隔离属于 `C0.6`，immutable persisted transcripts 属于 `C0.7`。
-POSIX descendant cleanup 已覆盖；Windows 当前只保证直接 child cleanup，后续
-Windows E2E 必须继续验证或引入 job-object/tree-kill。
+cleanup 的可移植保证仅包括直接 child，以及仍留在其 inherited POSIX process
+group 的 descendants；主动创建新 session/process group 的 descendant 可以逃逸。
+更强的 POSIX/Windows containment 延后到 real E2E/platform work，以 OS supervisor、
+container/cgroup 或 job object 证明，不在本 harness 中使用不安全的 `/proc` tree walk。
 
 #### `C0.3, C0.5–C0.7` Harness 与失败基线
 
