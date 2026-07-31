@@ -10,6 +10,10 @@ This is an MVP-style adapter intended to be useful today and easy to iterate on.
 
 Expect some minor breaking changes.
 
+The long-term implementation status for headless Pi command and extension
+compatibility is maintained in the
+[command compatibility tracker](docs/command-compatibility/TRACKER.md).
+
 ## Features
 
 - Streams assistant output as ACP `agent_message_chunk`
