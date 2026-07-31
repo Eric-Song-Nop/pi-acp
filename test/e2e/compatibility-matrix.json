@@ -55,7 +55,7 @@
       "critical": 0
     },
     "development": {
-      "moderate": 1,
+      "moderate": 0,
       "high": 6,
       "critical": 0
     },

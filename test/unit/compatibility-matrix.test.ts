@@ -135,7 +135,7 @@ test('compatibility matrix records the dependency audit follow-up', () => {
     critical: 0
   })
   assert.deepEqual(matrix.dependencyAudit.development, {
-    moderate: 1,
+    moderate: 0,
     high: 6,
     critical: 0
   })

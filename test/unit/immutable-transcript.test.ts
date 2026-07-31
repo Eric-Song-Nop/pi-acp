@@ -545,6 +545,18 @@ test('C0.7 canonicalization refuses reserved tokens, secrets, nonces, and unknow
     .bytes.toString('utf8')
     .replace('"wrongField":"benign-token-value"', `"wrongField":"${SESSION_ID_TOKEN}"`)
   assert.throws(() => parseCanonicalTranscript(Buffer.from(wrongFieldToken)), /outside a sessionId field/u)
+
+  const wrongFieldFixtureRootToken = canonicalizeTranscript(
+    entries('C0.7-XF01', { wrongField: 'benign-token-value' }),
+    {
+      fixtureRoot: '/tmp/c0.7-fixture',
+      sessionId: '11111111-1111-4111-8111-111111111111',
+      forbiddenValues: []
+    }
+  )
+    .bytes.toString('utf8')
+    .replace('"wrongField":"benign-token-value"', `"wrongField":"${FIXTURE_ROOT_TOKEN}"`)
+  assert.throws(() => parseCanonicalTranscript(Buffer.from(wrongFieldFixtureRootToken)), /outside a cwd field/u)
 })
 
 test('C0.7 redaction reconstructs ordered ACP text chunks before scanning', () => {
