@@ -188,6 +188,7 @@ export type LoopbackRequest = {
   body: Buffer | undefined
   bodyByteLength: number
   bodyExceededLimit: boolean
+  outcome: 'pending' | 'end' | 'timeout' | 'aborted' | 'error'
 }
 
 async function listen(server: Server): Promise<AddressInfo> {
@@ -452,22 +453,32 @@ export async function startRealPiFixture(options: RealPiFixtureOptions = {}) {
     const chunks: Buffer[] = []
     let bodyByteLength = 0
     let bodyExceededLimit = false
-    let settled = false
+    const observation: LoopbackRequest = {
+      method: request.method,
+      url: request.url,
+      host: request.headers.host,
+      body: undefined,
+      bodyByteLength: 0,
+      bodyExceededLimit: false,
+      outcome: 'pending'
+    }
+    requests.push(observation)
+
+    const settle = (outcome: Exclude<LoopbackRequest['outcome'], 'pending'>): boolean => {
+      if (observation.outcome !== 'pending') return false
+      observation.body = bodyExceededLimit ? undefined : Buffer.concat(chunks, bodyByteLength)
+      observation.bodyByteLength = bodyByteLength
+      observation.bodyExceededLimit = bodyExceededLimit
+      observation.outcome = outcome
+      return true
+    }
     const finish = (): void => {
-      if (settled) return
-      settled = true
-      requests.push({
-        method: request.method,
-        url: request.url,
-        host: request.headers.host,
-        body: bodyExceededLimit ? undefined : Buffer.concat(chunks, bodyByteLength),
-        bodyByteLength,
-        bodyExceededLimit
-      })
+      if (!settle('end')) return
       response.statusCode = bodyExceededLimit ? 413 : 503
       response.end('C0.7 fixture refuses model requests\n')
     }
     request.setTimeout(LOOPBACK_BODY_TIMEOUT_MS, () => {
+      if (!settle('timeout')) return
       response.statusCode = 408
       response.end('C0.7 fixture request body timed out\n')
       request.destroy()
@@ -480,10 +491,13 @@ export async function startRealPiFixture(options: RealPiFixtureOptions = {}) {
     })
     request.once('end', finish)
     request.once('aborted', () => {
-      settled = true
+      settle('aborted')
     })
     request.once('error', () => {
-      settled = true
+      settle('error')
+    })
+    request.once('close', () => {
+      if (!request.complete) settle('aborted')
     })
   })
   server.on('connection', socket => {

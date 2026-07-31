@@ -505,6 +505,7 @@ export function deriveUntrustedPromptEvidence(
   }
   const request = requests[0]
   if (
+    request.outcome !== 'end' ||
     request.method !== 'POST' ||
     request.url !== '/v1/chat/completions' ||
     request.bodyExceededLimit ||
