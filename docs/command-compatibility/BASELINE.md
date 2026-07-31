@@ -19,17 +19,27 @@ The Pi package versions were installation/version-probed with an isolated
 `PI_PACKAGE_DIR`. Full command and extension compatibility is not claimed until
 the relevant G5 matrix case is verified.
 
-Initial verification states use the canonical vocabulary from tracker §8.1:
+Current verification states use the canonical vocabulary from tracker §8.1:
 
-- `e2eStatus`: `todo`
+- `e2eStatus`: `verified`
 - `clients.zed.status`: `todo` (`manual`)
 - `clients.nonZed.status`: `todo` (`manual`)
 
+The verified E2E status covers the C0.3 gate and in-repository harness boundary.
+It is not G5 command/client certification; both manual client axes remain
+`todo`.
+
 Pinned source identities:
 
-- Pi `0.80.5`: `cc62baa442b5c0333923fdfdcc1d7264f445b5b0`
-- Pi `0.83.0`: `845d6ff1f6643aba440341cce877ce1c43ebbc39`
-- ACP SDK `0.26.0`: `73bc30649b650de320340c782733bf69a545bd28`
+- Pi `0.80.5` (`earendil-works/pi`):
+  `cc62baa442b5c0333923fdfdcc1d7264f445b5b0`; npm SRI
+  `sha512-GPYFuHw1BN+3m5Gzw1HGH41WdFDzbplLauS0zYSf1ZOkgKFd6wtEAcjchB/vmz9YtTGbQOwECbsVj6GxZxungA==`
+- Pi `0.83.0` (`earendil-works/pi`):
+  `845d6ff1f6643aba440341cce877ce1c43ebbc39`; npm SRI
+  `sha512-uYhF+FsZxogoSX/AxBcUdiY+ZklubwaXyAoEGA2eQwsHcyEAhUYIKh/WLXe/a8+k8eTCmxb+ZN2Zo9mzQtzbWw==`
+- ACP SDK `0.26.0` (`agentclientprotocol/typescript-sdk`):
+  `73bc30649b650de320340c782733bf69a545bd28`; npm SRI
+  `sha512-ialrcI+RzKOYe+fw+TfpyTdRmEoqIkXLlwbTi6XgaXXfdhNcdod7TmE1VsTnG3yTlox8TMTSMQgWbLLbz3r86Q==`
 - Zed `v1.9.0`: `ced90fc636c4ede05402befc38a63bae7fd741bd`
 - CodeCompanion.nvim `v19.21.0`: `cedbead815fb435026daa63a487bb69260c1cf69`
 
@@ -65,6 +75,71 @@ launching Pi. It then supplies isolated replacements explicitly.
 Exact runtime versions and the compatibility tuple must be included in every
 transcript artifact. A newer local installation is not evidence for a pinned
 matrix case.
+
+## C0.3 CI execution boundary and live provenance
+
+`C0.3` is `verified`. Pushed CI
+[run `30642047986`](https://github.com/Eric-Song-Nop/pi-acp/actions/runs/30642047986)
+against exact implementation head
+[`1a6a00c1f62bcb165b9738ef308f2f9d73151953`](https://github.com/Eric-Song-Nop/pi-acp/commit/1a6a00c1f62bcb165b9738ef308f2f9d73151953)
+passed every distinct blocking gate and the stable `required` aggregate.
+Independent review bound its clean disposition, with no P1/P2/Low, to that
+exact implementation head and run, then resolved the
+[sole PR #9 review thread](https://github.com/Eric-Song-Nop/pi-acp/pull/9#discussion_r3691265707).
+The separate documentation-only publication head
+[`e4cdeecd64f2652d1bc32f1a26844ec2f8dc4c8b`](https://github.com/Eric-Song-Nop/pi-acp/commit/e4cdeecd64f2652d1bc32f1a26844ec2f8dc4c8b)
+also passed all eight jobs in
+[run `30642477922`](https://github.com/Eric-Song-Nop/pi-acp/actions/runs/30642477922);
+it does not replace the run-scoped implementation identity. C0.7's own
+replacement head was already independently clean, so this verification
+discharges its only remaining operational blocker.
+
+Exact CI toolchain and policy pins:
+
+- `.node-version`: `22.19.0`; npm: `10.9.3`
+- CI image:
+  `node:22.19.0-bookworm@sha256:afff6d8c97964a438d2e6a9c96509367e45d8bf93f790ad561a1eaea926303d9`
+  (`linux/amd64`)
+- Acquisition/provenance network: `networked-preflight`; execution network:
+  `docker-none-loopback-only`
+- Required gates: `provenance`, `typecheck`, `lint`, `test`, `build`, and
+  `real-pi-e2e`
+
+Checkout, Node setup, `npm ci`, image acquisition, registry/GitHub provenance,
+and both npm audits run in the explicitly networked preflight. The provenance
+step hard-fails when an immutable package name/version/npm `gitHead`/SHA-512 SRI,
+repository-independent and credential/proxy-neutralized Git smart-HTTP peeled
+repository tag, exact audit severity total, or sorted GHSA identity drifts or
+cannot be verified. Network Git runs from a canonical fresh temporary cwd with
+ancestor discovery stopped at its parent, an explicit `/dev/null` Git directory,
+system/global/environment config isolation, and HTTPS-only transport.
+Repository-local and worktree URL-scoped helpers, headers, proxies, and rewrites
+cannot participate; empty command-line helper/header/proxy values are additional
+defense, not the isolation boundary. The audit is a live mutable-policy check
+under npm `10.9.3`, not reproducible immutable evidence and not a vulnerability
+waiver. Latest package versions and Pi `main` are warn-only observations.
+
+Each provenance run emits its own `testedCheckoutSha` from `git rev-parse HEAD`
+and compares it with `expectedCheckoutSha` from the GitHub event. The historical
+`adapter.baselineSha` remains the C0.2 tuple identity; a run-scoped tested SHA is
+never copied into the matrix.
+
+Gate execution uses the pinned Linux/amd64 container with `--network none` and
+only its loopback interface, zero effective capabilities, no-new-privileges, an
+unprivileged UID/GID, a read-only checkout/root, isolated temporary homes, and a
+preflight that verifies loopback works while external IPv4/IPv6 connects receive
+kernel denial. This proves an execution-only Linux/x64 process-tree boundary. It
+does not claim the acquisition/provenance phase is offline, does not certify
+macOS or Windows containment, and does not turn environment flags into egress
+proof.
+
+The real-Pi execution cases install and run only Pi `0.83.0`. Pi `0.80.5` remains
+an immutable provenance pin and target-window endpoint, not a C0.3 executed
+compatibility case. The positive agent-turn fixture sends one fixed user message
+to one deterministic loopback provider response, asserts one bounded provider
+request, the exact ACP text chunk and `end_turn`, and clean process/socket
+teardown without a real model account. The load-only and C0.7 immutable-failure
+cases run in the same denied execution boundary.
 
 ## C0.7 immutable failure baseline
 
@@ -106,16 +181,27 @@ requests from disappearing behind a false zero count. Terminal outcomes and
 bodies remain test-internal; persisted artifacts retain only the allowlisted
 count and derived shape.
 
-C0.7 remains `blocked` pending independent verification of C0.3's exact pushed
-network-denied CI evidence. That external run-scoped Linux evidence does not
-retroactively turn the C0.7 artifacts' configured loopback counts into OS-level
-egress denial. The manifest records this blocker and recheck date explicitly.
+C0.7 replacement head `f95df57d56497753c12beb864903c02e7ceb99d6` is
+independently clean with no P1/P2 and no unresolved review threads. C0.7 is now
+operationally `verified` because C0.3's exact pushed network-denied
+implementation head/run was independently verified. C0.3's run-scoped Linux
+execution evidence is external to the immutable C0.7 manifest and does not
+retroactively turn configured loopback counts into OS-level egress denial. The
+unchanged manifest continues to record the C0.3 blocker and recheck date that
+were true at capture time. A nonblocking Low remains because the committed
+observer controls deterministically exercise `end` and `timeout`, but not
+separate `aborted` and `error` cases.
 
 ## Dependency audit snapshot
 
-On 2026-07-31, the locked production dependency graph reported zero npm audit
-findings. After the C0.6 Pi `0.83.0` pin, the complete graph, including
-development tooling, reported zero moderate and six high findings in transitive
-dependencies. This snapshot is not a waiver; risk and remediation belong to
-`C5.8` and dependency changes must be reviewed separately from Pi or ACP SDK
+On 2026-07-31, the locked production dependency graph reported zero findings at
+every npm audit severity (`total: 0`). After the C0.6 Pi `0.83.0` pin, the
+complete graph, including development tooling, reported zero info/low/moderate,
+six high, and zero critical findings (`total: 6`). The compatibility matrix also
+pins the exact sorted GHSA identity set observed by npm `10.9.3`.
+
+C0.3 re-runs both audits as a networked live policy check and hard-fails on count,
+advisory, tool-version, or availability drift. The recorded values are neither a
+claim of future reproducibility nor a waiver; risk and remediation belong to
+`C5.8`, and dependency changes must be reviewed separately from Pi or ACP SDK
 version-axis changes.

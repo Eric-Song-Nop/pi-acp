@@ -155,11 +155,11 @@ commands 宣称为稳定支持。
 | ------ | ----------------------------------------------------------------- | ----------- | ------------------------- | --------- |
 | `C0.1` | tracker 合入仓库并决定 Issues 策略                                | `in_review` | `DEC-001`                 | `G0`      |
 | `C0.2` | 固定 compatibility tuple 与受测版本窗口                           | `in_review` | —                         | `G0`      |
-| `C0.3` | CI 跑 typecheck/lint/unit/build 和 E2E 基础矩阵                   | `in_review` | `C0.2`                    | `G0`      |
+| `C0.3` | CI 跑 typecheck/lint/unit/build 和 E2E 基础矩阵                   | `verified`  | `C0.2`                    | `G0`      |
 | `C0.4` | 定义 command compatibility schema                                 | `verified`  | `DEC-003`                 | `G0`      |
 | `C0.5` | raw ACP + strict-client harness                                   | `verified`  | `DEC-005`                 | `G0`      |
 | `C0.6` | 建立真实 Pi fixture extension pack                                | `verified`  | `C0.5`                    | `G0`      |
-| `C0.7` | 记录当前失败基线和 immutable transcripts                          | `blocked`   | `C0.3`, `C0.6`            | `G0`      |
+| `C0.7` | 记录当前失败基线和 immutable transcripts                          | `verified`  | `C0.3`, `C0.6`            | `G0`      |
 | `C1.1` | extension stderr/load diagnostics 可见且安全限长                  | `proposed`  | `C0.7`                    | `G1`      |
 | `C1.2` | `extension_error` 映射为可见、可测试错误                          | `proposed`  | `C0.7`                    | `G1`      |
 | `C1.3` | Pi child 退出时 fail pending command，并提供确定恢复路径          | `proposed`  | `C0.5`                    | `G1`      |
@@ -228,6 +228,72 @@ commands 宣称为稳定支持。
 [`test/e2e/compatibility-matrix.json`](../../test/e2e/compatibility-matrix.json)
 、`test/helpers/compatibility-matrix.ts`
 和 `test/unit/compatibility-matrix.test.ts`。
+
+#### `C0.3` Network-denied CI gates and live provenance
+
+- [x] `ubuntu-24.04` 使用精确 Node `22.19.0`、npm `10.9.3`、固定 action SHA
+      与 digest-pinned `node:22.19.0-bookworm` image；`.node-version`、matrix、
+      workflow 和 lock metadata 由 unit regression 互相绑定。
+- [x] checkout 对 PR 使用 `github.event.pull_request.head.sha`，对 push 使用
+      `github.sha`；`fetch-depth: 0`、`persist-credentials: false`，provenance 每次
+      输出 `testedCheckoutSha` (`git rev-parse HEAD`) 与 `expectedCheckoutSha`，
+      run-scoped SHA 不写回历史 `adapter.baselineSha`。
+- [x] networked preflight 完成 checkout/setup、`npm ci`、image acquisition、npm
+      registry 与 repository-independent、credential/proxy-neutralized Git
+      smart-HTTP `ls-remote` peeled tag pin 验证，以及 npm `10.9.3` 的
+      runtime/full-tree live audit；package name/version/`gitHead`/SHA-512 SRI、
+      repository tag、全部 severity totals、sorted GHSA IDs 或验证可用性漂移都会
+      hard fail。latest 与 Pi `main` 只是 warn-only observation，audit 不是
+      immutable evidence 或 waiver。
+- [x] 五个 network Git tag lookup 都从 canonical fresh temporary cwd 执行，
+      discovery ceiling 位于其 parent，并显式使用 `/dev/null` git-dir、
+      system/global/environment config isolation 与 HTTPS-only transport。
+      adversarial regression 在 ancestor repo 注入 URL-scoped credential helper、
+      `extraHeader`、proxy 与 `url.*.insteadOf`，证明旧调用会 rewrite，而 production
+      双层 isolation 保持 canonical GitHub URL 且不读取 scoped config；generic
+      empty helper/header/proxy 仅作为 defense-in-depth。
+- [x] `typecheck`、`lint`、`test`、`build` 与 `real-pi-e2e` execution 使用同一
+      `linux/amd64` container、`docker --network none`、只读 root/worktree、isolated
+      temp homes、unprivileged UID/GID、`--cap-drop ALL`、no-new-privileges 与
+      `env -i`。boundary preflight 证明仅有 loopback、loopback 可连接、外部 IPv4/IPv6
+      连接得到 kernel denial；stable `required` job 汇总所有 blocking gates。
+- [x] real-Pi load boundaries、C0.7 immutable xfails 与 positive deterministic
+      agent turn 都在相同 loopback-only execution boundary 运行。positive turn 只向
+      one-shot loopback provider 发出一个 bounded request，得到固定 ACP text 与
+      `end_turn`，随后 clean exit/teardown，不使用真实模型账户。
+- [x] pushed CI
+      [run `30642047986`](https://github.com/Eric-Song-Nop/pi-acp/actions/runs/30642047986)
+      对 exact implementation head
+      [`1a6a00c1f62bcb165b9738ef308f2f9d73151953`](https://github.com/Eric-Song-Nop/pi-acp/commit/1a6a00c1f62bcb165b9738ef308f2f9d73151953)
+      的全部 distinct gates 与 stable `required` job 全绿。independent review
+      已将 no-P1/P2/Low disposition 绑定该 exact implementation head/run，并
+      resolved
+      [PR #9 唯一 review thread](https://github.com/Eric-Song-Nop/pi-acp/pull/9#discussion_r3691265707)，
+      因此 `C0.3` 为 `verified`。后续
+      documentation-only publication head
+      [`e4cdeec`](https://github.com/Eric-Song-Nop/pi-acp/commit/e4cdeecd64f2652d1bc32f1a26844ec2f8dc4c8b)
+      的全部八个 jobs 也在
+      [run `30642477922`](https://github.com/Eric-Song-Nop/pi-acp/actions/runs/30642477922)
+      全绿，但不替换这个 run-scoped implementation identity。C0.7 自身
+      replacement head 已独立复验；其唯一 operational blocker 已解除。
+
+证据：
+[`.github/workflows/ci.yml`](../../.github/workflows/ci.yml)、
+[`compatibility-matrix.json`](../../test/e2e/compatibility-matrix.json)、
+`.github/scripts/assert-network-boundary.mjs`、
+`.github/scripts/run-network-denied-ci.sh`、
+`scripts/check-ci-provenance.ts`、
+`test/helpers/ci-provenance.ts`、
+`test/unit/ci-provenance.test.ts`、
+`test/unit/compatibility-matrix.test.ts`
+和 `test/component/real-pi-agent-turn.test.ts`。
+
+边界：dependency acquisition 与 provenance/audit 明确联网；kernel-denied 结论只
+覆盖 blocking gate 的 Linux/x64 execution process tree，不覆盖整个 workflow、
+macOS、Windows 或人工运行。C0.3 实际执行的只有 pinned Pi `0.83.0`；`0.80.5`
+仅做 immutable provenance pin 与 target-window endpoint，不能称为已经执行的
+compatibility case。C0.7 checked-in manifest 是历史 immutable artifact，不因外部
+C0.3 run retroactively 改写其 `osEgressDenied: false` 边界。
 
 #### `C0.4` Command compatibility schema
 
@@ -329,10 +395,11 @@ ancestor symlink 与替换成另一 real directory 的 adversarial checks 均通
 [GitHub review `4827962159`](https://github.com/Eric-Song-Nop/pi-acp/pull/5#pullrequestreview-4827962159)。
 
 边界：本 checkpoint 证明 configured loopback provider 零 request，但
-`PI_OFFLINE`/telemetry flags 与空 `PATH` 不是 OS egress sandbox；C0.3 的独立
-run-scoped Linux evidence 正在 stacked PR #9 复验，不会 retroactively 扩大 C0.6
-artifact 的结论。Windows `.cmd`/shell env、grandchild containment 与 no-follow
-等价保证也必须等 Windows matrix 后再认证。
+`PI_OFFLINE`/telemetry flags 与空 `PATH` 不是 OS egress sandbox；C0.3 的
+run-scoped Linux evidence 已在 stacked PR #9 对
+`1a6a00c…@30642047986` 独立复验，不会 retroactively 扩大 C0.6 artifact 的
+结论。Windows `.cmd`/shell env、grandchild containment 与 no-follow 等价保证
+也必须等 Windows matrix 后再认证。
 fixture command 的 ACP catalog/execution/UI 行为仍由 `FX-01..12`、`C2.x` 和
 `C3.x` 验证，本 checkpoint 不把“真实 Pi 已加载 extension”扩大成公开 command
 compatibility 声明。global fixture 与同一 private root 内的 Pi process 是本测试
@@ -349,7 +416,23 @@ TOCTOU hardening，不是 hostile-child executed-code attestation。
 - [x] loopback listener 在 HTTP handler 接受 request 时同步加入唯一 observation，再将同一记录 exactly-once terminalize 为 `end` / `timeout` / `aborted` / `error`；XF02 只接受 completed `end` body。completed POST 503 与 incomplete POST handler-owned 408 controls 在 Node `26.5.0` / exact `22.19.0` 都证明 partial accepted request 不会从零计数证据消失。
 - [x] normal tests 不改写 evidence；bounded lstat → `O_NOFOLLOW` open → fstat/path identity → digest/canonical parse 接受 fresh Git `0644`，但拒绝 group/world write。credential signatures、24/32-hex nonce、UUID、absolute path、loopback host/port、XF02 canary（含 ordered text-chunk reconstruction）、reserved-token placement、leaf/ancestor symlink、hardlink、非 canonical bytes、malicious historical orphan、CAS/active/stale lock、crash temp/link-before-unlink 与 live-reader retry 都有回归。
 - [x] 显式 Linux/Darwin updater 要求 exact Node `22.19.0`、全仓 clean Git、全部三个 case、旧 manifest SHA、未来有效 recheck date 与 `--accept-baseline-change`；每个 case fresh capture 两次且 bytes/outcome 完全相同，30s fixture hard deadline 在 teardown race 中也不能接受 late success。artifact 采用 no-clobber content address，manifest 采用 cooperative lock、双重 CAS、atomic rename 与 directory `fsync`。stale-lock recovery 仅限同一 local filesystem、host 与 PID namespace；不覆盖 NFS/shared-host 或 hostile same-UID actor。
-- [ ] `C0.3` exact pushed network-denied CI evidence 尚待 independent verification；因此 C0.7 即使本地 artifacts/gates 全绿也保持 `blocked`。blocker owner 为 task #2，复查日期 `2026-08-07`。
+- [x] `C0.3` exact implementation head
+      [`1a6a00c1f62bcb165b9738ef308f2f9d73151953`](https://github.com/Eric-Song-Nop/pi-acp/commit/1a6a00c1f62bcb165b9738ef308f2f9d73151953)
+      的 pushed stable-`required`
+      [run `30642047986`](https://github.com/Eric-Song-Nop/pi-acp/actions/runs/30642047986)
+      全绿。
+- [x] `C0.3` exact pushed network-denied CI evidence
+      `1a6a00c…@30642047986` 已 independent verification，无 P1/P2/Low，且 PR #9
+      [唯一 review thread](https://github.com/Eric-Song-Nop/pi-acp/pull/9#discussion_r3691265707)
+      已 resolved；C0.7 的唯一 operational blocker 已解除，checkpoint 为
+      `verified`。checked-in manifest 仍保留 capture-time blocker 与
+      `2026-08-07` recheck date，不被这项外部证据改写。
+- [x] C0.7 replacement head
+      [`f95df57`](https://github.com/Eric-Song-Nop/pi-acp/commit/f95df57d56497753c12beb864903c02e7ceb99d6)
+      已 independent verification accepted-partial-request control；原 GitHub
+      review thread 已 resolved，PR #8 无 unresolved review thread、无 P1/P2。
+      nonblocking Low：committed controls deterministic 覆盖 `end` / `timeout`，
+      未单独覆盖 `aborted` / `error`。
 
 本次 runtime/capture commit 为
 [`1009c1e`](https://github.com/Eric-Song-Nop/pi-acp/commit/1009c1e58536c7c907348356706c148cf5593e87)，
@@ -388,13 +471,14 @@ Pi built-in fallthrough 与 adapter/prompt collision 继续由 `C1.5`、`C2.2`�
 
 #### `C0.3, C0.5–C0.7` Harness 与失败基线
 
-- [ ] CI 分别运行 `typecheck`, `lint`, `test`, `build`。
+- [x] CI 分别运行 `typecheck`, `lint`, `test`, `build`，并由 stable `required` gate 汇总。
 - [x] E2E 使用真实 Pi 子进程，不只使用 `FakePiRpcProcess`。
 - [x] 每个 case 使用独立 cwd 和 `PI_CODING_AGENT_DIR`，不读取开发者真实 Pi 配置。
-- [ ] 阻塞 CI 默认禁止外网；插件、Pi 和客户端版本全部 pin。
+- [x] 阻塞 gate execution 在 Linux/amd64 loopback-only kernel namespace 中禁止外部
+      egress；dependency acquisition/provenance 明确联网，插件、Pi 和客户端版本分别 pin。
 - [x] strict-client harness 会拒绝未出现在 `available_commands_update` 的 slash command。
 - [x] load-only real-Pi fixture 注册 deterministic loopback provider，并证明 `initialize` + `session/new` 期间零 provider request。
-- [ ] agent-turn fixture 使用 loopback deterministic provider 返回固定模型响应，不消耗真实模型账户。
+- [x] agent-turn fixture 使用 loopback deterministic provider 返回固定模型响应，不消耗真实模型账户。
 - [x] 所有当前 failure-baseline 中可能挂起的用例有独立 hard timeout，并保存 canonical NDJSON transcript。
 - [x] C0.7 范围内的当前已知失败被记录为 executable `xfail(issue)`，不以“人工知道会坏”代替。
 
@@ -549,7 +633,8 @@ Gate 不能靠“豁免通过”。如果某能力未达到 gate，只能：
 - cancel 到终态 `≤2s`；
 - catalog change 到 client update `≤1s`；
 - unknown/unsupported command 误送模型 `0`；
-- CI 访问真实账户、真实 Pi home 和外网 `0`；
+- CI execution gates 访问真实账户、真实 Pi home 和外部网络 `0`；acquisition 与
+  provenance 是显式 networked preflight；
 - session close 后遗留进程/端口 `0`。
 
 ## 10. 上游依赖账本

@@ -1,0 +1,393 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CI_NODE_VERSION: '22.19.0'
+  CI_NPM_VERSION: '10.9.3'
+  CI_CONTAINER_IMAGE: node:22.19.0-bookworm@sha256:afff6d8c97964a438d2e6a9c96509367e45d8bf93f790ad561a1eaea926303d9
+  EXPECTED_ADAPTER_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+  C0_3_PR_HEAD_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || '' }}
+  C0_3_PR_BASE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || '' }}
+
+jobs:
+  provenance:
+    name: provenance
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Check out the requested immutable head
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ env.EXPECTED_ADAPTER_SHA }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up exact Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: '22.19.0'
+
+      - name: Verify exact Node and npm
+        shell: bash
+        run: |
+          test "$(node --version)" = "v${CI_NODE_VERSION}"
+          test "$(npm --version)" = "${CI_NPM_VERSION}"
+
+      - name: Install the locked dependency graph
+        run: >-
+          npm ci --ignore-scripts --no-audit --fund=false
+          --registry=https://registry.npmjs.org/ --userconfig=/dev/null
+
+      - name: Verify immutable provenance and audit identities
+        run: >-
+          node --import tsx scripts/check-ci-provenance.ts
+          --expected-adapter-sha "${EXPECTED_ADAPTER_SHA}"
+
+  typecheck:
+    name: typecheck
+    needs: provenance
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Check out the requested immutable head
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ env.EXPECTED_ADAPTER_SHA }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up exact Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: '22.19.0'
+
+      - name: Verify exact Node and npm
+        shell: bash
+        run: |
+          test "$(node --version)" = "v${CI_NODE_VERSION}"
+          test "$(npm --version)" = "${CI_NPM_VERSION}"
+
+      - name: Install the locked dependency graph
+        run: >-
+          npm ci --ignore-scripts --no-audit --fund=false
+          --registry=https://registry.npmjs.org/ --userconfig=/dev/null
+
+      - name: Pull the immutable execution image
+        run: docker pull "${CI_CONTAINER_IMAGE}"
+
+      - name: Typecheck without external networking
+        shell: bash
+        run: |
+          docker run --rm --init \
+            --platform linux/amd64 \
+            --network none \
+            --cap-drop ALL \
+            --security-opt no-new-privileges=true \
+            --read-only \
+            --pids-limit 512 \
+            --tmpfs /tmp:rw,nosuid,nodev,exec,mode=1777 \
+            --user "$(id -u):$(id -g)" \
+            --mount "type=bind,source=${GITHUB_WORKSPACE},target=/workspace,readonly" \
+            --workdir /workspace \
+            "${CI_CONTAINER_IMAGE}" \
+            /usr/bin/env -i \
+              PATH=/usr/local/bin:/usr/bin:/bin \
+              HOME=/tmp/pi-acp-home \
+              TMPDIR=/tmp TMP=/tmp TEMP=/tmp \
+              XDG_CONFIG_HOME=/tmp/pi-acp-home/.config \
+              XDG_CACHE_HOME=/tmp/pi-acp-home/.cache \
+              XDG_DATA_HOME=/tmp/pi-acp-home/.local/share \
+              XDG_STATE_HOME=/tmp/pi-acp-home/.local/state \
+              LANG=C LC_ALL=C TZ=UTC CI=1 NO_COLOR=1 NODE_ENV=test \
+              CI_EXPECTED_NODE_VERSION="${CI_NODE_VERSION}" \
+              CI_EXPECTED_NPM_VERSION="${CI_NPM_VERSION}" \
+              GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null GIT_TERMINAL_PROMPT=0 GIT_OPTIONAL_LOCKS=0 \
+              /bin/bash .github/scripts/run-network-denied-ci.sh typecheck
+
+  lint:
+    name: lint
+    needs: provenance
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Check out the requested immutable head
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ env.EXPECTED_ADAPTER_SHA }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up exact Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: '22.19.0'
+
+      - name: Verify exact Node and npm
+        shell: bash
+        run: |
+          test "$(node --version)" = "v${CI_NODE_VERSION}"
+          test "$(npm --version)" = "${CI_NPM_VERSION}"
+
+      - name: Install the locked dependency graph
+        run: >-
+          npm ci --ignore-scripts --no-audit --fund=false
+          --registry=https://registry.npmjs.org/ --userconfig=/dev/null
+
+      - name: Pull the immutable execution image
+        run: docker pull "${CI_CONTAINER_IMAGE}"
+
+      - name: Lint without external networking
+        shell: bash
+        run: |
+          docker run --rm --init \
+            --platform linux/amd64 \
+            --network none \
+            --cap-drop ALL \
+            --security-opt no-new-privileges=true \
+            --read-only \
+            --pids-limit 512 \
+            --tmpfs /tmp:rw,nosuid,nodev,exec,mode=1777 \
+            --user "$(id -u):$(id -g)" \
+            --mount "type=bind,source=${GITHUB_WORKSPACE},target=/workspace,readonly" \
+            --workdir /workspace \
+            "${CI_CONTAINER_IMAGE}" \
+            /usr/bin/env -i \
+              PATH=/usr/local/bin:/usr/bin:/bin \
+              HOME=/tmp/pi-acp-home \
+              TMPDIR=/tmp TMP=/tmp TEMP=/tmp \
+              XDG_CONFIG_HOME=/tmp/pi-acp-home/.config \
+              XDG_CACHE_HOME=/tmp/pi-acp-home/.cache \
+              XDG_DATA_HOME=/tmp/pi-acp-home/.local/share \
+              XDG_STATE_HOME=/tmp/pi-acp-home/.local/state \
+              LANG=C LC_ALL=C TZ=UTC CI=1 NO_COLOR=1 NODE_ENV=test \
+              CI_EXPECTED_NODE_VERSION="${CI_NODE_VERSION}" \
+              CI_EXPECTED_NPM_VERSION="${CI_NPM_VERSION}" \
+              GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null GIT_TERMINAL_PROMPT=0 GIT_OPTIONAL_LOCKS=0 \
+              /bin/bash .github/scripts/run-network-denied-ci.sh lint
+
+  test:
+    name: test
+    needs: provenance
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Check out the requested immutable head
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ env.EXPECTED_ADAPTER_SHA }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up exact Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: '22.19.0'
+
+      - name: Verify exact Node and npm
+        shell: bash
+        run: |
+          test "$(node --version)" = "v${CI_NODE_VERSION}"
+          test "$(npm --version)" = "${CI_NPM_VERSION}"
+
+      - name: Install the locked dependency graph
+        run: >-
+          npm ci --ignore-scripts --no-audit --fund=false
+          --registry=https://registry.npmjs.org/ --userconfig=/dev/null
+
+      - name: Pull the immutable execution image
+        run: docker pull "${CI_CONTAINER_IMAGE}"
+
+      - name: Test without external networking
+        shell: bash
+        run: |
+          docker run --rm --init \
+            --platform linux/amd64 \
+            --network none \
+            --cap-drop ALL \
+            --security-opt no-new-privileges=true \
+            --read-only \
+            --pids-limit 512 \
+            --tmpfs /tmp:rw,nosuid,nodev,exec,mode=1777 \
+            --user "$(id -u):$(id -g)" \
+            --mount "type=bind,source=${GITHUB_WORKSPACE},target=/workspace,readonly" \
+            --workdir /workspace \
+            "${CI_CONTAINER_IMAGE}" \
+            /usr/bin/env -i \
+              PATH=/usr/local/bin:/usr/bin:/bin \
+              HOME=/tmp/pi-acp-home \
+              TMPDIR=/tmp TMP=/tmp TEMP=/tmp \
+              XDG_CONFIG_HOME=/tmp/pi-acp-home/.config \
+              XDG_CACHE_HOME=/tmp/pi-acp-home/.cache \
+              XDG_DATA_HOME=/tmp/pi-acp-home/.local/share \
+              XDG_STATE_HOME=/tmp/pi-acp-home/.local/state \
+              LANG=C LC_ALL=C TZ=UTC CI=1 NO_COLOR=1 NODE_ENV=test \
+              CI_EXPECTED_NODE_VERSION="${CI_NODE_VERSION}" \
+              CI_EXPECTED_NPM_VERSION="${CI_NPM_VERSION}" \
+              GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null GIT_TERMINAL_PROMPT=0 GIT_OPTIONAL_LOCKS=0 \
+              /bin/bash .github/scripts/run-network-denied-ci.sh test
+
+  build:
+    name: build
+    needs: provenance
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Check out the requested immutable head
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ env.EXPECTED_ADAPTER_SHA }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up exact Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: '22.19.0'
+
+      - name: Verify exact Node and npm
+        shell: bash
+        run: |
+          test "$(node --version)" = "v${CI_NODE_VERSION}"
+          test "$(npm --version)" = "${CI_NPM_VERSION}"
+
+      - name: Install the locked dependency graph
+        run: >-
+          npm ci --ignore-scripts --no-audit --fund=false
+          --registry=https://registry.npmjs.org/ --userconfig=/dev/null
+
+      - name: Pull the immutable execution image
+        run: docker pull "${CI_CONTAINER_IMAGE}"
+
+      - name: Build without external networking
+        shell: bash
+        run: |
+          docker run --rm --init \
+            --platform linux/amd64 \
+            --network none \
+            --cap-drop ALL \
+            --security-opt no-new-privileges=true \
+            --read-only \
+            --pids-limit 512 \
+            --tmpfs /tmp:rw,nosuid,nodev,exec,mode=1777 \
+            --user "$(id -u):$(id -g)" \
+            --mount "type=bind,source=${GITHUB_WORKSPACE},target=/workspace,readonly" \
+            --workdir /workspace \
+            "${CI_CONTAINER_IMAGE}" \
+            /usr/bin/env -i \
+              PATH=/usr/local/bin:/usr/bin:/bin \
+              HOME=/tmp/pi-acp-home \
+              TMPDIR=/tmp TMP=/tmp TEMP=/tmp \
+              XDG_CONFIG_HOME=/tmp/pi-acp-home/.config \
+              XDG_CACHE_HOME=/tmp/pi-acp-home/.cache \
+              XDG_DATA_HOME=/tmp/pi-acp-home/.local/share \
+              XDG_STATE_HOME=/tmp/pi-acp-home/.local/state \
+              LANG=C LC_ALL=C TZ=UTC CI=1 NO_COLOR=1 NODE_ENV=test \
+              CI_EXPECTED_NODE_VERSION="${CI_NODE_VERSION}" \
+              CI_EXPECTED_NPM_VERSION="${CI_NPM_VERSION}" \
+              GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null GIT_TERMINAL_PROMPT=0 GIT_OPTIONAL_LOCKS=0 \
+              /bin/bash .github/scripts/run-network-denied-ci.sh build
+
+  real-pi-e2e:
+    name: real-pi-e2e / ${{ matrix.label }}
+    needs: provenance
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - suite: load-boundaries
+            label: pi-0.83.0-raw-load-boundaries
+          - suite: immutable-failures
+            label: pi-0.83.0-raw-strict-xfails
+    steps:
+      - name: Check out the requested immutable head
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ env.EXPECTED_ADAPTER_SHA }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up exact Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: '22.19.0'
+
+      - name: Verify exact Node and npm
+        shell: bash
+        run: |
+          test "$(node --version)" = "v${CI_NODE_VERSION}"
+          test "$(npm --version)" = "${CI_NPM_VERSION}"
+
+      - name: Install the locked dependency graph
+        run: >-
+          npm ci --ignore-scripts --no-audit --fund=false
+          --registry=https://registry.npmjs.org/ --userconfig=/dev/null
+
+      - name: Pull the immutable execution image
+        run: docker pull "${CI_CONTAINER_IMAGE}"
+
+      - name: Run ${{ matrix.label }} without external networking
+        shell: bash
+        run: |
+          docker run --rm --init \
+            --platform linux/amd64 \
+            --network none \
+            --cap-drop ALL \
+            --security-opt no-new-privileges=true \
+            --read-only \
+            --pids-limit 512 \
+            --tmpfs /tmp:rw,nosuid,nodev,exec,mode=1777 \
+            --user "$(id -u):$(id -g)" \
+            --mount "type=bind,source=${GITHUB_WORKSPACE},target=/workspace,readonly" \
+            --workdir /workspace \
+            "${CI_CONTAINER_IMAGE}" \
+            /usr/bin/env -i \
+              PATH=/usr/local/bin:/usr/bin:/bin \
+              HOME=/tmp/pi-acp-home \
+              TMPDIR=/tmp TMP=/tmp TEMP=/tmp \
+              XDG_CONFIG_HOME=/tmp/pi-acp-home/.config \
+              XDG_CACHE_HOME=/tmp/pi-acp-home/.cache \
+              XDG_DATA_HOME=/tmp/pi-acp-home/.local/share \
+              XDG_STATE_HOME=/tmp/pi-acp-home/.local/state \
+              LANG=C LC_ALL=C TZ=UTC CI=1 NO_COLOR=1 NODE_ENV=test \
+              CI_EXPECTED_NODE_VERSION="${CI_NODE_VERSION}" \
+              CI_EXPECTED_NPM_VERSION="${CI_NPM_VERSION}" \
+              GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null GIT_TERMINAL_PROMPT=0 GIT_OPTIONAL_LOCKS=0 \
+              /bin/bash .github/scripts/run-network-denied-ci.sh "${{ matrix.suite }}"
+
+  required:
+    name: required
+    if: ${{ always() }}
+    needs:
+      - provenance
+      - typecheck
+      - lint
+      - test
+      - build
+      - real-pi-e2e
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Require every C0.3 gate
+        shell: bash
+        run: |
+          test "${{ needs.provenance.result }}" = success
+          test "${{ needs.typecheck.result }}" = success
+          test "${{ needs.lint.result }}" = success
+          test "${{ needs.test.result }}" = success
+          test "${{ needs.build.result }}" = success
+          test "${{ needs.real-pi-e2e.result }}" = success
