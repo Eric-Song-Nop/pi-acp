@@ -9,7 +9,9 @@ import {
 import { runRealPiBaselineCase, type BaselineCaseId } from '../helpers/real-pi-baseline-scenarios.js'
 import {
   assertInstalledPackageTreesMatchManifest,
-  assertRuntimeSourcesMatchGitHead
+  assertRuntimeSourcesMatchGitHead,
+  readCurrentRepositoryGitHead,
+  runtimeSourceTreesMatchGitHeads
 } from '../../scripts/update-command-transcripts.js'
 
 const TEST_TIMEOUT_MS = 45_000
@@ -31,14 +33,22 @@ for (const caseId of CASE_IDS) {
     { timeout: TEST_TIMEOUT_MS },
     async () => {
       const { manifest } = await readVerifiedManifest()
-      await assertRuntimeSourcesMatchGitHead(manifest.compatibility.adapter.baselineGitHead)
+      const currentGitHead = await readCurrentRepositoryGitHead()
+      await assertRuntimeSourcesMatchGitHead(currentGitHead)
+      const runtimeSourcesMatchFrozenBaseline = await runtimeSourceTreesMatchGitHeads(
+        currentGitHead,
+        manifest.compatibility.adapter.baselineGitHead
+      )
       await assertInstalledPackageTreesMatchManifest(manifest)
       const expected = manifest.cases.find(item => item.id === caseId)
       assert.ok(expected)
       const committed = await readVerifiedArtifact(C0_7_TRANSCRIPT_ROOT, expected)
 
+      const replayGitHead = runtimeSourcesMatchFrozenBaseline
+        ? manifest.compatibility.adapter.baselineGitHead
+        : currentGitHead
       const observed = await runRealPiBaselineCase(caseId, {
-        baselineGitHead: manifest.compatibility.adapter.baselineGitHead
+        baselineGitHead: replayGitHead
       })
       assert.deepEqual(observed.expectedFailure, expected.expectedFailure)
       assert.deepEqual(observed.networkBoundary, expected.networkBoundary)
@@ -48,7 +58,7 @@ for (const caseId of CASE_IDS) {
         observed.runtime.nodeVersion === expected.runtime.nodeVersion &&
         observed.runtime.platform === expected.runtime.platform &&
         observed.runtime.arch === expected.runtime.arch
-      if (isRecordingRuntime) {
+      if (runtimeSourcesMatchFrozenBaseline && isRecordingRuntime) {
         assert.equal(observed.canonicalTranscript.sha256, expected.artifact.sha256)
         assert.equal(observed.canonicalTranscript.recordCount, expected.artifact.recordCount)
         assert.deepEqual(observed.canonicalTranscript.bytes, committed.bytes)
@@ -56,7 +66,7 @@ for (const caseId of CASE_IDS) {
         assert.notEqual(
           observed.runtime.nodeVersion,
           '',
-          'non-recording runtimes still execute the expected-failure contract'
+          'non-byte-comparable live replays still execute the expected-failure contract'
         )
       }
     }

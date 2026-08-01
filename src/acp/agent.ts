@@ -26,7 +26,7 @@ import {
 import { getAuthMethods } from './auth.js'
 import { SessionManager, type PiAcpSession } from './session.js'
 import { SessionStore } from './session-store.js'
-import { PiRpcProcess } from '../pi-rpc/process.js'
+import { PiRpcProcess, PiRpcSpawnError, piRpcSpawnErrorData } from '../pi-rpc/process.js'
 import { listPiSessions, findPiSession } from './pi-sessions.js'
 import { normalizePiAssistantText, normalizePiMessageText } from './translate/pi-messages.js'
 import { toolResultToText } from './translate/pi-tools.js'
@@ -203,9 +203,11 @@ export class PiAcpAgent implements ACPAgent {
           sessionPath: stored.sessionFile,
           piCommand: process.env.PI_ACP_PI_COMMAND
         })
-      } catch (e: any) {
-        if (e?.name === 'PiRpcSpawnError') {
-          throw RequestError.internalError({ code: e?.code }, String(e?.message ?? e))
+      } catch (e: unknown) {
+        if (e instanceof PiRpcSpawnError) {
+          const data = piRpcSpawnErrorData(e)
+          if (e.diagnostic) throw new RequestError(-32603, e.message, data)
+          throw RequestError.internalError(data, e.message)
         }
         throw e
       }

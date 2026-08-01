@@ -1,7 +1,7 @@
 import { execFile } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { chmod, lstat, mkdir, readFile, readdir, realpath } from 'node:fs/promises'
-import { join } from 'node:path'
+import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { isDeepStrictEqual, promisify } from 'node:util'
 import {
@@ -55,13 +55,8 @@ const RUNTIME_SOURCE_PATHS = [
   'tsconfig.json',
   'scripts/check-command-transcripts.ts',
   'scripts/update-command-transcripts.ts',
-  'test/fixtures/pi-extension-pack/index.ts',
-  'test/fixtures/pi-extension-pack/project-canary.js',
-  'test/helpers/acp-process-client.ts',
-  'test/helpers/immutable-transcript.ts',
-  'test/helpers/real-pi-baseline-scenarios.ts',
-  'test/helpers/real-pi-fixture.ts',
-  'test/helpers/strict-catalog-client.ts'
+  'test/fixtures/pi-extension-pack',
+  'test/helpers'
 ] as const
 
 type CliOptions = {
@@ -69,6 +64,35 @@ type CliOptions = {
   expectedOldManifestSha256: string | 'absent'
   recheckDate: string
 }
+
+type RuntimeSourceGitOptions = {
+  cwd?: string
+  paths?: readonly string[]
+}
+
+type GitRepository = {
+  gitDir: string
+  workTree: string
+}
+
+type GitTreeEntry = {
+  mode: string
+  objectId: string
+  path: string
+  type: 'blob' | 'commit'
+}
+
+type WorktreeEntry = {
+  bytes: Buffer
+  mode: string
+  type: 'blob'
+}
+
+const MAX_GIT_OUTPUT_BYTES = 32 * 1024 * 1024
+const MAX_RUNTIME_SOURCE_BYTES = 64 * 1024 * 1024
+const MAX_RUNTIME_SOURCE_ENTRIES = 10_000
+const RUNTIME_SOURCE_GIT_OBJECT_FORMAT = 'sha1'
+const RUNTIME_SOURCE_MISMATCH = 'C0.7 runtime-bearing sources do not match the declared Git head'
 
 export async function installedPackageTreeSha256(root: string): Promise<string> {
   const rootStat = await lstat(root)
@@ -259,36 +283,465 @@ function caseMetadata(
   }
 }
 
-async function gitOutput(args: readonly string[]): Promise<string> {
-  const { stdout } = await execFileAsync('git', args, {
-    cwd: repositoryRoot,
-    encoding: 'utf8'
+function isolatedGitEnvironment(repository: GitRepository): NodeJS.ProcessEnv {
+  const environment: NodeJS.ProcessEnv = {}
+  for (const [key, value] of Object.entries(process.env)) {
+    if (!/^GIT_/iu.test(key) && value !== undefined) environment[key] = value
+  }
+  const nullDevice = process.platform === 'win32' ? 'NUL' : '/dev/null'
+  return {
+    ...environment,
+    GIT_ATTR_NOSYSTEM: '1',
+    GIT_CEILING_DIRECTORIES: repository.workTree,
+    GIT_CONFIG_COUNT: '0',
+    GIT_CONFIG_GLOBAL: nullDevice,
+    GIT_CONFIG_NOSYSTEM: '1',
+    GIT_CONFIG_SYSTEM: nullDevice,
+    GIT_NO_REPLACE_OBJECTS: '1',
+    GIT_OPTIONAL_LOCKS: '0',
+    GIT_PAGER: 'cat',
+    GIT_TERMINAL_PROMPT: '0'
+  }
+}
+
+function gitArguments(repository: GitRepository, args: readonly string[]): string[] {
+  return [
+    '--no-pager',
+    '--no-replace-objects',
+    '--literal-pathspecs',
+    `--git-dir=${repository.gitDir}`,
+    `--work-tree=${repository.workTree}`,
+    '-c',
+    'core.fsmonitor=false',
+    '-c',
+    `core.hooksPath=${process.platform === 'win32' ? 'NUL' : '/dev/null'}`,
+    '-c',
+    'core.untrackedCache=false',
+    '-c',
+    'core.useReplaceRefs=false',
+    ...args
+  ]
+}
+
+async function gitOutput(repository: GitRepository, args: readonly string[]): Promise<string> {
+  const { stdout } = await execFileAsync('git', gitArguments(repository, args), {
+    cwd: repository.workTree,
+    encoding: 'utf8',
+    env: isolatedGitEnvironment(repository),
+    maxBuffer: MAX_GIT_OUTPUT_BYTES
   })
   return stdout.trim()
 }
 
-export async function assertRuntimeSourcesMatchGitHead(gitHead: string): Promise<void> {
-  if (!/^[0-9a-f]{40}$/u.test(gitHead)) throw new TypeError('C0.7 runtime source Git head must be 40 lowercase hex')
-  const changed = await gitOutput(['diff', '--name-only', gitHead, '--', ...RUNTIME_SOURCE_PATHS])
-  const untrackedOrModified = await gitOutput([
-    'status',
-    '--porcelain=v1',
-    '--untracked-files=all',
-    '--',
-    ...RUNTIME_SOURCE_PATHS
-  ])
-  if (changed !== '' || untrackedOrModified !== '') {
-    throw new Error('C0.7 runtime-bearing sources do not match the declared baseline Git head')
+async function gitBytes(repository: GitRepository, args: readonly string[]): Promise<Buffer> {
+  const { stdout } = await execFileAsync('git', gitArguments(repository, args), {
+    cwd: repository.workTree,
+    encoding: 'buffer',
+    env: isolatedGitEnvironment(repository),
+    maxBuffer: MAX_GIT_OUTPUT_BYTES
+  })
+  return Buffer.isBuffer(stdout) ? stdout : Buffer.from(stdout)
+}
+
+async function readGitDirectory(
+  dotGitPath: string,
+  workTree: string,
+  stat: Awaited<ReturnType<typeof lstat>>
+): Promise<string> {
+  if (stat.isSymbolicLink()) throw new Error('C0.7 repository .git entry must not be a symlink')
+  if (stat.isDirectory()) {
+    const gitDir = await realpath(dotGitPath)
+    if (!sameFilesystemEntry(stat, await lstat(dotGitPath))) {
+      throw new Error('C0.7 repository .git directory changed during discovery')
+    }
+    return gitDir
   }
+  if (!stat.isFile()) throw new Error('C0.7 repository .git entry has an unsupported type')
+  const pointer = await readFile(dotGitPath, 'utf8')
+  if (!sameFilesystemEntry(stat, await lstat(dotGitPath))) {
+    throw new Error('C0.7 repository .git file changed during discovery')
+  }
+  const match = /^gitdir: ([^\r\n]+)\r?\n?$/u.exec(pointer)
+  if (!match) throw new Error('C0.7 repository .git file is malformed')
+  const gitDir = await realpath(resolve(workTree, match[1]))
+  if (!(await lstat(gitDir)).isDirectory()) throw new Error('C0.7 repository Git directory is not a directory')
+  return gitDir
+}
+
+async function discoverGitRepository(cwd: string): Promise<GitRepository> {
+  const canonicalCwd = await realpath(cwd)
+  if (!(await lstat(canonicalCwd)).isDirectory()) throw new Error('C0.7 repository cwd is not a directory')
+  let candidate = canonicalCwd
+  while (true) {
+    const dotGitPath = join(candidate, '.git')
+    let stat: Awaited<ReturnType<typeof lstat>>
+    try {
+      stat = await lstat(dotGitPath)
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
+      const parent = dirname(candidate)
+      if (parent === candidate) throw new Error('C0.7 repository cwd is not inside a Git worktree')
+      candidate = parent
+      continue
+    }
+    return {
+      gitDir: await readGitDirectory(dotGitPath, candidate, stat),
+      workTree: candidate
+    }
+  }
+}
+
+function normalizeRuntimeSourcePaths(paths: readonly string[]): string[] {
+  if (paths.length === 0) throw new TypeError('C0.7 runtime source paths must not be empty')
+  const normalized = new Set<string>()
+  for (const path of paths) {
+    const components = path.split('/')
+    if (
+      path === '' ||
+      path.includes('\0') ||
+      path.includes('\\') ||
+      path.startsWith('/') ||
+      components.some(component => component === '' || component === '.' || component === '..') ||
+      components[0] === '.git'
+    ) {
+      throw new TypeError('C0.7 runtime source paths must be canonical repository-relative paths')
+    }
+    normalized.add(path)
+  }
+  const sorted = [...normalized].sort((left, right) => Buffer.compare(Buffer.from(left), Buffer.from(right)))
+  return sorted.filter((path, index) => !sorted.slice(0, index).some(parent => path.startsWith(`${parent}/`)))
+}
+
+function selectedRuntimePath(path: string, paths: readonly string[]): boolean {
+  return paths.some(selected => selected === '' || path === selected || path.startsWith(`${selected}/`))
+}
+
+function parseGitTreeEntries(output: Buffer, paths: readonly string[]): Map<string, GitTreeEntry> {
+  const result = new Map<string, GitTreeEntry>()
+  for (const record of output.toString('utf8').split('\0')) {
+    if (record === '') continue
+    const match = /^([0-7]{6}) (blob|commit) ([0-9a-f]{40,64})\t(.+)$/su.exec(record)
+    if (!match) throw new Error('C0.7 Git tree output is malformed')
+    const [, mode, type, objectId, path] = match
+    if (!selectedRuntimePath(path, paths)) continue
+    if (result.has(path)) throw new Error('C0.7 Git tree contains a duplicate runtime path')
+    result.set(path, {
+      mode,
+      objectId,
+      path,
+      type: type as GitTreeEntry['type']
+    })
+  }
+  return result
+}
+
+async function verifyCommit(repository: GitRepository, gitHead: string): Promise<void> {
+  const objectFormat = await gitOutput(repository, ['rev-parse', '--show-object-format=storage'])
+  if (objectFormat !== RUNTIME_SOURCE_GIT_OBJECT_FORMAT) {
+    throw new Error('C0.7 runtime-source provenance requires a SHA-1 Git repository')
+  }
+  const verified = await gitOutput(repository, ['rev-parse', '--verify', '--end-of-options', `${gitHead}^{commit}`])
+  if (verified !== gitHead) throw new Error('C0.7 repository Git head did not resolve exactly')
+}
+
+async function readGitTreeEntries(
+  repository: GitRepository,
+  gitHead: string,
+  paths: readonly string[]
+): Promise<Map<string, GitTreeEntry>> {
+  await verifyCommit(repository, gitHead)
+  const entries = parseGitTreeEntries(
+    await gitBytes(repository, ['ls-tree', '-r', '-z', '--full-tree', `${gitHead}^{tree}`]),
+    paths
+  )
+  return entries
+}
+
+function parseIndexEntries(output: Buffer, paths: readonly string[]): Map<string, GitTreeEntry> {
+  const result = new Map<string, GitTreeEntry>()
+  for (const record of output.toString('utf8').split('\0')) {
+    if (record === '') continue
+    const match = /^([0-7]{6}) ([0-9a-f]{40,64}) ([0-3])\t(.+)$/su.exec(record)
+    if (!match) throw new Error('C0.7 Git index output is malformed')
+    const [, mode, objectId, stage, path] = match
+    if (!selectedRuntimePath(path, paths)) continue
+    if (stage !== '0' || result.has(path) || !['100644', '100755', '120000', '160000'].includes(mode)) {
+      throw new Error(RUNTIME_SOURCE_MISMATCH)
+    }
+    result.set(path, {
+      mode,
+      objectId,
+      path,
+      type: mode === '160000' ? 'commit' : 'blob'
+    })
+  }
+  return result
+}
+
+function gitTreeEntriesEqual(left: Map<string, GitTreeEntry>, right: Map<string, GitTreeEntry>): boolean {
+  if (left.size !== right.size) return false
+  for (const [path, leftEntry] of left) {
+    const rightEntry = right.get(path)
+    if (
+      !rightEntry ||
+      leftEntry.mode !== rightEntry.mode ||
+      leftEntry.objectId !== rightEntry.objectId ||
+      leftEntry.type !== rightEntry.type
+    ) {
+      return false
+    }
+  }
+  return true
+}
+
+function gitBlobObjectId(bytes: Buffer): string {
+  const header = Buffer.from(`blob ${String(bytes.length)}\0`)
+  return createHash(RUNTIME_SOURCE_GIT_OBJECT_FORMAT).update(header).update(bytes).digest('hex')
+}
+
+async function assertIndexMatchesGitTree(
+  repository: GitRepository,
+  expected: Map<string, GitTreeEntry>,
+  paths: readonly string[]
+): Promise<void> {
+  const indexEntries = parseIndexEntries(await gitBytes(repository, ['ls-files', '--stage', '-z']), paths)
+  if (!gitTreeEntriesEqual(indexEntries, expected)) throw new Error(RUNTIME_SOURCE_MISMATCH)
+
+  for (const flag of ['-v', '-f'] as const) {
+    const flaggedPaths = new Set<string>()
+    for (const record of (await gitBytes(repository, ['ls-files', flag, '-z'])).toString('utf8').split('\0')) {
+      if (record === '') continue
+      if (record.length < 3 || record[1] !== ' ') throw new Error('C0.7 Git index flags output is malformed')
+      const path = record.slice(2)
+      if (!selectedRuntimePath(path, paths)) continue
+      if (record[0] !== 'H' || flaggedPaths.has(path)) throw new Error(RUNTIME_SOURCE_MISMATCH)
+      flaggedPaths.add(path)
+    }
+    if (flaggedPaths.size !== expected.size) throw new Error(RUNTIME_SOURCE_MISMATCH)
+  }
+}
+
+function sameFilesystemEntry(
+  left: Awaited<ReturnType<typeof lstat>>,
+  right: Awaited<ReturnType<typeof lstat>>
+): boolean {
+  return (
+    left.dev === right.dev &&
+    left.ino === right.ino &&
+    left.mode === right.mode &&
+    left.nlink === right.nlink &&
+    left.size === right.size &&
+    left.mtimeMs === right.mtimeMs &&
+    left.ctimeMs === right.ctimeMs
+  )
+}
+
+async function readStableBlob(path: string, initialStat: Awaited<ReturnType<typeof lstat>>): Promise<Buffer> {
+  const bytes = await readFile(path)
+  if (!sameFilesystemEntry(initialStat, await lstat(path))) throw new Error(RUNTIME_SOURCE_MISMATCH)
+  return bytes
+}
+
+async function readRepositoryGitHead(repository: GitRepository): Promise<string> {
+  const gitHead = await gitOutput(repository, ['rev-parse', '--verify', '--end-of-options', 'HEAD^{commit}'])
+  if (!/^[0-9a-f]{40}$/u.test(gitHead)) {
+    throw new Error('C0.7 repository HEAD is not an exact Git commit')
+  }
+  return gitHead
+}
+
+async function assertNoRuntimeResolverShadows(
+  repository: GitRepository,
+  expected: Map<string, GitTreeEntry>
+): Promise<void> {
+  // Bare package imports search node_modules at every source ancestor before the
+  // repository-root installed dependency graph. A nearer ignored directory can
+  // otherwise execute while the selected source bytes still match Git exactly.
+  const shadowPaths = new Set<string>()
+  for (const path of expected.keys()) {
+    const components = path.split('/')
+    for (let length = 1; length < components.length; length += 1) {
+      shadowPaths.add(join(repository.workTree, ...components.slice(0, length), 'node_modules'))
+    }
+  }
+
+  for (const shadowPath of [...shadowPaths].sort((left, right) =>
+    Buffer.compare(Buffer.from(left), Buffer.from(right))
+  )) {
+    try {
+      await lstat(shadowPath)
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') continue
+      throw error
+    }
+    throw new Error(RUNTIME_SOURCE_MISMATCH)
+  }
+}
+
+async function collectWorktreeEntries(
+  repository: GitRepository,
+  expected: Map<string, GitTreeEntry>,
+  paths: readonly string[]
+): Promise<Map<string, WorktreeEntry>> {
+  const workTreeStat = await lstat(repository.workTree)
+  if (!workTreeStat.isDirectory() || workTreeStat.isSymbolicLink()) {
+    throw new Error(RUNTIME_SOURCE_MISMATCH)
+  }
+  await assertNoRuntimeResolverShadows(repository, expected)
+  const result = new Map<string, WorktreeEntry>()
+  let byteLength = 0
+  let entryCount = 0
+  const visit = async (absolutePath: string, relativePath: string): Promise<void> => {
+    let stat: Awaited<ReturnType<typeof lstat>>
+    try {
+      stat = await lstat(absolutePath)
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return
+      throw error
+    }
+    entryCount += 1
+    if (entryCount > MAX_RUNTIME_SOURCE_ENTRIES) throw new Error(RUNTIME_SOURCE_MISMATCH)
+    const expectedEntry = expected.get(relativePath)
+    if (stat.isDirectory()) {
+      if (expectedEntry) throw new Error(RUNTIME_SOURCE_MISMATCH)
+      if (![...expected.keys()].some(path => path.startsWith(`${relativePath}/`))) {
+        throw new Error(RUNTIME_SOURCE_MISMATCH)
+      }
+      const entries = await readdir(absolutePath, { withFileTypes: true })
+      entries.sort((left, right) => Buffer.compare(Buffer.from(left.name), Buffer.from(right.name)))
+      for (const entry of entries) {
+        if (relativePath === '' && entry.name === '.git') continue
+        const childRelativePath = relativePath === '' ? entry.name : `${relativePath}/${entry.name}`
+        await visit(join(absolutePath, entry.name), childRelativePath)
+      }
+      if (!sameFilesystemEntry(stat, await lstat(absolutePath))) throw new Error(RUNTIME_SOURCE_MISMATCH)
+      return
+    }
+    if (!stat.isFile()) throw new Error(RUNTIME_SOURCE_MISMATCH)
+    if (!expectedEntry || expectedEntry.type !== 'blob' || !['100644', '100755'].includes(expectedEntry.mode)) {
+      throw new Error(RUNTIME_SOURCE_MISMATCH)
+    }
+    byteLength += stat.size
+    if (stat.nlink !== 1 || byteLength > MAX_RUNTIME_SOURCE_BYTES) throw new Error(RUNTIME_SOURCE_MISMATCH)
+    if (result.has(relativePath)) throw new Error(RUNTIME_SOURCE_MISMATCH)
+    result.set(relativePath, {
+      bytes: await readStableBlob(absolutePath, stat),
+      mode: (stat.mode & 0o111) === 0 ? '100644' : '100755',
+      type: 'blob'
+    })
+  }
+
+  for (const path of paths) {
+    const components = path.split('/')
+    const ancestors: Array<{
+      path: string
+      stat: Awaited<ReturnType<typeof lstat>>
+    }> = []
+    let ancestorPath = repository.workTree
+    for (const component of components.slice(0, -1)) {
+      ancestorPath = join(ancestorPath, component)
+      let ancestorStat: Awaited<ReturnType<typeof lstat>>
+      try {
+        ancestorStat = await lstat(ancestorPath)
+      } catch {
+        throw new Error(RUNTIME_SOURCE_MISMATCH)
+      }
+      if (!ancestorStat.isDirectory() || ancestorStat.isSymbolicLink()) {
+        throw new Error(RUNTIME_SOURCE_MISMATCH)
+      }
+      ancestors.push({ path: ancestorPath, stat: ancestorStat })
+    }
+
+    await visit(join(repository.workTree, ...components), path)
+    for (const ancestor of ancestors.reverse()) {
+      if (!sameFilesystemEntry(ancestor.stat, await lstat(ancestor.path))) {
+        throw new Error(RUNTIME_SOURCE_MISMATCH)
+      }
+    }
+  }
+  if (!sameFilesystemEntry(workTreeStat, await lstat(repository.workTree))) {
+    throw new Error(RUNTIME_SOURCE_MISMATCH)
+  }
+  await assertNoRuntimeResolverShadows(repository, expected)
+  return result
+}
+
+async function assertWorktreeMatchesGitTree(
+  repository: GitRepository,
+  expected: Map<string, GitTreeEntry>,
+  paths: readonly string[]
+): Promise<void> {
+  const actual = await collectWorktreeEntries(repository, expected, paths)
+  if (actual.size !== expected.size) throw new Error(RUNTIME_SOURCE_MISMATCH)
+  for (const [path, expectedEntry] of expected) {
+    const actualEntry = actual.get(path)
+    if (!actualEntry || actualEntry.mode !== expectedEntry.mode || actualEntry.type !== expectedEntry.type) {
+      throw new Error(RUNTIME_SOURCE_MISMATCH)
+    }
+    const expectedBytes = await gitBytes(repository, ['cat-file', 'blob', expectedEntry.objectId])
+    if (gitBlobObjectId(expectedBytes) !== expectedEntry.objectId || !actualEntry.bytes.equals(expectedBytes)) {
+      throw new Error(RUNTIME_SOURCE_MISMATCH)
+    }
+  }
+}
+
+async function assertRepositoryStateMatchesGitHead(
+  repository: GitRepository,
+  gitHead: string,
+  paths: readonly string[]
+): Promise<void> {
+  const expected = await readGitTreeEntries(repository, gitHead, paths)
+  for (const path of paths) {
+    if (![...expected.keys()].some(entry => entry === path || entry.startsWith(`${path}/`))) {
+      throw new Error(RUNTIME_SOURCE_MISMATCH)
+    }
+  }
+  // Symlinks and gitlinks expand execution beyond the declared runtime-source allowlist.
+  if ([...expected.values()].some(entry => entry.type !== 'blob' || !['100644', '100755'].includes(entry.mode))) {
+    throw new Error(RUNTIME_SOURCE_MISMATCH)
+  }
+  await assertIndexMatchesGitTree(repository, expected, paths)
+  await assertWorktreeMatchesGitTree(repository, expected, paths)
+}
+
+export async function readCurrentRepositoryGitHead(cwd = repositoryRoot): Promise<string> {
+  return readRepositoryGitHead(await discoverGitRepository(cwd))
+}
+
+export async function assertRuntimeSourcesMatchGitHead(
+  gitHead: string,
+  options: RuntimeSourceGitOptions = {}
+): Promise<void> {
+  if (!/^[0-9a-f]{40}$/u.test(gitHead)) throw new TypeError('C0.7 runtime source Git head must be 40 lowercase hex')
+  const repository = await discoverGitRepository(options.cwd ?? repositoryRoot)
+  const paths = normalizeRuntimeSourcePaths(options.paths ?? RUNTIME_SOURCE_PATHS)
+  await assertRepositoryStateMatchesGitHead(repository, gitHead, paths)
+}
+
+export async function runtimeSourceTreesMatchGitHeads(
+  leftGitHead: string,
+  rightGitHead: string,
+  options: RuntimeSourceGitOptions = {}
+): Promise<boolean> {
+  if (!/^[0-9a-f]{40}$/u.test(leftGitHead) || !/^[0-9a-f]{40}$/u.test(rightGitHead)) {
+    throw new TypeError('C0.7 runtime source Git heads must be 40 lowercase hex')
+  }
+  const repository = await discoverGitRepository(options.cwd ?? repositoryRoot)
+  const paths = normalizeRuntimeSourcePaths(options.paths ?? RUNTIME_SOURCE_PATHS)
+  const [left, right] = await Promise.all([
+    readGitTreeEntries(repository, leftGitHead, paths),
+    readGitTreeEntries(repository, rightGitHead, paths)
+  ])
+  return gitTreeEntriesEqual(left, right)
 }
 
 async function assertCleanCaptureCheckout(): Promise<string> {
   if (process.versions.node !== '22.19.0') {
     throw new Error('C0.7 immutable publication must run on exact Node 22.19.0')
   }
-  const gitHead = await gitOutput(['rev-parse', 'HEAD'])
-  if (!/^[0-9a-f]{40}$/u.test(gitHead)) throw new Error('C0.7 capture checkout has no exact Git commit')
-  const status = await gitOutput(['status', '--porcelain=v1', '--untracked-files=all'])
+  const repository = await discoverGitRepository(repositoryRoot)
+  const gitHead = await readRepositoryGitHead(repository)
+  const status = await gitOutput(repository, ['status', '--porcelain=v1', '--untracked-files=all'])
   if (status !== '') throw new Error('C0.7 capture checkout must be completely clean before recording')
   await assertRuntimeSourcesMatchGitHead(gitHead)
   return gitHead
