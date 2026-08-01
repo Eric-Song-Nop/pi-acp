@@ -157,8 +157,16 @@ test('the checked-in network and suite scripts make the workflow policy executab
   for (const gate of ['typecheck', 'lint', 'test', 'build', 'load-boundaries', 'immutable-failures']) {
     assert.match(gateScript, new RegExp(`^  ${gate}\\)$`, 'mu'))
   }
+  assert.match(
+    gateScript,
+    /test\)[\s\S]*?--test-concurrency=2 test\/unit\/\*\.test\.ts test\/component\/\*\.test\.ts[\s\S]*?;;\n {2}build\)/u
+  )
   assert.match(gateScript, /test\/component\/real-pi-agent-turn\.test\.ts/u)
   assert.match(gateScript, /test\/component\/real-pi-extension-load-diagnostics\.test\.ts/u)
+  assert.match(
+    gateScript,
+    /load-boundaries\)[\s\S]*?--test-concurrency=1[\s\S]*?test\/component\/real-pi-child-recovery\.test\.ts[\s\S]*?;;\n {2}immutable-failures\)/u
+  )
   assert.match(gateScript, /scripts\/check-command-transcripts\.ts/u)
   assert.match(gateScript, /npm --version/u)
   assert.match(gateScript, /cp -a package\.json tsconfig\.json tsup\.config\.ts src/u)

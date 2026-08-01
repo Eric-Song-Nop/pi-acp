@@ -42,6 +42,7 @@ test('PiAcpAgent: newSession returns AUTH_REQUIRED when pi reports an auth error
 
   const session = {
     sessionId: 's-auth',
+    sessionFile,
     cwd: process.cwd(),
     proc: {
       async getAvailableModels() {

@@ -13,23 +13,112 @@ export class PiRpcSpawnError extends Error {
   /** Stable spawn/diagnostic code, e.g. ENOENT or PI_EXTENSION_LOAD_FAILED. */
   code?: string
   readonly diagnostic?: Readonly<PiStartupDiagnostic>
+  /** Internal cleanup handle for any failed spawn whose direct-child termination remains unconfirmed. */
+  readonly candidate?: PiRpcProcess
 
-  constructor(message: string, opts?: { code?: string; cause?: unknown; diagnostic?: Readonly<PiStartupDiagnostic> }) {
+  constructor(
+    message: string,
+    opts?: {
+      code?: string
+      cause?: unknown
+      diagnostic?: Readonly<PiStartupDiagnostic>
+      candidate?: PiRpcProcess
+    }
+  ) {
     super(message)
     this.name = 'PiRpcSpawnError'
     this.code = opts?.code
     this.diagnostic = opts?.diagnostic
+    if (opts?.candidate) {
+      Object.defineProperty(this, 'candidate', {
+        value: opts.candidate,
+        enumerable: false,
+        configurable: false,
+        writable: false
+      })
+    }
     ;(this as any).cause = opts?.cause
   }
 }
 
+export const PI_RPC_PROCESS_TERMINATED_CODE = 'PI_RPC_PROCESS_TERMINATED' as const
+export const PI_RPC_PROCESS_CLEANUP_UNCONFIRMED_CODE = 'PI_RPC_PROCESS_CLEANUP_UNCONFIRMED' as const
+export const PI_RPC_HANDSHAKE_TIMEOUT_CODE = 'PI_RPC_HANDSHAKE_TIMEOUT' as const
+export const PI_RPC_HANDSHAKE_FAILED_CODE = 'PI_RPC_HANDSHAKE_FAILED' as const
+
+export type PiRpcProcessTerminationCause =
+  | 'exit'
+  | 'process_error'
+  | 'stdin_write_failure'
+  | 'stdin_closed'
+  | 'stdout_eof'
+  | 'stdout_error'
+  | 'stopped'
+
+export type PiRpcProcessTerminatedData = Readonly<{
+  code: typeof PI_RPC_PROCESS_TERMINATED_CODE
+  piAcp: Readonly<{
+    process: Readonly<{
+      state: 'terminated'
+      cause: PiRpcProcessTerminationCause
+      exitCode?: number
+      signal?: NodeJS.Signals
+    }>
+    recovery: Readonly<{
+      strategy: 'restore_session_on_next_request'
+      automaticReplay: false
+    }>
+    diagnostic?: Readonly<PiStartupDiagnostic>
+  }>
+}>
+
 export class PiRpcProcessTerminatedError extends Error {
+  readonly code = PI_RPC_PROCESS_TERMINATED_CODE
+  readonly data: PiRpcProcessTerminatedData
+
   constructor(
     message: string,
-    readonly diagnostic?: Readonly<PiStartupDiagnostic>
+    readonly diagnostic?: Readonly<PiStartupDiagnostic>,
+    cause: {
+      kind: PiRpcProcessTerminationCause
+      code?: number | null
+      signal?: NodeJS.Signals | null
+    } = { kind: 'exit' }
   ) {
     super(message)
     this.name = 'PiRpcProcessTerminatedError'
+    const processData = Object.freeze({
+      state: 'terminated' as const,
+      cause: cause.kind,
+      ...(typeof cause.code === 'number' ? { exitCode: cause.code } : {}),
+      ...(cause.signal ? { signal: cause.signal } : {})
+    })
+    const recovery = Object.freeze({
+      strategy: 'restore_session_on_next_request' as const,
+      automaticReplay: false as const
+    })
+    this.data = Object.freeze({
+      code: PI_RPC_PROCESS_TERMINATED_CODE,
+      piAcp: Object.freeze({
+        process: processData,
+        recovery,
+        ...(diagnostic ? { diagnostic } : {})
+      })
+    })
+  }
+}
+
+export function piRpcProcessTerminatedErrorData(error: PiRpcProcessTerminatedError): PiRpcProcessTerminatedData {
+  return error.data
+}
+
+export class PiRpcProcessCleanupError extends Error {
+  readonly code = PI_RPC_PROCESS_CLEANUP_UNCONFIRMED_CODE
+  readonly data = Object.freeze({ code: PI_RPC_PROCESS_CLEANUP_UNCONFIRMED_CODE })
+
+  constructor() {
+    super('Pi process cleanup could not be confirmed after bounded graceful, TERM, and KILL attempts.')
+    this.name = 'PiRpcProcessCleanupError'
   }
 }
 
@@ -102,13 +191,19 @@ type SpawnParams = {
   piCommand?: string
   /** If set, pi will persist the session to this exact file (via `--session <path>`). */
   sessionPath?: string
+  /** Optional restore-only bound; the default startup behavior remains unchanged. */
+  handshakeTimeoutMs?: number
 }
 
 type PiRpcTerminalCause = {
+  kind: PiRpcProcessTerminationCause
   code?: number | null
   signal?: NodeJS.Signals | null
   error?: unknown
 }
+
+class PiRpcHandshakeTimedOut extends Error {}
+class PiRpcHandshakeMissingState extends Error {}
 
 export class PiRpcProcess {
   private readonly child: ChildProcessWithoutNullStreams
@@ -117,6 +212,7 @@ export class PiRpcProcess {
   private readonly preludeLines: string[] = []
   private readonly startupDiagnosticCapture: PiStartupDiagnosticCapture
   private startupComplete = false
+  private terminalTriggered = false
   private terminalError: PiRpcProcessTerminatedError | undefined
   private terminalPromise: Promise<PiRpcProcessTerminatedError> | undefined
   private terminalCause: PiRpcTerminalCause | undefined
@@ -125,6 +221,14 @@ export class PiRpcProcess {
   private terminalCauseLocked = false
   private stdinFailurePromise: Promise<PiRpcProcessTerminatedError> | undefined
   private stdinErrorListener: ((error: Error) => void) | undefined
+  private readonly terminalHandlers = new Set<(error: PiRpcProcessTerminatedError) => void>()
+  private terminalPublished = false
+  private stdoutQuarantined = false
+  private teardownPromise: Promise<void> | undefined
+  private stopPromise: Promise<void> | undefined
+  private spawnErrorObserved = false
+  private startupHandshakeState: unknown
+  private startupHandshakeSucceeded = false
 
   private constructor(
     child: ChildProcessWithoutNullStreams,
@@ -144,11 +248,19 @@ export class PiRpcProcess {
     }
     child.stdin.on('error', this.stdinErrorListener)
     child.stdin.once('close', () => {
+      this.beginTerminal({ kind: 'stdin_closed' }, { provisional: true })
       this.detachStdinErrorListener()
     })
 
     const rl = readline.createInterface({ input: child.stdout })
+    rl.on('error', error => {
+      this.stdoutQuarantined = true
+      this.beginTerminal({ kind: 'stdout_error', error }, { provisional: true })
+    })
     rl.on('line', line => {
+      // Observation order is authoritative: once a terminal trigger wins, even
+      // bytes written earlier but delivered to readline later are quarantined.
+      if (this.stdoutQuarantined) return
       if (!line.trim()) return
       let msg: any
       try {
@@ -171,9 +283,33 @@ export class PiRpcProcess {
             return
           }
         }
+        // Unknown, duplicate, or malformed responses are transport records,
+        // never Pi events. Do not leak them into ACP session event handling.
+        return
       }
 
-      for (const h of this.eventHandlers) h(msg as PiRpcEvent)
+      // Snapshot the subscribers for deterministic same-line delivery, but
+      // re-check the synchronous terminal latch before every callback. A
+      // handler may call stop(), which must quarantine the remainder of this
+      // line just like any later stdout callback.
+      const handlers = [...this.eventHandlers]
+      for (const handler of handlers) {
+        if (this.terminalTriggered) break
+        handler(msg as PiRpcEvent)
+      }
+    })
+
+    child.stdout.once('end', () => {
+      this.stdoutQuarantined = true
+      this.beginTerminal({ kind: 'stdout_eof' }, { provisional: true })
+    })
+    child.stdout.once('close', () => {
+      this.stdoutQuarantined = true
+      this.beginTerminal({ kind: 'stdout_eof' }, { provisional: true })
+    })
+    child.stdout.once('error', error => {
+      this.stdoutQuarantined = true
+      this.beginTerminal({ kind: 'stdout_error', error }, { provisional: true })
     })
 
     child.stderr.on('data', chunk => {
@@ -181,15 +317,23 @@ export class PiRpcProcess {
     })
 
     child.on('exit', (code, signal) => {
-      this.beginTerminal({ code, signal })
+      this.beginTerminal({ kind: 'exit', code, signal })
     })
 
     child.on('error', error => {
-      this.beginTerminal({ error })
+      if (typeof child.pid !== 'number') this.spawnErrorObserved = true
+      this.beginTerminal({ kind: 'process_error', error })
     })
   }
 
   static async spawn(params: SpawnParams): Promise<PiRpcProcess> {
+    if (
+      params.handshakeTimeoutMs !== undefined &&
+      (!Number.isFinite(params.handshakeTimeoutMs) || params.handshakeTimeoutMs <= 0)
+    ) {
+      throw new RangeError('handshakeTimeoutMs must be a finite positive number')
+    }
+
     // On Windows, npm commonly creates pi.cmd / pi.bat launcher scripts.
     const cmd = getPiCommand(params.piCommand)
 
@@ -255,7 +399,12 @@ export class PiRpcProcess {
     // that is created lazily. Create the parent dir up-front to avoid later parse errors
     // when we call commands like export_html.
     try {
-      const state = (await proc.getState()) as any
+      const state = (await withOptionalHandshakeTimeout(proc.getState(), params.handshakeTimeoutMs)) as any
+      if (state === null || state === undefined) {
+        throw new PiRpcHandshakeMissingState('Pi RPC startup handshake returned no state.')
+      }
+      proc.startupHandshakeState = state
+      proc.startupHandshakeSucceeded = true
       const sessionFile = typeof state?.sessionFile === 'string' ? state.sessionFile : null
       if (sessionFile) {
         const { mkdirSync } = await import('node:fs')
@@ -263,12 +412,37 @@ export class PiRpcProcess {
         mkdirSync(dirname(sessionFile), { recursive: true })
       }
     } catch (error) {
+      if (error instanceof PiRpcHandshakeTimedOut) {
+        let cause: unknown = error
+        let candidate: PiRpcProcess | undefined
+        try {
+          await proc.stop()
+        } catch (cleanupError) {
+          cause = cleanupError
+          candidate = proc
+        }
+        throw new PiRpcSpawnError('Pi RPC startup handshake timed out before get_state completed.', {
+          code: PI_RPC_HANDSHAKE_TIMEOUT_CODE,
+          cause,
+          candidate
+        })
+      }
+
       const terminal = await proc.preferTerminalError(error)
-      if (terminal?.diagnostic) {
-        throw new PiRpcSpawnError(terminal.diagnostic.summary, {
-          code: terminal.diagnostic.code,
-          cause: terminal,
-          diagnostic: terminal.diagnostic
+      if (terminal) throw proc.toSpawnError(terminal)
+      if (params.handshakeTimeoutMs !== undefined) {
+        let cause: unknown = error
+        let candidate: PiRpcProcess | undefined
+        try {
+          await proc.stop()
+        } catch (cleanupError) {
+          cause = cleanupError
+          candidate = proc
+        }
+        throw new PiRpcSpawnError('Pi RPC startup handshake failed before get_state completed.', {
+          code: PI_RPC_HANDSHAKE_FAILED_CODE,
+          cause,
+          candidate
         })
       }
       // A live Pi may reject get_state while still accepting later RPC requests.
@@ -276,19 +450,14 @@ export class PiRpcProcess {
 
     if (!proc.terminalPromise && proc.hasExited()) {
       proc.beginTerminal({
+        kind: 'exit',
         code: child.exitCode,
         signal: child.signalCode
       })
     }
     if (proc.terminalPromise) {
       const terminal = await proc.terminalPromise
-      if (terminal.diagnostic) {
-        throw new PiRpcSpawnError(terminal.diagnostic.summary, {
-          code: terminal.diagnostic.code,
-          cause: terminal,
-          diagnostic: terminal.diagnostic
-        })
-      }
+      throw proc.toSpawnError(terminal)
     }
 
     proc.startupComplete = true
@@ -297,19 +466,88 @@ export class PiRpcProcess {
   }
 
   onEvent(handler: (ev: PiRpcEvent) => void): () => void {
+    if (this.terminalTriggered) return () => undefined
     this.eventHandlers.push(handler)
     return () => {
       this.eventHandlers = this.eventHandlers.filter(h => h !== handler)
     }
   }
 
-  dispose(signal: NodeJS.Signals | number = 'SIGTERM'): void {
-    if (this.child.killed) return
-    try {
-      this.child.kill(signal as any)
-    } catch {
-      // ignore
+  /**
+   * Subscribe to the single terminal transition. A late subscriber receives the
+   * exact cached error on a microtask, so constructor-time subscriptions and
+   * restoration races cannot miss the transition.
+   */
+  onTerminal(handler: (error: PiRpcProcessTerminatedError) => void): () => void {
+    let active = true
+    if (this.terminalPublished && this.terminalError) {
+      const error = this.terminalError
+      queueMicrotask(() => {
+        if (!active) return
+        try {
+          handler(error)
+        } catch {
+          // A lifecycle observer must not destabilize transport cleanup.
+        }
+      })
+    } else {
+      this.terminalHandlers.add(handler)
     }
+
+    return () => {
+      active = false
+      this.terminalHandlers.delete(handler)
+    }
+  }
+
+  /** Synchronous conservative liveness check used before accepting fresh work. */
+  isAlive(): boolean {
+    if (this.terminalTriggered || this.stdinFailurePromise || this.stopPromise) return false
+
+    if (this.hasExited()) {
+      this.beginTerminal({
+        kind: 'exit',
+        code: this.child.exitCode,
+        signal: this.child.signalCode
+      })
+      return false
+    }
+
+    if (this.child.stdin.destroyed || this.child.stdin.writableEnded) {
+      this.beginTerminal({ kind: 'stdin_closed' }, { provisional: true })
+      return false
+    }
+
+    if (this.child.stdout.destroyed || this.child.stdout.readableEnded) {
+      this.stdoutQuarantined = true
+      this.beginTerminal({ kind: 'stdout_eof' }, { provisional: true })
+      return false
+    }
+
+    return true
+  }
+
+  /**
+   * Gracefully closes stdin, then applies bounded TERM/KILL escalation to the
+   * direct Pi child. Pi inherits the adapter process group so the outer ACP
+   * harness remains the containment boundary for the whole tree.
+   */
+  stop(): Promise<void> {
+    if (!this.stopPromise) {
+      if (!this.terminalTriggered) this.beginTerminal({ kind: 'stopped' }, { provisional: true })
+      const attempt = this.ensureChildStopped()
+      this.stopPromise = attempt
+      const clearAttempt = (): void => {
+        if (this.stopPromise === attempt) this.stopPromise = undefined
+      }
+      void attempt.then(clearAttempt, clearAttempt)
+    }
+    return this.stopPromise
+  }
+
+  /** @deprecated Prefer awaiting stop(). */
+  dispose(_signal: NodeJS.Signals | number = 'SIGTERM'): void {
+    void this.stop().catch(() => undefined)
   }
 
   /**
@@ -319,6 +557,11 @@ export class PiRpcProcess {
   consumePreludeLines(): string[] {
     const lines = this.preludeLines.splice(0, this.preludeLines.length)
     return lines
+  }
+
+  /** Exact successful get_state captured by spawn(); no caller can replace it. */
+  getStartupHandshakeState(): unknown | undefined {
+    return this.startupHandshakeSucceeded ? this.startupHandshakeState : undefined
   }
 
   async prompt(message: string, images: unknown[] = []): Promise<void> {
@@ -415,6 +658,12 @@ export class PiRpcProcess {
   }
 
   private request(cmd: PiRpcCommand): Promise<PiRpcResponse> {
+    if (this.terminalTriggered) {
+      return this.terminalPromise!.then(error => {
+        throw error
+      })
+    }
+
     const id = crypto.randomUUID()
     const withId = { ...cmd, id }
 
@@ -424,15 +673,16 @@ export class PiRpcProcess {
       this.pending.set(id, { resolve, reject })
 
       void this.writeLine(line).catch(error => {
-        this.pending.delete(id)
-        reject(error)
+        // The terminal publisher normally rejects every entry together. The
+        // fallback covers a response racing this individual write failure.
+        if (this.pending.delete(id)) reject(error)
       })
     })
   }
 
   private writeLine(line: string): Promise<void> {
     return (async () => {
-      if (this.terminalPromise) throw await this.terminalPromise
+      if (this.terminalTriggered) throw await this.terminalPromise!
       if (this.stdinFailurePromise) throw await this.stdinFailurePromise
 
       try {
@@ -451,16 +701,16 @@ export class PiRpcProcess {
           }
         })
       } catch (error) {
-        throw (await this.preferTerminalError(error)) ?? error
+        // Every failed write poisons the channel, not only platform-specific
+        // EPIPE spellings. A write may have been partially accepted, so it is
+        // never safe to replay the operation automatically.
+        throw await this.beginStdinFailure(error)
       }
     })()
   }
 
-  private beginTerminal(
-    cause: PiRpcTerminalCause,
-    options: { provisional?: boolean; teardownLiveChild?: boolean } = {}
-  ): void {
-    if (this.terminalPromise) {
+  private beginTerminal(cause: PiRpcTerminalCause, options: { provisional?: boolean } = {}): void {
+    if (this.terminalTriggered) {
       if (this.terminalCauseMayUpgrade && !this.terminalCauseLocked && !options.provisional) {
         this.terminalCause = cause
         this.terminalCauseUpgraded = true
@@ -468,45 +718,70 @@ export class PiRpcProcess {
       return
     }
 
+    // Phase one is synchronous. Whichever observation reaches this method
+    // first fences all writes and stdout callbacks and detaches the exact raw
+    // requests that the terminal record owns. A response that removed its ID
+    // before this point has already won; buffered bytes delivered later lose.
+    this.terminalTriggered = true
+    this.stdoutQuarantined = true
+    this.eventHandlers = []
+    const terminalPending = [...this.pending.values()]
+    this.pending.clear()
+
     const duringStartup = !this.startupComplete
     this.terminalCause = cause
     this.terminalCauseMayUpgrade = options.provisional === true
-    this.terminalPromise = (async () => {
-      if (duringStartup) {
-        await this.waitForStderrDrain()
-        await this.waitForProvisionalCauseUpgrade()
-        // If a real child terminal event replaced the provisional transport
-        // failure, give that authoritative event its own bounded stderr drain.
-        // The first window may have expired before the exit and must not count
-        // against the drain promised for the upgraded cause.
-        if (this.terminalCauseMayUpgrade && this.terminalCauseUpgraded) {
-          await this.waitForStderrDrain()
-        }
-      }
 
-      this.terminalCauseLocked = true
-      const resolvedCause = this.terminalCause ?? cause
-      // Broken-pipe metadata is an internal arbitration trigger, not a useful Pi
-      // startup diagnosis. Only publish it when a real child exit/error upgraded
-      // the provisional cause; otherwise use the safe generic fallback.
-      const publicCause = this.terminalCauseMayUpgrade && !this.terminalCauseUpgraded ? {} : resolvedCause
-      const diagnostic = duringStartup ? this.startupDiagnosticCapture.finalize(publicCause) : undefined
-      const error = new PiRpcProcessTerminatedError(
-        diagnostic?.summary ??
-          `pi process exited (code=${String(publicCause.code ?? null)}, signal=${String(publicCause.signal ?? null)})`,
-        diagnostic
-      )
-      this.terminalError = error
-      if (options.teardownLiveChild) await this.terminateLiveChild()
-      for (const [, pending] of this.pending) pending.reject(error)
-      this.pending.clear()
-      return error
-    })()
+    let resolveTerminal!: (error: PiRpcProcessTerminatedError) => void
+    this.terminalPromise = new Promise(resolve => {
+      resolveTerminal = resolve
+    })
+    void this.finalizeTerminal(cause, duringStartup, terminalPending).then(resolveTerminal)
+
+    // Cleanup is intentionally independent from publication. Consumers learn
+    // the causal error without waiting for graceful/TERM/KILL arbitration, while
+    // stop() can separately require confirmed direct-child termination.
+    void this.ensureChildStopped().catch(() => undefined)
+  }
+
+  private async finalizeTerminal(
+    initialCause: PiRpcTerminalCause,
+    duringStartup: boolean,
+    terminalPending: Array<{ resolve: (v: PiRpcResponse) => void; reject: (e: unknown) => void }>
+  ): Promise<PiRpcProcessTerminatedError> {
+    if (duringStartup) {
+      await this.waitForStderrDrain()
+      await this.waitForProvisionalCauseUpgrade()
+      // If a real child terminal event replaced the provisional transport
+      // failure, give that authoritative event its own bounded stderr drain.
+      if (this.terminalCauseMayUpgrade && this.terminalCauseUpgraded) {
+        await this.waitForStderrDrain()
+      }
+    }
+
+    this.terminalCauseLocked = true
+    const resolvedCause = this.terminalCause ?? initialCause
+    // Broken-pipe metadata is an internal arbitration trigger, not a useful Pi
+    // startup diagnosis. Only publish it when a real child exit/error upgraded
+    // the provisional cause; otherwise use the safe generic fallback.
+    const diagnosticCause = this.terminalCauseMayUpgrade && !this.terminalCauseUpgraded ? {} : resolvedCause
+    const diagnostic = duringStartup ? this.startupDiagnosticCapture.finalize(diagnosticCause) : undefined
+    const error = new PiRpcProcessTerminatedError(
+      diagnostic?.summary ??
+        'Pi process terminated before the RPC operation completed. The operation was not replayed; start a new request to restore the session.',
+      diagnostic,
+      resolvedCause
+    )
+    this.terminalError = error
+    this.publishTerminal(error)
+    for (const pending of terminalPending) pending.reject(error)
+    return error
   }
 
   private async preferTerminalError(error: unknown): Promise<PiRpcProcessTerminatedError | undefined> {
     if (!this.terminalPromise && this.hasExited()) {
       this.beginTerminal({
+        kind: 'exit',
         code: this.child.exitCode,
         signal: this.child.signalCode
       })
@@ -519,19 +794,27 @@ export class PiRpcProcess {
     return this.terminalPromise ? await this.terminalPromise : this.terminalError
   }
 
+  private toSpawnError(terminal: PiRpcProcessTerminatedError): PiRpcSpawnError {
+    return new PiRpcSpawnError(terminal.diagnostic?.summary ?? terminal.message, {
+      code: terminal.diagnostic?.code ?? terminal.code,
+      cause: terminal,
+      diagnostic: terminal.diagnostic,
+      candidate: this.hasConfirmedTermination() ? undefined : this
+    })
+  }
+
   private beginStdinFailure(error: unknown): Promise<PiRpcProcessTerminatedError> {
     if (!this.stdinFailurePromise) {
       this.stdinFailurePromise = (async () => {
-        if (!this.terminalPromise) await this.waitForTerminalSignal()
-
-        if (!this.terminalPromise) {
+        if (!this.terminalTriggered) {
           this.beginTerminal(
             {
+              kind: 'stdin_write_failure',
               code: this.child.exitCode,
               signal: this.child.signalCode,
               error
             },
-            { provisional: true, teardownLiveChild: true }
+            { provisional: true }
           )
         }
 
@@ -552,42 +835,42 @@ export class PiRpcProcess {
     return this.child.exitCode !== null || this.child.signalCode !== null
   }
 
-  private async waitForTerminalSignal(): Promise<void> {
-    if (this.terminalPromise || this.hasExited()) return
+  private ensureChildStopped(): Promise<void> {
+    if (!this.teardownPromise) {
+      const attempt = (async () => {
+        if (this.hasConfirmedTermination()) return
 
-    await new Promise<void>(resolve => {
-      let settled = false
-      const finish = (): void => {
-        if (settled) return
-        settled = true
-        clearTimeout(timer)
-        this.child.off('exit', finish)
-        this.child.off('error', finish)
-        resolve()
+        this.closeStdinGracefully()
+        await this.waitForChildTermination(PI_STDIN_TERMINATION_TIMEOUT_MS)
+        if (this.hasConfirmedTermination()) return
+
+        this.killChild('SIGTERM')
+        await this.waitForChildTermination(PI_STDIN_TERMINATION_TIMEOUT_MS)
+        if (this.hasConfirmedTermination()) return
+
+        this.killChild('SIGKILL')
+        await this.waitForChildTermination(PI_STDIN_TERMINATION_TIMEOUT_MS)
+        if (!this.hasConfirmedTermination()) throw new PiRpcProcessCleanupError()
+      })()
+      this.teardownPromise = attempt
+      const clearAttempt = (): void => {
+        if (this.teardownPromise === attempt) this.teardownPromise = undefined
       }
-      const timer = setTimeout(finish, PI_STARTUP_STDERR_DRAIN_TIMEOUT_MS)
-      timer.unref()
-      this.child.once('exit', finish)
-      this.child.once('error', finish)
-    })
-
-    if (!this.terminalPromise && this.hasExited()) {
-      this.beginTerminal({
-        code: this.child.exitCode,
-        signal: this.child.signalCode
-      })
+      void attempt.then(clearAttempt, clearAttempt)
     }
+    return this.teardownPromise
   }
 
-  private async terminateLiveChild(): Promise<void> {
-    if (this.hasExited()) return
-
-    this.killChild('SIGTERM')
-    await this.waitForChildExit(PI_STDIN_TERMINATION_TIMEOUT_MS)
-    if (this.hasExited()) return
-
-    this.killChild('SIGKILL')
-    await this.waitForChildExit(PI_STDIN_TERMINATION_TIMEOUT_MS)
+  private closeStdinGracefully(): void {
+    if (this.child.stdin.destroyed || this.child.stdin.writableEnded) return
+    try {
+      this.child.stdin.end()
+    } catch (error) {
+      // The terminal transition has already been claimed. Preserve its cached
+      // public error while still consuming a synchronous stream failure.
+      const failure = this.beginStdinFailure(error)
+      void failure.catch(() => undefined)
+    }
   }
 
   private async waitForProvisionalCauseUpgrade(): Promise<void> {
@@ -613,6 +896,7 @@ export class PiRpcProcess {
 
     if (!this.terminalCauseUpgraded && this.hasExited()) {
       this.terminalCause = {
+        kind: 'exit',
         code: this.child.exitCode,
         signal: this.child.signalCode
       }
@@ -628,8 +912,12 @@ export class PiRpcProcess {
     }
   }
 
-  private async waitForChildExit(timeoutMs: number): Promise<void> {
-    if (this.hasExited()) return
+  private hasConfirmedTermination(): boolean {
+    return this.spawnErrorObserved || this.hasExited()
+  }
+
+  private async waitForChildTermination(timeoutMs: number): Promise<void> {
+    if (this.hasConfirmedTermination()) return
 
     await new Promise<void>(resolve => {
       let settled = false
@@ -669,10 +957,41 @@ export class PiRpcProcess {
       this.child.stderr.once('error', finish)
     })
   }
+
+  private publishTerminal(error: PiRpcProcessTerminatedError): void {
+    if (this.terminalPublished) return
+    this.terminalPublished = true
+    const handlers = [...this.terminalHandlers]
+    this.terminalHandlers.clear()
+    for (const handler of handlers) {
+      try {
+        handler(error)
+      } catch {
+        // Lifecycle observers are isolated from transport finalization.
+      }
+    }
+  }
 }
 
 function isBrokenPipeError(error: unknown): boolean {
   if (!error || typeof error !== 'object') return false
   const code = 'code' in error ? (error as { code?: unknown }).code : undefined
   return code === 'EPIPE' || code === 'ERR_STREAM_DESTROYED' || code === 'ERR_INVALID_STATE'
+}
+
+async function withOptionalHandshakeTimeout<T>(promise: Promise<T>, timeoutMs: number | undefined): Promise<T> {
+  if (timeoutMs === undefined) return await promise
+
+  let timer: NodeJS.Timeout | undefined
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(() => reject(new PiRpcHandshakeTimedOut()), timeoutMs)
+        timer.unref()
+      })
+    ])
+  } finally {
+    if (timer) clearTimeout(timer)
+  }
 }

@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { mkdtempSync, mkdirSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { PiAcpAgent } from '../../src/acp/agent.js'
+import { PiAcpAgent, SESSION_RECOVERY_HANDSHAKE_TIMEOUT_MS } from '../../src/acp/agent.js'
 import { PiRpcProcess } from '../../src/pi-rpc/process.js'
 import { FakeAgentSideConnection, asAgentConn } from '../helpers/fakes.js'
 
@@ -26,6 +26,9 @@ class FakeSessions {
 
 test('PiAcpAgent: prompt auto-restores a missing session from SessionStore', async () => {
   const conn = new FakeAgentSideConnection()
+  const cwd = mkdtempSync(join(tmpdir(), 'pi-acp-stored-session-'))
+  const sessionFile = join(cwd, 'session.jsonl')
+  writeFileSync(sessionFile, JSON.stringify({ type: 'session', version: 3, id: 'stored-session', cwd }) + '\n', 'utf8')
   const promptCalls: Array<{ message: string; images: unknown[] }> = []
   const spawnCalls: any[] = []
   const storeUpserts: any[] = []
@@ -47,8 +50,15 @@ test('PiAcpAgent: prompt auto-restores a missing session from SessionStore', asy
   const originalSpawn = PiRpcProcess.spawn
   ;(PiRpcProcess as any).spawn = async (params: any) => {
     spawnCalls.push(params)
+    const state = {
+      sessionId: 'stored-session',
+      sessionFile
+    }
     return {
-      onEvent: () => () => {}
+      onEvent: () => () => {},
+      isAlive: () => true,
+      getStartupHandshakeState: () => state,
+      getState: async () => state
     } as any
   }
 
@@ -60,8 +70,8 @@ test('PiAcpAgent: prompt auto-restores a missing session from SessionStore', asy
         if (sessionId !== 'stored-session') return null
         return {
           sessionId,
-          cwd: '/tmp/store-project',
-          sessionFile: '/tmp/store-project/session.jsonl',
+          cwd,
+          sessionFile,
           updatedAt: new Date().toISOString()
         }
       },
@@ -78,17 +88,18 @@ test('PiAcpAgent: prompt auto-restores a missing session from SessionStore', asy
     assert.equal(result.stopReason, 'end_turn')
     assert.deepEqual(spawnCalls, [
       {
-        cwd: '/tmp/store-project',
-        sessionPath: '/tmp/store-project/session.jsonl',
-        piCommand: process.env.PI_ACP_PI_COMMAND
+        cwd,
+        sessionPath: sessionFile,
+        piCommand: process.env.PI_ACP_PI_COMMAND,
+        handshakeTimeoutMs: SESSION_RECOVERY_HANDSHAKE_TIMEOUT_MS
       }
     ])
     assert.deepEqual(promptCalls, [{ message: 'hello again', images: [] }])
     assert.deepEqual(storeUpserts, [
       {
         sessionId: 'stored-session',
-        cwd: '/tmp/store-project',
-        sessionFile: '/tmp/store-project/session.jsonl'
+        cwd,
+        sessionFile
       }
     ])
   } finally {
@@ -122,6 +133,8 @@ test('PiAcpAgent: setSessionConfigOption auto-restores via pi session discovery 
   const setModelCalls: Array<{ provider: string; modelId: string }> = []
   const spawnCalls: any[] = []
   const state = {
+    sessionId: 'fallback-session',
+    sessionFile,
     thinkingLevel: 'medium',
     model: { provider: 'test', id: 'alpha' }
   }
@@ -137,12 +150,14 @@ test('PiAcpAgent: setSessionConfigOption auto-restores via pi session discovery 
     spawnCalls.push(params)
     return {
       onEvent: () => () => {},
+      isAlive: () => true,
       getAvailableModels: async () => ({
         models: [
           { provider: 'test', id: 'alpha', name: 'Alpha' },
           { provider: 'test', id: 'beta', name: 'Beta' }
         ]
       }),
+      getStartupHandshakeState: () => state,
       getState: async () => state,
       async setModel(provider: string, modelId: string) {
         setModelCalls.push({ provider, modelId })
@@ -154,12 +169,14 @@ test('PiAcpAgent: setSessionConfigOption auto-restores via pi session discovery 
   try {
     const agent = new PiAcpAgent(asAgentConn(conn), {} as any)
     ;(agent as any).sessions = sessions as any
+    let storedEntry: any = null
     ;(agent as any).store = {
       get() {
-        return null
+        return storedEntry
       },
       upsert(entry: any) {
         storeUpserts.push(entry)
+        storedEntry = { ...entry, updatedAt: new Date(0).toISOString() }
       }
     }
 
@@ -173,7 +190,8 @@ test('PiAcpAgent: setSessionConfigOption auto-restores via pi session discovery 
       {
         cwd: '/tmp/fallback-project',
         sessionPath: sessionFile,
-        piCommand: process.env.PI_ACP_PI_COMMAND
+        piCommand: process.env.PI_ACP_PI_COMMAND,
+        handshakeTimeoutMs: SESSION_RECOVERY_HANDSHAKE_TIMEOUT_MS
       }
     ])
     assert.deepEqual(setModelCalls, [{ provider: 'test', modelId: 'beta' }])

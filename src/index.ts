@@ -1,5 +1,8 @@
 import { AgentSideConnection, ndJsonStream } from '@agentclientprotocol/sdk'
 import { PiAcpAgent } from './acp/agent.js'
+import { createAdapterOutputGate } from './adapter-output.js'
+import { createAdapterShutdown } from './adapter-shutdown.js'
+import { bindAdapterShutdownTriggers, createAdapterInputStream } from './adapter-transport.js'
 import { getPiCommand, shouldUseShellForPiCommand } from './pi-rpc/command.js'
 // Terminal Auth entrypoint. The ACP client launches the agent with `--terminal-login`.
 if (process.argv.includes('--terminal-login')) {
@@ -21,62 +24,32 @@ if (process.argv.includes('--terminal-login')) {
   process.exit(typeof res.status === 'number' ? res.status : 1)
 }
 
+const adapterOutput = createAdapterOutputGate(process.stdout)
+let acpAgent: PiAcpAgent | undefined
+const requestShutdown = createAdapterShutdown({
+  fenceOutput: () => adapterOutput.fence(),
+  dispose: () => acpAgent?.dispose(),
+  exit: () => process.exit(0)
+})
+
+function shutdown(): void {
+  void requestShutdown()
+}
+
 const input = new WritableStream<Uint8Array>({
-  write(chunk) {
-    return new Promise<void>(resolve => {
-      if ((process.stdout as any).destroyed || !process.stdout.writable) return resolve()
-
-      try {
-        process.stdout.write(chunk, err => {
-          void err
-          resolve()
-        })
-      } catch {
-        // Common: ERR_STREAM_DESTROYED ("Cannot call write after a stream was destroyed").
-        resolve()
-      }
-    })
-  }
+  write: chunk => adapterOutput.write(chunk)
 })
 
-const output = new ReadableStream<Uint8Array>({
-  start(controller) {
-    process.stdin.on('data', (chunk: Buffer) => controller.enqueue(new Uint8Array(chunk)))
-    process.stdin.on('end', () => controller.close())
-    process.stdin.on('error', err => controller.error(err))
-  }
-})
+const output = createAdapterInputStream(process.stdin, shutdown)
 
 const stream = ndJsonStream(input, output)
 
-const agent = new AgentSideConnection(conn => new PiAcpAgent(conn), stream)
-
-function shutdown() {
-  try {
-    // Best-effort: dispose session subprocesses when the client disconnects.
-    ;(agent as any)?.agent?.dispose?.()
-  } catch {
-    // ignore
-  }
-  try {
-    process.exit(0)
-  } catch {
-    // ignore
-  }
-}
-
-process.stdin.on('end', shutdown)
-process.stdin.on('close', shutdown)
+const connection = new AgentSideConnection(conn => {
+  acpAgent = new PiAcpAgent(conn)
+  return acpAgent
+}, stream)
+bindAdapterShutdownTriggers({ output: process.stdout, connectionSignal: connection.signal, shutdown })
 
 process.stdin.resume()
 process.on('SIGINT', shutdown)
 process.on('SIGTERM', shutdown)
-
-// Avoid crashing if the client closes stdout early.
-process.stdout.on('error', () => {
-  try {
-    process.exit(0)
-  } catch {
-    // ignore
-  }
-})
