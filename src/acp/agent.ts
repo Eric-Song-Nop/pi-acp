@@ -43,6 +43,11 @@ import { promptToPiMessage } from './translate/prompt.js'
 import { loadSlashCommands, parseCommandArgs, toAvailableCommands } from './slash-commands.js'
 import { getAgentDir, getEnableSkillCommands, getQuietStartup } from './pi-settings.js'
 import { toAvailableCommandsFromPiGetCommands } from './pi-commands.js'
+import {
+  findUnsupportedPiBuiltinCommand,
+  isUnsupportedPiBuiltinCommand,
+  unsupportedPiBuiltinPromptResponse
+} from './pi-builtin-commands.js'
 import { maybeAuthRequiredError } from './auth-required.js'
 import { isAbsolute } from 'node:path'
 import {
@@ -159,6 +164,7 @@ function mergeCommands(a: AvailableCommand[], b: AvailableCommand[]): AvailableC
   const seen = new Set<string>()
 
   for (const c of [...a, ...b]) {
+    if (isUnsupportedPiBuiltinCommand(c.name)) continue
     if (seen.has(c.name)) continue
     seen.add(c.name)
     out.push(c)
@@ -1020,6 +1026,8 @@ export class PiAcpAgent implements ACPAgent {
     const session = await this.restoreSession(params.sessionId)
 
     const { message, images } = promptToPiMessage(params.prompt)
+    const unsupportedPiBuiltin = findUnsupportedPiBuiltinCommand(message)
+    if (unsupportedPiBuiltin) return unsupportedPiBuiltinPromptResponse(unsupportedPiBuiltin)
 
     // Built-in ACP slash command handling (headless-friendly subset).
     // Note: file-based slash commands are expanded inside session.prompt().

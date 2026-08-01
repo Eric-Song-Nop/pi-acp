@@ -73,6 +73,81 @@ async function waitUntil(predicate: () => boolean, message: string): Promise<voi
   assert.fail(message)
 }
 
+test('PiAcpAgent: C1.5 dead-session recovery completes before unsupported built-in refusal', async () => {
+  const sessionId = 'c1.5-recovered-refusal-session'
+  const stored = makeDurableSession(sessionId)
+  const conn = new FakeAgentSideConnection()
+  const agent = new PiAcpAgent(asAgentConn(conn), {} as any)
+  installStore(agent, sessionId, stored)
+  const old = registerDeadSession(agent, conn, sessionId, stored.cwd)
+  const candidate = new FakePiRpcProcess()
+  configureCandidate(candidate, sessionId, stored.sessionFile)
+  let spawnCount = 0
+  const originalSpawn = PiRpcProcess.spawn
+  ;(PiRpcProcess as any).spawn = async () => {
+    spawnCount += 1
+    return candidate as any
+  }
+
+  try {
+    const result = await agent.prompt({
+      sessionId,
+      prompt: [{ type: 'text', text: '/trust C1_5_RECOVERED_REFUSAL_SECRET' }]
+    } as any)
+
+    assert.equal(result.stopReason, 'refusal')
+    assert.equal((result._meta as any)?.piAcp?.diagnostic?.code, 'PI_ACP_UNSUPPORTED_PI_BUILTIN')
+    assert.equal((result._meta as any)?.piAcp?.diagnostic?.command, 'trust')
+    assert.equal(spawnCount, 1)
+    assert.equal(old.proc.stopCount, 1)
+    assert.equal(candidate.prompts.length, 0)
+    assert.equal((agent as any).sessions.maybeGet(sessionId)?.proc, candidate)
+  } finally {
+    PiRpcProcess.spawn = originalSpawn
+    await agent.dispose()
+  }
+})
+
+test('PiAcpAgent: C1.5 dead-session recovery failure wins over unsupported built-in refusal', async () => {
+  const sessionId = 'c1.5-recovery-failure-refusal-session'
+  const stored = makeDurableSession(sessionId)
+  const conn = new FakeAgentSideConnection()
+  const agent = new PiAcpAgent(asAgentConn(conn), {} as any)
+  installStore(agent, sessionId, stored)
+  const old = registerDeadSession(agent, conn, sessionId, stored.cwd, proc => {
+    proc.stop = async () => {
+      proc.stopCount += 1
+      throw new Error('C1.5 old-generation cleanup remains unconfirmed')
+    }
+  })
+  let spawnCount = 0
+  const originalSpawn = PiRpcProcess.spawn
+  ;(PiRpcProcess as any).spawn = async () => {
+    spawnCount += 1
+    throw new Error('C1.5 must not spawn after unconfirmed old-generation cleanup')
+  }
+
+  try {
+    const error = await agent
+      .prompt({
+        sessionId,
+        prompt: [{ type: 'text', text: '/trust C1_5_RECOVERY_FAILURE_SECRET' }]
+      } as any)
+      .then(
+        () => null,
+        failure => failure
+      )
+
+    assert.equal(error?.code, -32603)
+    assert.equal(error?.data?.code, RECOVERY_CODE)
+    assert.equal(spawnCount, 0)
+    assert.equal((agent as any).sessions.maybeGet(sessionId), old.session)
+  } finally {
+    PiRpcProcess.spawn = originalSpawn
+    await agent.dispose().catch(() => undefined)
+  }
+})
+
 test('PiAcpAgent: concurrent post-terminal requests coalesce one validated generation restore', async () => {
   const sessionId = 'coalesced-session'
   const stored = makeDurableSession(sessionId)

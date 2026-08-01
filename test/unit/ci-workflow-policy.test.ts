@@ -163,9 +163,10 @@ test('the checked-in network and suite scripts make the workflow policy executab
   )
   assert.match(gateScript, /test\/component\/real-pi-agent-turn\.test\.ts/u)
   assert.match(gateScript, /test\/component\/real-pi-extension-load-diagnostics\.test\.ts/u)
+  assert.match(gateScript, /test\/component\/real-pi-builtin-rejection\.test\.ts/u)
   assert.match(
     gateScript,
-    /load-boundaries\)[\s\S]*?--test-concurrency=1[\s\S]*?test\/component\/real-pi-child-recovery\.test\.ts[\s\S]*?;;\n {2}immutable-failures\)/u
+    /load-boundaries\)[\s\S]*?--test-concurrency=1[\s\S]*?test\/component\/real-pi-child-recovery\.test\.ts[\s\S]*?test\/component\/real-pi-builtin-rejection\.test\.ts[\s\S]*?;;\n {2}immutable-failures\)/u
   )
   assert.match(gateScript, /scripts\/check-command-transcripts\.ts/u)
   assert.match(gateScript, /npm --version/u)

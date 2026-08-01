@@ -52,7 +52,8 @@ case "${gate}" in
       test/component/real-pi-lf-jsonl-reader.test.ts \
       test/component/real-pi-extension-load-diagnostics.test.ts \
       test/component/real-pi-extension-error.test.ts \
-      test/component/real-pi-child-recovery.test.ts
+      test/component/real-pi-child-recovery.test.ts \
+      test/component/real-pi-builtin-rejection.test.ts
     ;;
   immutable-failures)
     node --import tsx scripts/check-command-transcripts.ts
