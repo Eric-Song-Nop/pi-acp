@@ -1,13 +1,13 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
-import * as readline from 'node:readline'
 import { getPiCommand, shouldUseShellForPiCommand } from './command.js'
 import {
   PI_STARTUP_STDERR_DRAIN_TIMEOUT_MS,
   PiStartupDiagnosticCapture,
   type PiStartupDiagnostic
 } from './diagnostics.js'
+import { LfJsonlReader } from './lf-jsonl-reader.js'
 
 export class PiRpcSpawnError extends Error {
   /** Stable spawn/diagnostic code, e.g. ENOENT or PI_EXTENSION_LOAD_FAILED. */
@@ -211,6 +211,8 @@ export class PiRpcProcess {
   private eventHandlers: Array<(ev: PiRpcEvent) => void> = []
   private readonly preludeLines: string[] = []
   private readonly startupDiagnosticCapture: PiStartupDiagnosticCapture
+  private readonly stdoutReader: LfJsonlReader
+  private stdoutEndHandled = false
   private startupComplete = false
   private terminalTriggered = false
   private terminalError: PiRpcProcessTerminatedError | undefined
@@ -236,6 +238,7 @@ export class PiRpcProcess {
   ) {
     this.child = child
     this.startupDiagnosticCapture = new PiStartupDiagnosticCapture(diagnosticOptions)
+    this.stdoutReader = new LfJsonlReader(record => this.handleStdoutRecord(record))
 
     // A write callback does not consume the Writable's `error` event. Own stdin's
     // error lifecycle before the first handshake write so EPIPE cannot escape as
@@ -252,63 +255,26 @@ export class PiRpcProcess {
       this.detachStdinErrorListener()
     })
 
-    const rl = readline.createInterface({ input: child.stdout })
-    rl.on('error', error => {
-      this.stdoutQuarantined = true
-      this.beginTerminal({ kind: 'stdout_error', error }, { provisional: true })
-    })
-    rl.on('line', line => {
-      // Observation order is authoritative: once a terminal trigger wins, even
-      // bytes written earlier but delivered to readline later are quarantined.
+    child.stdout.on('data', (chunk: Buffer) => {
+      // The reader checks its state between every record. If a record handler
+      // synchronously terminalizes the process, later records from this same
+      // chunk are discarded before they can cross the C1.3 ordering fence.
       if (this.stdoutQuarantined) return
-      if (!line.trim()) return
-      let msg: any
-      try {
-        msg = JSON.parse(line)
-      } catch {
-        // pi may emit a human-readable prelude on stdout before NDJSON starts.
-        // Capture it so the ACP adapter can surface it on session start.
-        const cleaned = stripAnsi(String(line)).trimEnd()
-        if (cleaned) this.preludeLines.push(cleaned)
-        return
-      }
-
-      if (msg?.type === 'response') {
-        const id = typeof msg.id === 'string' ? msg.id : undefined
-        if (id) {
-          const pending = this.pending.get(id)
-          if (pending) {
-            this.pending.delete(id)
-            pending.resolve(msg as PiRpcResponse)
-            return
-          }
-        }
-        // Unknown, duplicate, or malformed responses are transport records,
-        // never Pi events. Do not leak them into ACP session event handling.
-        return
-      }
-
-      // Snapshot the subscribers for deterministic same-line delivery, but
-      // re-check the synchronous terminal latch before every callback. A
-      // handler may call stop(), which must quarantine the remainder of this
-      // line just like any later stdout callback.
-      const handlers = [...this.eventHandlers]
-      for (const handler of handlers) {
-        if (this.terminalTriggered) break
-        handler(msg as PiRpcEvent)
-      }
+      this.stdoutReader.push(chunk)
     })
 
     child.stdout.once('end', () => {
-      this.stdoutQuarantined = true
-      this.beginTerminal({ kind: 'stdout_eof' }, { provisional: true })
+      this.handleStdoutEnd()
     })
     child.stdout.once('close', () => {
-      this.stdoutQuarantined = true
+      // Normal Readable close follows end; clean EOF already promoted its one
+      // optional final tail. A close without end is abnormal and discards it.
+      if (this.stdoutEndHandled) return
+      this.stdoutReader.discard()
       this.beginTerminal({ kind: 'stdout_eof' }, { provisional: true })
     })
     child.stdout.once('error', error => {
-      this.stdoutQuarantined = true
+      this.stdoutReader.discard()
       this.beginTerminal({ kind: 'stdout_error', error }, { provisional: true })
     })
 
@@ -519,8 +485,11 @@ export class PiRpcProcess {
     }
 
     if (this.child.stdout.destroyed || this.child.stdout.readableEnded) {
-      this.stdoutQuarantined = true
-      this.beginTerminal({ kind: 'stdout_eof' }, { provisional: true })
+      if (this.child.stdout.readableEnded) this.handleStdoutEnd()
+      else {
+        this.stdoutReader.discard()
+        this.beginTerminal({ kind: 'stdout_eof' }, { provisional: true })
+      }
       return false
     }
 
@@ -557,6 +526,65 @@ export class PiRpcProcess {
   consumePreludeLines(): string[] {
     const lines = this.preludeLines.splice(0, this.preludeLines.length)
     return lines
+  }
+
+  private handleStdoutRecord(line: string): boolean {
+    // Observation order is authoritative: once a terminal trigger wins, even
+    // bytes written earlier but delivered by the stream later are quarantined.
+    if (this.stdoutQuarantined || this.terminalTriggered) return false
+    if (!line.trim()) return true
+
+    let msg: any
+    try {
+      msg = JSON.parse(line)
+    } catch {
+      // Pi may emit a human-readable prelude on stdout before JSONL starts.
+      // Capture it so the ACP adapter can surface it on session start.
+      const cleaned = stripAnsi(line).trimEnd()
+      if (cleaned) this.preludeLines.push(cleaned)
+      return !this.terminalTriggered
+    }
+
+    if (msg?.type === 'response') {
+      const id = typeof msg.id === 'string' ? msg.id : undefined
+      if (id) {
+        const pending = this.pending.get(id)
+        if (pending) {
+          this.pending.delete(id)
+          pending.resolve(msg as PiRpcResponse)
+          return !this.terminalTriggered
+        }
+      }
+      // Unknown, duplicate, or malformed responses are transport records,
+      // never Pi events. Do not leak them into ACP session event handling.
+      return !this.terminalTriggered
+    }
+
+    // Snapshot the subscribers for deterministic same-record delivery, but
+    // re-check the synchronous terminal latch before every callback. A handler
+    // may call stop(), which also quarantines later records in the same chunk.
+    const handlers = [...this.eventHandlers]
+    for (const handler of handlers) {
+      if (this.terminalTriggered) break
+      handler(msg as PiRpcEvent)
+    }
+    return !this.terminalTriggered
+  }
+
+  private handleStdoutEnd(): void {
+    if (this.stdoutEndHandled) return
+    this.stdoutEndHandled = true
+
+    if (this.terminalTriggered || this.stdoutQuarantined) {
+      this.stdoutReader.discard()
+      return
+    }
+
+    // Clean end is the sole partial-tail promotion path. decoder.end() applies
+    // normal U+FFFD replacement semantics before the record is synchronously
+    // admitted; only then may stdout_eof claim the remaining pending work.
+    this.stdoutReader.finish()
+    if (!this.terminalTriggered) this.beginTerminal({ kind: 'stdout_eof' }, { provisional: true })
   }
 
   /** Exact successful get_state captured by spawn(); no caller can replace it. */
@@ -724,6 +752,7 @@ export class PiRpcProcess {
     // before this point has already won; buffered bytes delivered later lose.
     this.terminalTriggered = true
     this.stdoutQuarantined = true
+    this.stdoutReader.discard()
     this.eventHandlers = []
     const terminalPending = [...this.pending.values()]
     this.pending.clear()

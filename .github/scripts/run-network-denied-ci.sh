@@ -49,6 +49,7 @@ case "${gate}" in
       test/component/real-pi-fixture-pack.test.ts \
       test/component/c0.7-fixture-boundaries.test.ts \
       test/component/real-pi-agent-turn.test.ts \
+      test/component/real-pi-lf-jsonl-reader.test.ts \
       test/component/real-pi-extension-load-diagnostics.test.ts \
       test/component/real-pi-extension-error.test.ts \
       test/component/real-pi-child-recovery.test.ts

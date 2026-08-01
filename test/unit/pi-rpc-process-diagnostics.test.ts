@@ -19,6 +19,7 @@ import {
   PiRpcProcessCleanupError,
   PiRpcProcessTerminatedError,
   PiRpcSpawnError,
+  type PiRpcEvent,
   piRpcProcessTerminatedErrorData
 } from '../../src/pi-rpc/process.js'
 
@@ -1023,6 +1024,411 @@ test('PiRpcProcess uses response-versus-terminal observation order and quarantin
 
   await runOrder(true)
   await runOrder(false)
+})
+
+test('PiRpcProcess frames nested Pi stdout on LF only while accepting CRLF', async t => {
+  const fixture = await createFakePiFixture()
+  t.after(() => rm(fixture.rootDir, { recursive: true, force: true }))
+  setFixtureEnvironment(t, fixture)
+
+  const child = spawn(process.execPath, [fixture.childPath, '--runtime-term-resistant'], {
+    cwd: fixture.cwd,
+    env: process.env,
+    stdio: 'pipe'
+  }) as ChildProcessWithoutNullStreams
+  t.after(() => {
+    if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL')
+  })
+  await waitForStdoutText(child, 'RUNTIME_TERM_RESISTANT_READY\n')
+  const proc = createRuntimeProcess(child, fixture)
+
+  let requestId = ''
+  ;(child.stdin as any).write = (line: string, callback: (error?: Error | null) => void) => {
+    requestId = String(JSON.parse(line).id)
+    queueMicrotask(() => callback(null))
+    return true
+  }
+
+  const separatorText = 'BEFORE\u2028MIDDLE\u2029AFTER'
+  const pending = proc.getState()
+  assert.notEqual(requestId, '')
+  const responseLine = JSON.stringify({
+    type: 'response',
+    id: requestId,
+    command: 'get_state',
+    success: true,
+    data: { separatorText }
+  })
+  assert.equal(responseLine.includes('\u2028'), true)
+  assert.equal(responseLine.includes('\u2029'), true)
+  child.stdout.emit('data', Buffer.from(`${responseLine}\n`))
+  assert.deepEqual(await withDeadline(pending), { separatorText })
+
+  const events: PiRpcEvent[] = []
+  proc.onEvent(event => events.push(event))
+  const separatorEvent = {
+    type: 'message_update',
+    marker: 'unicode-separators',
+    text: separatorText
+  }
+  const bareCrEvent = '{"type":\r"agent_start","marker":"bare-cr"}\n'
+  const crlfEvent = `${JSON.stringify({ type: 'agent_settled', marker: 'crlf' })}\r\n`
+  child.stdout.emit('data', Buffer.from(`${JSON.stringify(separatorEvent)}\n${bareCrEvent}${crlfEvent}`))
+
+  assert.deepEqual(events, [
+    separatorEvent,
+    { type: 'agent_start', marker: 'bare-cr' },
+    { type: 'agent_settled', marker: 'crlf' }
+  ])
+  await withDeadline(proc.stop())
+})
+
+test('PiRpcProcess preserves blank, prelude, response, and event routing with the LF reader', async t => {
+  const fixture = await createFakePiFixture()
+  t.after(() => rm(fixture.rootDir, { recursive: true, force: true }))
+  setFixtureEnvironment(t, fixture)
+
+  const child = spawn(process.execPath, [fixture.childPath, '--runtime-term-resistant'], {
+    cwd: fixture.cwd,
+    env: process.env,
+    stdio: 'pipe'
+  }) as ChildProcessWithoutNullStreams
+  t.after(() => {
+    if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL')
+  })
+  await waitForStdoutText(child, 'RUNTIME_TERM_RESISTANT_READY\n')
+  const proc = createRuntimeProcess(child, fixture)
+
+  let requestId = ''
+  ;(child.stdin as any).write = (line: string, callback: (error?: Error | null) => void) => {
+    requestId = String(JSON.parse(line).id)
+    queueMicrotask(() => callback(null))
+    return true
+  }
+
+  const events: PiRpcEvent[] = []
+  proc.onEvent(event => events.push(event))
+  const pending = proc.getState()
+  assert.notEqual(requestId, '')
+  const response = {
+    type: 'response',
+    id: requestId,
+    command: 'get_state',
+    success: true,
+    data: { routed: true }
+  }
+  const duplicate = { ...response, data: { duplicate: true } }
+  const unknownResponse = {
+    type: 'response',
+    id: 'unknown-response-id',
+    command: 'get_state',
+    success: true,
+    data: { leaked: true }
+  }
+  const malformedResponse = {
+    type: 'response',
+    command: 'get_state',
+    success: true,
+    data: { leaked: true }
+  }
+  const knownEvent = { type: 'agent_start', marker: 'known-event' }
+  const unknownEvent = { type: 'future_pi_event', marker: 'unknown-event' }
+  const records = [
+    '',
+    '   ',
+    '\u001b[31mstartup banner\u001b[0m',
+    JSON.stringify(response),
+    JSON.stringify(duplicate),
+    JSON.stringify(unknownResponse),
+    JSON.stringify(malformedResponse),
+    JSON.stringify(knownEvent),
+    JSON.stringify(unknownEvent),
+    ''
+  ].join('\n')
+
+  child.stdout.emit('data', Buffer.from(records))
+
+  assert.deepEqual(await withDeadline(pending), { routed: true })
+  assert.deepEqual(events, [knownEvent, unknownEvent])
+  assert.deepEqual(proc.consumePreludeLines(), ['startup banner'])
+  assert.deepEqual(proc.consumePreludeLines(), [])
+  await withDeadline(proc.stop())
+})
+
+test('PiRpcProcess dispatches one clean-EOF final response before publishing stdout_eof', async t => {
+  const fixture = await createFakePiFixture()
+  t.after(() => rm(fixture.rootDir, { recursive: true, force: true }))
+  setFixtureEnvironment(t, fixture)
+
+  const child = spawn(process.execPath, [fixture.childPath, '--runtime-term-resistant'], {
+    cwd: fixture.cwd,
+    env: process.env,
+    stdio: 'pipe'
+  }) as ChildProcessWithoutNullStreams
+  t.after(() => {
+    if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL')
+  })
+  await waitForStdoutText(child, 'RUNTIME_TERM_RESISTANT_READY\n')
+  const proc = createRuntimeProcess(child, fixture)
+
+  let requestId = ''
+  ;(child.stdin as any).write = (line: string, callback: (error?: Error | null) => void) => {
+    requestId = String(JSON.parse(line).id)
+    queueMicrotask(() => callback(null))
+    return true
+  }
+
+  const order: string[] = []
+  let resolveCalls = 0
+  const pending = proc.getState()
+  assert.notEqual(requestId, '')
+  const pendingEntry = (
+    proc as unknown as {
+      pending: Map<string, { resolve: (response: Record<string, unknown>) => void; reject: (error: unknown) => void }>
+    }
+  ).pending.get(requestId)
+  assert.ok(pendingEntry)
+  const originalResolve = pendingEntry.resolve
+  pendingEntry.resolve = response => {
+    resolveCalls += 1
+    order.push('response')
+    originalResolve(response)
+  }
+
+  const terminal = new Promise<PiRpcProcessTerminatedError>(resolve => {
+    proc.onTerminal(error => {
+      order.push('terminal')
+      resolve(error)
+    })
+  })
+  const finalResponse = JSON.stringify({
+    type: 'response',
+    id: requestId,
+    command: 'get_state',
+    success: true,
+    data: { finalTail: true }
+  })
+  child.stdout.emit('data', Buffer.from(finalResponse))
+  assert.equal(resolveCalls, 0)
+  child.stdout.emit('end')
+  child.stdout.emit('close')
+
+  assert.deepEqual(await withDeadline(pending), { finalTail: true })
+  const terminalError = await withDeadline(terminal)
+  assert.equal(terminalError.data.piAcp.process.cause, 'stdout_eof')
+  assert.equal(resolveCalls, 1)
+  assert.deepEqual(order, ['response', 'terminal'])
+  await withDeadline(proc.stop())
+})
+
+test('PiRpcProcess discards the same valid final response on every earlier terminal mode', async t => {
+  const fixture = await createFakePiFixture()
+  t.after(() => rm(fixture.rootDir, { recursive: true, force: true }))
+  setFixtureEnvironment(t, fixture)
+
+  const runCase = async (cause: 'stdout-error' | 'abnormal-close' | 'terminal-first'): Promise<void> => {
+    const child = spawn(process.execPath, [fixture.childPath, '--runtime-term-resistant'], {
+      cwd: fixture.cwd,
+      env: process.env,
+      stdio: 'pipe'
+    }) as ChildProcessWithoutNullStreams
+    t.after(() => {
+      if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL')
+    })
+    await waitForStdoutText(child, 'RUNTIME_TERM_RESISTANT_READY\n')
+    const proc = createRuntimeProcess(child, fixture)
+
+    let requestId = ''
+    ;(child.stdin as any).write = (line: string, callback: (error?: Error | null) => void) => {
+      requestId = String(JSON.parse(line).id)
+      queueMicrotask(() => callback(null))
+      return true
+    }
+
+    let terminalError: PiRpcProcessTerminatedError | undefined
+    proc.onTerminal(error => {
+      terminalError = error
+    })
+    const pending = proc.getState()
+    const rejected = assert.rejects(withDeadline(pending), error => {
+      assert.equal(error, terminalError)
+      return true
+    })
+    assert.notEqual(requestId, '')
+    child.stdout.emit(
+      'data',
+      Buffer.from(
+        JSON.stringify({
+          type: 'response',
+          id: requestId,
+          command: 'get_state',
+          success: true,
+          data: { mustNotResolve: cause }
+        })
+      )
+    )
+
+    if (cause === 'stdout-error') {
+      child.stdout.emit('error', new Error('synthetic stdout failure'))
+      child.stdout.emit('close')
+    } else if (cause === 'abnormal-close') {
+      child.stdout.emit('close')
+    } else {
+      child.emit('exit', 53, null)
+      child.stdout.emit('end')
+      child.stdout.emit('close')
+    }
+
+    await rejected
+    assert.ok(terminalError)
+    assert.equal(
+      terminalError.data.piAcp.process.cause,
+      cause === 'stdout-error' ? 'stdout_error' : cause === 'terminal-first' ? 'exit' : 'stdout_eof'
+    )
+    assert.deepEqual(proc.consumePreludeLines(), [])
+    await withDeadline(proc.stop())
+  }
+
+  await runCase('stdout-error')
+  await runCase('abnormal-close')
+  await runCase('terminal-first')
+})
+
+test('PiRpcProcess promotes an incomplete UTF-8 tail only on clean EOF across terminal modes', async t => {
+  const fixture = await createFakePiFixture()
+  t.after(() => rm(fixture.rootDir, { recursive: true, force: true }))
+  setFixtureEnvironment(t, fixture)
+
+  const runCase = async (cause: 'clean-end' | 'stdout-error' | 'abnormal-close' | 'terminal-first'): Promise<void> => {
+    const child = spawn(process.execPath, [fixture.childPath, '--runtime-term-resistant'], {
+      cwd: fixture.cwd,
+      env: process.env,
+      stdio: 'pipe'
+    }) as ChildProcessWithoutNullStreams
+    t.after(() => {
+      if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL')
+    })
+    await waitForStdoutText(child, 'RUNTIME_TERM_RESISTANT_READY\n')
+    const proc = createRuntimeProcess(child, fixture)
+    const terminal = new Promise<PiRpcProcessTerminatedError>(resolve => proc.onTerminal(resolve))
+    const incompleteTail = Buffer.concat([Buffer.from('incomplete-utf8-'), Buffer.from([0xe2])])
+
+    child.stdout.emit('data', incompleteTail)
+    if (cause === 'clean-end') {
+      child.stdout.emit('end')
+      child.stdout.emit('close')
+    } else if (cause === 'stdout-error') {
+      child.stdout.emit('error', new Error('synthetic stdout failure'))
+      child.stdout.emit('close')
+    } else if (cause === 'abnormal-close') {
+      child.stdout.emit('close')
+    } else {
+      child.emit('exit', 52, null)
+      child.stdout.emit('end')
+      child.stdout.emit('close')
+    }
+
+    const terminalError = await withDeadline(terminal)
+    assert.equal(
+      terminalError.data.piAcp.process.cause,
+      cause === 'stdout-error' ? 'stdout_error' : cause === 'terminal-first' ? 'exit' : 'stdout_eof'
+    )
+    assert.deepEqual(proc.consumePreludeLines(), cause === 'clean-end' ? ['incomplete-utf8-\ufffd'] : [])
+    assert.deepEqual(proc.consumePreludeLines(), [])
+    await withDeadline(proc.stop())
+  }
+
+  await runCase('clean-end')
+  await runCase('stdout-error')
+  await runCase('abnormal-close')
+  await runCase('terminal-first')
+})
+
+test('PiRpcProcess discards an unterminated stdout tail on error, abnormal close, or terminal-first races', async t => {
+  const fixture = await createFakePiFixture()
+  t.after(() => rm(fixture.rootDir, { recursive: true, force: true }))
+  setFixtureEnvironment(t, fixture)
+
+  const runCase = async (cause: 'stdout-error' | 'abnormal-close' | 'terminal-first'): Promise<void> => {
+    const child = spawn(process.execPath, [fixture.childPath, '--runtime-term-resistant'], {
+      cwd: fixture.cwd,
+      env: process.env,
+      stdio: 'pipe'
+    }) as ChildProcessWithoutNullStreams
+    t.after(() => {
+      if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL')
+    })
+    await waitForStdoutText(child, 'RUNTIME_TERM_RESISTANT_READY\n')
+    const proc = createRuntimeProcess(child, fixture)
+    const events: PiRpcEvent[] = []
+    proc.onEvent(event => events.push(event))
+    const terminal = new Promise<PiRpcProcessTerminatedError>(resolve => proc.onTerminal(resolve))
+    const completeRecord = { type: 'agent_start', marker: `${cause}-complete` }
+    const partialRecord = JSON.stringify({ type: 'agent_settled', marker: `${cause}-partial` })
+
+    if (cause === 'stdout-error') {
+      child.stdout.emit('data', Buffer.from(`${JSON.stringify(completeRecord)}\n${partialRecord}`))
+      child.stdout.emit('error', new Error('synthetic stdout failure'))
+      child.stdout.emit('close')
+    } else if (cause === 'abnormal-close') {
+      child.stdout.emit('data', Buffer.from(`${JSON.stringify(completeRecord)}\n${partialRecord}`))
+      child.stdout.emit('close')
+    } else {
+      const splitAt = Math.floor(partialRecord.length / 2)
+      child.stdout.emit('data', Buffer.from(`${JSON.stringify(completeRecord)}\n${partialRecord.slice(0, splitAt)}`))
+      child.emit('exit', 51, null)
+      child.stdout.emit('data', Buffer.from(`${partialRecord.slice(splitAt)}\n`))
+      child.stdout.emit('end')
+    }
+
+    const terminalError = await withDeadline(terminal)
+    if (cause === 'stdout-error') assert.equal(terminalError.data.piAcp.process.cause, 'stdout_error')
+    else if (cause === 'terminal-first') assert.equal(terminalError.data.piAcp.process.cause, 'exit')
+    else assert.equal(terminalError.data.piAcp.process.cause, 'stdout_eof')
+    assert.deepEqual(events, [completeRecord])
+    await withDeadline(proc.stop())
+  }
+
+  await runCase('stdout-error')
+  await runCase('abnormal-close')
+  await runCase('terminal-first')
+})
+
+test('PiRpcProcess quarantines line two when a line-one handler stops within the same stdout chunk', async t => {
+  const fixture = await createFakePiFixture()
+  t.after(() => rm(fixture.rootDir, { recursive: true, force: true }))
+  setFixtureEnvironment(t, fixture)
+
+  const child = spawn(process.execPath, [fixture.childPath, '--runtime-term-resistant'], {
+    cwd: fixture.cwd,
+    env: process.env,
+    stdio: 'pipe'
+  }) as ChildProcessWithoutNullStreams
+  t.after(() => {
+    if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL')
+  })
+  await waitForStdoutText(child, 'RUNTIME_TERM_RESISTANT_READY\n')
+  const proc = createRuntimeProcess(child, fixture)
+
+  const observedMarkers: string[] = []
+  let stopPromise: Promise<void> | undefined
+  proc.onEvent(event => {
+    observedMarkers.push(String(event.marker))
+    stopPromise = proc.stop()
+    void stopPromise.catch(() => undefined)
+  })
+  const chunk = [
+    JSON.stringify({ type: 'agent_start', marker: 'line-one' }),
+    JSON.stringify({ type: 'agent_settled', marker: 'line-two' }),
+    ''
+  ].join('\n')
+
+  child.stdout.emit('data', Buffer.from(chunk))
+
+  assert.deepEqual(observedMarkers, ['line-one'])
+  assert.equal(proc.isAlive(), false)
+  assert.ok(stopPromise)
+  await withDeadline(stopPromise)
 })
 
 test('PiRpcProcess treats write(false) as backpressure and stop wins over a later request', async t => {
