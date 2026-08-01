@@ -163,7 +163,7 @@ commands 宣称为稳定支持。
 | `C1.1` | extension stderr/load diagnostics 可见且安全限长                  | `verified`  | `C0.7`                    | `G1`      |
 | `C1.2` | `extension_error` 映射为可见、可测试错误                          | `verified`  | `C0.7`                    | `G1`      |
 | `C1.3` | Pi child 退出时 fail pending command，并提供确定恢复路径          | `verified`  | `C0.5`                    | `G1`      |
-| `C1.4` | 使用严格 LF JSONL reader                                          | `proposed`  | `C0.3`                    | `G1`      |
+| `C1.4` | 使用严格 LF JSONL reader                                          | `verified`  | `C0.3`                    | `G1`      |
 | `C1.5` | 已知但未实现的 Pi built-in 被明确拒绝，不进入 LLM                 | `proposed`  | `C0.4`                    | `G1`      |
 | `C1.6` | trust/loaded extensions/command source 可诊断，无隐式批准         | `proposed`  | `DEC-004`, `C1.1`         | `G1`      |
 | `C1.7` | startup readiness 与 early-event buffering                        | `proposed`  | `C0.6`                    | `G1`      |
@@ -700,6 +700,82 @@ real-Pi fixture/extension 与 `.github/scripts/run-network-denied-ci.sh`。
 OS-level containment；不改写 C0.7 immutable artifact。rollback 为 revert 后续 C1.3
 implementation/publication commits，精确回到 verified C1.2 publication
 `d1156ba3418c47ae0dc834fa850fd0ab5ecabc79`。
+
+#### `C1.4` Strict LF-only nested Pi JSONL reader
+
+- [x] 仅替换 nested Pi child stdout reader；使用 `StringDecoder('utf8')` 保存任意 chunk
+      boundary 上的 incomplete UTF-8，且只把 LF byte `0x0A` 作为 record delimiter。
+      literal `U+2028`/`U+2029`、escaped `\n` 与 bare CR 都是 data；CRLF 只移除 LF
+      前恰好一个 CR。long no-LF record 按 decoded fragment 累积，不重复 rescan/copy
+      whole tail。
+- [x] multiple records/chunk 维持 wire order；blank、invalid/prelude、known response、
+      unknown/duplicate/malformed response 与 non-response event 的 routing semantics
+      与 C1.3 前一致。unknown response 永不泄漏到 event handler。
+- [x] clean stdout `end` 是唯一 partial-tail promotion path：先 `decoder.end()`，按正常
+      `StringDecoder` semantics（包含 incomplete final UTF-8 的 `U+FFFD`）把 nonempty
+      tail 同步送入同一 record path exactly once，再 latch `stdout_eof`；后续 close
+      不 replay。
+- [x] stdout error、abnormal close、child exit/process error、stdin failure/close 或
+      explicit stop 若先观察到，丢弃 partial tail 与所有后到 callback。保留 C1.3
+      response-versus-terminal pending-ID linearization；complete LF prefix 可先交付，
+      partial suffix 不交付；record 1 同步 stop 时 same-chunk record 2 被 quarantine。
+- [x] local port 精确记录 upstream svkozak/pi-acp PR #41 head
+      `696e4d726e659863ed4ecdcc9ce043c3da8e1135` 与 base
+      `138edb025c94bd6a61fbcfe2be8b392cceab6982`，按 `DEC-007` 手工移植到 C1.3
+      publication；不得 wholesale cherry-pick 覆盖已验证的 terminal ordering。
+- [x] pinned Pi `0.83.0` isolated loopback/network-denied evidence 在 raw nested stdout
+      捕获 literal UTF-8 `E2 80 A8` / `E2 80 A9`，ACP 精确收到
+      `BEFORE\u2028MIDDLE\u2029AFTER`，target prompt exactly once `end_turn`，随后用
+      fresh Pi operation 证明 child/session 仍 live；不访问真实账户或 external provider。
+- [x] current/exact Node `22.19.0` 的 focused reader/process/C1.3 lifecycle、serialized
+      real-Pi/load-boundaries、full suites、typecheck/lint/build/Prettier/transcripts/
+      diff-check 全绿；Node `24.18.1` 只保留 reproduction evidence，不新增 CI axis。
+      C0.7 manifest/transcripts/artifacts byte-identical 且不 recapture。
+
+run-scoped accepted implementation identity 为 PR #19 head
+[`30a61775c2a2e3477028903ffec50f3d0a9cafba`](https://github.com/Eric-Song-Nop/pi-acp/commit/30a61775c2a2e3477028903ffec50f3d0a9cafba)，
+sole parent/stacked base 为 verified C1.3 publication
+`00cbe24e1f9506fd379c9dd1bb422aa09e90c33f`。tested compatibility tuple 为
+pi-acp `0.0.33@30a61775c2a2e3477028903ffec50f3d0a9cafba` × Pi `0.83.0` ×
+ACP protocol `1` / SDK `0.26.0` × Node `26.5.0`/exact `22.19.0` ×
+raw/strict ACP harness `@30a61775c2a2e3477028903ffec50f3d0a9cafba`。
+[CI run `30708489502`](https://github.com/Eric-Song-Nop/pi-acp/actions/runs/30708489502)
+在该 exact head 的 provenance、typecheck、lint、test、build、两个 network-denied
+real-Pi rows 与 stable `required` job 全绿。Node `26.5.0` 与 exact Node
+`22.19.0` 本地 full suites 均为 `333/333`，focused reader/process/real-Pi
+均为 `42/42`，exact C1.3 lifecycle/recovery 为 `72/72`，serialized
+real-Pi/load-boundaries 均为 `12/12`，exact immutable C0.7 replay 为 `4/4`；
+typecheck、lint、build、whole-tree Prettier、diff-check 与 transcript verifier
+`3/3` 全绿。C0.7 manifest SHA-256 仍为
+`edfbbf2807e84f409e826a853e514debb30bd51a964a711cccd0577dea469ce3`，
+complete transcript-tree SHA-256 仍为
+`fd8d85afe172a848e45017f2fd59411aaf903f8159e1db2e3e63b2fa82e3781f`，
+manifest/transcripts/artifacts 未 recapture。upstream provenance 为
+svkozak/pi-acp PR #41 exact head
+`696e4d726e659863ed4ecdcc9ce043c3da8e1135` / base
+`138edb025c94bd6a61fbcfe2be8b392cceab6982`，按 `DEC-007` 手工移植。
+independent exact-head
+[review `4835137406`](https://github.com/Eric-Song-Nop/pi-acp/pull/19#pullrequestreview-4835137406)
+接受该 implementation head，无 remaining P1/P2/P3，unresolved review threads
+为 `0`。后续 documentation-only publication commit 不替换这个
+implementation/run identity。
+
+证据计划：fork
+[issue #18](https://github.com/Eric-Song-Nop/pi-acp/issues/18)、
+[`svkozak/pi-acp#41`](https://github.com/svkozak/pi-acp/pull/41)、
+`src/pi-rpc/lf-jsonl-reader.ts`、`src/pi-rpc/process.ts`、
+`test/unit/pi-rpc-lf-jsonl-reader.test.ts`、
+`test/unit/pi-rpc-process-diagnostics.test.ts`、
+`test/component/real-pi-lf-jsonl-reader.test.ts`、
+`test/helpers/real-pi-fixture.ts` 与
+`.github/scripts/run-network-denied-ci.sh`。
+
+边界：本 checkpoint 不改变 ACP adapter transport 或 persisted session JSONL framing，
+不选择 invalid UTF-8 fatal policy、不加入 record-size cap、不改变 malformed/blank/prelude
+policy，也不实现 C1.7 readiness buffering、C2/C3 command routing/execution、Windows
+certification 或 dependency/runtime upgrade。rollback 为 revert 后续 C1.4
+implementation/publication commits，精确回到 verified C1.3 publication
+`00cbe24e1f9506fd379c9dd1bb422aa09e90c33f`；C0.7 immutable artifact 不改写。
 
 ### M2 — Command Catalog
 

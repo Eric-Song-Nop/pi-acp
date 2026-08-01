@@ -26,6 +26,10 @@ export const REAL_PI_FIXTURE_MODEL_ID = 'fixture-model-v1'
 export const REAL_PI_FIXTURE_COMMAND_ID = 'fixture-state'
 export const C1_2_RUNTIME_EXTENSION_RESPONSE_TEXT = 'C1.2 deterministic agent response'
 export const C1_3_RECOVERY_RESPONSE_TEXT = 'C1.3 deterministic recovery response'
+export const C1_4_LF_JSONL_RESPONSE_TEXT = 'BEFORE\u2028MIDDLE\u2029AFTER'
+export const C1_4_LF_JSONL_LIVENESS_RESPONSE_TEXT = 'C1.4 post-turn liveness response'
+export const C1_4_LF_JSONL_USER_TEXT = 'Return the deterministic C1.4 LF JSONL response.'
+export const C1_4_LF_JSONL_LIVENESS_USER_TEXT = 'Return the deterministic C1.4 liveness response.'
 const LOOPBACK_CLOSE_TIMEOUT_MS = 1_000
 const LOOPBACK_BODY_TIMEOUT_MS = 2_000
 export const MAX_LOOPBACK_BODY_BYTES = 64 * 1024
@@ -179,9 +183,10 @@ export type RealPiFixtureOptions = {
   extensionLoadFailure?: true
   runtimeExtensionError?: true
   childTermination?: true
+  lfJsonlResponse?: true
   hardDeadlineMs?: number
   clientShutdownTimeoutMs?: number
-  transcriptCheckpoint?: 'C0.6' | 'C0.7' | 'C1.1' | 'C1.2' | 'C1.3'
+  transcriptCheckpoint?: 'C0.6' | 'C0.7' | 'C1.1' | 'C1.2' | 'C1.3' | 'C1.4'
   transcriptCaseId?: string
   transcriptMetadata?: AcpTranscriptMetadata
   projectPrompts?: readonly {
@@ -478,9 +483,10 @@ export async function startRealPiFixture(options: RealPiFixtureOptions = {}) {
   const extensionLoadFailure = options.extensionLoadFailure === true
   const runtimeExtensionError = options.runtimeExtensionError === true
   const childTermination = options.childTermination === true
-  if ([extensionLoadFailure, runtimeExtensionError, childTermination].filter(Boolean).length > 1) {
+  const lfJsonlResponse = options.lfJsonlResponse === true
+  if ([extensionLoadFailure, runtimeExtensionError, childTermination, lfJsonlResponse].filter(Boolean).length > 1) {
     throw new TypeError(
-      'real Pi fixture load failure, runtime error, and child termination modes are mutually exclusive'
+      'real Pi fixture load failure, runtime error, child termination, and LF JSONL response modes are mutually exclusive'
     )
   }
   const hardDeadlineMs = options.hardDeadlineMs
@@ -524,14 +530,25 @@ export async function startRealPiFixture(options: RealPiFixtureOptions = {}) {
     }
     const finish = (): void => {
       if (!settle('end')) return
+      const lfJsonlResponseText = lfJsonlResponse
+        ? observation.body?.includes(Buffer.from(C1_4_LF_JSONL_LIVENESS_USER_TEXT))
+          ? C1_4_LF_JSONL_LIVENESS_RESPONSE_TEXT
+          : observation.body?.includes(Buffer.from(C1_4_LF_JSONL_USER_TEXT))
+            ? C1_4_LF_JSONL_RESPONSE_TEXT
+            : undefined
+        : undefined
       const responseText = runtimeExtensionError
         ? C1_2_RUNTIME_EXTENSION_RESPONSE_TEXT
         : childTermination
           ? C1_3_RECOVERY_RESPONSE_TEXT
-          : undefined
+          : lfJsonlResponseText
       if (responseText && !bodyExceededLimit) {
         const chunkBase = {
-          id: runtimeExtensionError ? 'c1.2-runtime-extension-turn' : 'c1.3-recovery-turn',
+          id: runtimeExtensionError
+            ? 'c1.2-runtime-extension-turn'
+            : childTermination
+              ? 'c1.3-recovery-turn'
+              : 'c1.4-lf-jsonl-turn',
           object: 'chat.completion.chunk',
           created: 0,
           model: REAL_PI_FIXTURE_MODEL_ID
@@ -832,27 +849,28 @@ export async function startRealPiFixture(options: RealPiFixtureOptions = {}) {
     assertReceiptDirectoryStat(receiptBoundary.receiptDir, receiptBoundary.receiptDirStat)
     assertContainedPath(receiptBoundary.rootDir, receiptBoundary.receiptDir, 'C0.6 receipt directory')
 
+    const environment = isolatedEnvironment({
+      homeDir,
+      agentDir,
+      sessionDir,
+      tempDir,
+      xdgConfigDir,
+      xdgCacheDir,
+      xdgDataDir,
+      xdgStateDir,
+      emptyBinDir,
+      receiptDir,
+      projectCanaryPath,
+      nonce,
+      baseUrl,
+      piPackageRoot,
+      piCommand
+    })
     client = new AcpProcessClient({
       command: process.execPath,
       args: ['--import', tsxImportPath, agentEntryPath],
       cwd,
-      env: isolatedEnvironment({
-        homeDir,
-        agentDir,
-        sessionDir,
-        tempDir,
-        xdgConfigDir,
-        xdgCacheDir,
-        xdgDataDir,
-        xdgStateDir,
-        emptyBinDir,
-        receiptDir,
-        projectCanaryPath,
-        nonce,
-        baseUrl,
-        piPackageRoot,
-        piCommand
-      }),
+      env: environment,
       requestTimeoutMs: 20_000,
       updateTimeoutMs: 10_000,
       shutdownTimeoutMs: clientShutdownTimeoutMs,
@@ -948,6 +966,13 @@ export async function startRealPiFixture(options: RealPiFixtureOptions = {}) {
         port: address.port
       },
       requests,
+      createRawPiProbeEnvironment(): NodeJS.ProcessEnv {
+        const probeNonce = randomBytes(16).toString('hex')
+        return Object.assign(Object.create(null) as NodeJS.ProcessEnv, environment, {
+          PI_ACP_FIXTURE_NONCE: probeNonce,
+          PI_ACP_FIXTURE_API_KEY: `pi-acp-fixture-${probeNonce}`
+        })
+      },
       hardDeadline,
       get hardDeadlineExceeded(): boolean {
         return hardDeadlineExceeded
