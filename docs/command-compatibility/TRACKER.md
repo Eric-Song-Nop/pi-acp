@@ -151,60 +151,60 @@ commands 宣称为稳定支持。
 
 ## 6. Master checkpoint table
 
-| ID     | Outcome                                                           | 当前状态      | Hard dependencies         | Gate      |
-| ------ | ----------------------------------------------------------------- | ------------- | ------------------------- | --------- |
-| `C0.1` | tracker 合入仓库并决定 Issues 策略                                | `in_review`   | `DEC-001`                 | `G0`      |
-| `C0.2` | 固定 compatibility tuple 与受测版本窗口                           | `in_review`   | —                         | `G0`      |
-| `C0.3` | CI 跑 typecheck/lint/unit/build 和 E2E 基础矩阵                   | `verified`    | `C0.2`                    | `G0`      |
-| `C0.4` | 定义 command compatibility schema                                 | `verified`    | `DEC-003`                 | `G0`      |
-| `C0.5` | raw ACP + strict-client harness                                   | `verified`    | `DEC-005`                 | `G0`      |
-| `C0.6` | 建立真实 Pi fixture extension pack                                | `verified`    | `C0.5`                    | `G0`      |
-| `C0.7` | 记录当前失败基线和 immutable transcripts                          | `verified`    | `C0.3`, `C0.6`            | `G0`      |
-| `C1.1` | extension stderr/load diagnostics 可见且安全限长                  | `verified`    | `C0.7`                    | `G1`      |
-| `C1.2` | `extension_error` 映射为可见、可测试错误                          | `in_progress` | `C0.7`                    | `G1`      |
-| `C1.3` | Pi child 退出时 fail pending command，并提供确定恢复路径          | `proposed`    | `C0.5`                    | `G1`      |
-| `C1.4` | 使用严格 LF JSONL reader                                          | `proposed`    | `C0.3`                    | `G1`      |
-| `C1.5` | 已知但未实现的 Pi built-in 被明确拒绝，不进入 LLM                 | `proposed`    | `C0.4`                    | `G1`      |
-| `C1.6` | trust/loaded extensions/command source 可诊断，无隐式批准         | `proposed`    | `DEC-004`, `C1.1`         | `G1`      |
-| `C1.7` | startup readiness 与 early-event buffering                        | `proposed`    | `C0.6`                    | `G1`      |
-| `C2.1` | 保存 ACP client capabilities                                      | `proposed`    | `C0.4`                    | `G2`      |
-| `C2.2` | Pi 成为唯一 slash command/router；删除 adapter 提前展开           | `proposed`    | `C0.7`                    | `G2`      |
-| `C2.3` | 公布兼容 extension commands 并保留 source/compatibility           | `proposed`    | `DEC-003`, `C1.2`, `C2.2` | `G2`      |
-| `C2.4` | 定义 collision、reserved names 和稳定 ID 规则                     | `proposed`    | `C0.4`, `C2.2`            | `G2`      |
-| `C2.5` | reload/runtime registration 后刷新命令目录                        | `proposed`    | `C2.3`                    | `G2`      |
-| `C2.6` | argument hints/completions 进入 Pi RPC/ACP metadata               | `proposed`    | `C3.1`                    | `G2`      |
-| `C2.7` | extension flags 进入明确的 CLI/ACP config 通路                    | `proposed`    | `DEC-002`                 | `G2`      |
-| `C3.1` | 审核并冻结 Pi RPC command catalog/execute spec                    | `proposed`    | `DEC-002`, `C0.6`         | `G3`      |
-| `C3.2` | Pi 实现 `execute_command` + request/disposition identity          | `proposed`    | `C3.1`                    | `G3`      |
-| `C3.3` | pi-acp bridge 结构化 command results                              | `proposed`    | `C3.2`                    | `G3`      |
-| `C3.4` | state-only/no-LLM/handled-input commands 正确完成                 | `proposed`    | `C3.3`                    | `G3`      |
-| `C3.5` | agent-triggering commands 等待正确 run 后只完成一次               | `proposed`    | `C3.3`                    | `G3`      |
-| `C3.6` | throw/cancel/timeout 无泄漏、无重复完成                           | `proposed`    | `C3.3`                    | `G3`      |
-| `C3.7` | streaming 中的 immediate command/steer/follow-up 语义明确         | `proposed`    | `C3.3`                    | `G3`      |
-| `C3.8` | new/switch/fork/reload 后 ACP session 映射与目录同步              | `proposed`    | `C3.3`, `C2.5`            | `G3`      |
-| `C4.1` | elicitation form/url capability negotiation                       | `proposed`    | `C2.1`                    | `G4`      |
-| `C4.2` | select/confirm 不再滥用 permission request                        | `proposed`    | `C4.1`                    | `G4`      |
-| `C4.3` | input/editor 支持 accept/decline/cancel/timeout                   | `proposed`    | `C4.1`, `C3.6`            | `G4`      |
-| `C4.4` | notify/status/title/string-widget 采用可降级映射                  | `proposed`    | `C2.1`                    | `G4`      |
-| `C4.5` | external URL/Web sidecar 命令有安全绑定与回写路径                 | `proposed`    | `C4.1`                    | `G4`      |
-| `C4.6` | TUI-only 命令不误宣传，并提供清楚 fallback                        | `proposed`    | `DEC-006`, `C0.4`         | `G4`      |
-| `C4.7` | `/trust`, `/reload`, `/login`, `/logout` 有明确支持路径           | `proposed`    | `C1.6`, `C3.8`, `C4.1`    | `G4`      |
-| `C4.8` | `/fork`, `/clone`, `/tree`, `/new`, `/resume` 与 ACP session 对齐 | `proposed`    | `C3.8`                    | `G4`      |
-| `C4.9` | 其余 Pi built-ins 支持、ACP-native 替代或明确拒绝                 | `proposed`    | `C1.5`, `C4.8`            | `G4`      |
-| `C5.1` | 官方 commands/rpc-demo/plan/todo/input-transform fixtures         | `proposed`    | `G4`                      | `G5`      |
-| `C5.2` | `pi-mcp-adapter` 支持子集认证                                     | `proposed`    | `G4`                      | `G5`      |
-| `C5.3` | Narumiruna Chrome/accounts/statusline/subagents 认证              | `proposed`    | `G4`                      | `G5`      |
-| `C5.4` | Plannotator/external Web UI 认证                                  | `proposed`    | `C4.5`                    | `G5`      |
-| `C5.5` | Browser/CDP tool image/result 显示认证                            | `proposed`    | `C4.4`                    | `G5`      |
-| `C5.6` | raw ACP、Zed、至少一个非 Zed client 矩阵                          | `proposed`    | `C5.1..5`                 | `G5`      |
-| `C5.7` | Pi min/base/head 与 ACP SDK legacy/current 版本矩阵               | `proposed`    | `C0.2`, `C5.6`            | `G5`      |
-| `C5.8` | trust、日志、外部 URL 和本地权限边界安全审查                      | `proposed`    | `C1.6`, `C4.5`            | `G5`      |
-| `C6.1` | 用户文档、支持矩阵、known limitations                             | `proposed`    | `G5`                      | `G6`      |
-| `C6.2` | experimental flags、kill switch、pin/rollback 指南                | `proposed`    | `G5`                      | `G6`      |
-| `C6.3` | upstream PR 拆分、permalink 和补丁删除条件                        | `proposed`    | `C3.2`, `C6.1`            | `G6`      |
-| `C6.4` | ACP SDK 0.26 → 1.x 独立迁移（不混入行为 PR）                      | `proposed`    | `G5`                      | `G6`      |
-| `C6.5` | RC compatibility tuple 和 release notes                           | `proposed`    | `C6.1..4`                 | `G6`      |
-| `C6.6` | 每周 version watch 与每次发布回归协议                             | `proposed`    | `C6.5`                    | recurring |
+| ID     | Outcome                                                           | 当前状态    | Hard dependencies         | Gate      |
+| ------ | ----------------------------------------------------------------- | ----------- | ------------------------- | --------- |
+| `C0.1` | tracker 合入仓库并决定 Issues 策略                                | `in_review` | `DEC-001`                 | `G0`      |
+| `C0.2` | 固定 compatibility tuple 与受测版本窗口                           | `in_review` | —                         | `G0`      |
+| `C0.3` | CI 跑 typecheck/lint/unit/build 和 E2E 基础矩阵                   | `verified`  | `C0.2`                    | `G0`      |
+| `C0.4` | 定义 command compatibility schema                                 | `verified`  | `DEC-003`                 | `G0`      |
+| `C0.5` | raw ACP + strict-client harness                                   | `verified`  | `DEC-005`                 | `G0`      |
+| `C0.6` | 建立真实 Pi fixture extension pack                                | `verified`  | `C0.5`                    | `G0`      |
+| `C0.7` | 记录当前失败基线和 immutable transcripts                          | `verified`  | `C0.3`, `C0.6`            | `G0`      |
+| `C1.1` | extension stderr/load diagnostics 可见且安全限长                  | `verified`  | `C0.7`                    | `G1`      |
+| `C1.2` | `extension_error` 映射为可见、可测试错误                          | `verified`  | `C0.7`                    | `G1`      |
+| `C1.3` | Pi child 退出时 fail pending command，并提供确定恢复路径          | `proposed`  | `C0.5`                    | `G1`      |
+| `C1.4` | 使用严格 LF JSONL reader                                          | `proposed`  | `C0.3`                    | `G1`      |
+| `C1.5` | 已知但未实现的 Pi built-in 被明确拒绝，不进入 LLM                 | `proposed`  | `C0.4`                    | `G1`      |
+| `C1.6` | trust/loaded extensions/command source 可诊断，无隐式批准         | `proposed`  | `DEC-004`, `C1.1`         | `G1`      |
+| `C1.7` | startup readiness 与 early-event buffering                        | `proposed`  | `C0.6`                    | `G1`      |
+| `C2.1` | 保存 ACP client capabilities                                      | `proposed`  | `C0.4`                    | `G2`      |
+| `C2.2` | Pi 成为唯一 slash command/router；删除 adapter 提前展开           | `proposed`  | `C0.7`                    | `G2`      |
+| `C2.3` | 公布兼容 extension commands 并保留 source/compatibility           | `proposed`  | `DEC-003`, `C1.2`, `C2.2` | `G2`      |
+| `C2.4` | 定义 collision、reserved names 和稳定 ID 规则                     | `proposed`  | `C0.4`, `C2.2`            | `G2`      |
+| `C2.5` | reload/runtime registration 后刷新命令目录                        | `proposed`  | `C2.3`                    | `G2`      |
+| `C2.6` | argument hints/completions 进入 Pi RPC/ACP metadata               | `proposed`  | `C3.1`                    | `G2`      |
+| `C2.7` | extension flags 进入明确的 CLI/ACP config 通路                    | `proposed`  | `DEC-002`                 | `G2`      |
+| `C3.1` | 审核并冻结 Pi RPC command catalog/execute spec                    | `proposed`  | `DEC-002`, `C0.6`         | `G3`      |
+| `C3.2` | Pi 实现 `execute_command` + request/disposition identity          | `proposed`  | `C3.1`                    | `G3`      |
+| `C3.3` | pi-acp bridge 结构化 command results                              | `proposed`  | `C3.2`                    | `G3`      |
+| `C3.4` | state-only/no-LLM/handled-input commands 正确完成                 | `proposed`  | `C3.3`                    | `G3`      |
+| `C3.5` | agent-triggering commands 等待正确 run 后只完成一次               | `proposed`  | `C3.3`                    | `G3`      |
+| `C3.6` | throw/cancel/timeout 无泄漏、无重复完成                           | `proposed`  | `C3.3`                    | `G3`      |
+| `C3.7` | streaming 中的 immediate command/steer/follow-up 语义明确         | `proposed`  | `C3.3`                    | `G3`      |
+| `C3.8` | new/switch/fork/reload 后 ACP session 映射与目录同步              | `proposed`  | `C3.3`, `C2.5`            | `G3`      |
+| `C4.1` | elicitation form/url capability negotiation                       | `proposed`  | `C2.1`                    | `G4`      |
+| `C4.2` | select/confirm 不再滥用 permission request                        | `proposed`  | `C4.1`                    | `G4`      |
+| `C4.3` | input/editor 支持 accept/decline/cancel/timeout                   | `proposed`  | `C4.1`, `C3.6`            | `G4`      |
+| `C4.4` | notify/status/title/string-widget 采用可降级映射                  | `proposed`  | `C2.1`                    | `G4`      |
+| `C4.5` | external URL/Web sidecar 命令有安全绑定与回写路径                 | `proposed`  | `C4.1`                    | `G4`      |
+| `C4.6` | TUI-only 命令不误宣传，并提供清楚 fallback                        | `proposed`  | `DEC-006`, `C0.4`         | `G4`      |
+| `C4.7` | `/trust`, `/reload`, `/login`, `/logout` 有明确支持路径           | `proposed`  | `C1.6`, `C3.8`, `C4.1`    | `G4`      |
+| `C4.8` | `/fork`, `/clone`, `/tree`, `/new`, `/resume` 与 ACP session 对齐 | `proposed`  | `C3.8`                    | `G4`      |
+| `C4.9` | 其余 Pi built-ins 支持、ACP-native 替代或明确拒绝                 | `proposed`  | `C1.5`, `C4.8`            | `G4`      |
+| `C5.1` | 官方 commands/rpc-demo/plan/todo/input-transform fixtures         | `proposed`  | `G4`                      | `G5`      |
+| `C5.2` | `pi-mcp-adapter` 支持子集认证                                     | `proposed`  | `G4`                      | `G5`      |
+| `C5.3` | Narumiruna Chrome/accounts/statusline/subagents 认证              | `proposed`  | `G4`                      | `G5`      |
+| `C5.4` | Plannotator/external Web UI 认证                                  | `proposed`  | `C4.5`                    | `G5`      |
+| `C5.5` | Browser/CDP tool image/result 显示认证                            | `proposed`  | `C4.4`                    | `G5`      |
+| `C5.6` | raw ACP、Zed、至少一个非 Zed client 矩阵                          | `proposed`  | `C5.1..5`                 | `G5`      |
+| `C5.7` | Pi min/base/head 与 ACP SDK legacy/current 版本矩阵               | `proposed`  | `C0.2`, `C5.6`            | `G5`      |
+| `C5.8` | trust、日志、外部 URL 和本地权限边界安全审查                      | `proposed`  | `C1.6`, `C4.5`            | `G5`      |
+| `C6.1` | 用户文档、支持矩阵、known limitations                             | `proposed`  | `G5`                      | `G6`      |
+| `C6.2` | experimental flags、kill switch、pin/rollback 指南                | `proposed`  | `G5`                      | `G6`      |
+| `C6.3` | upstream PR 拆分、permalink 和补丁删除条件                        | `proposed`  | `C3.2`, `C6.1`            | `G6`      |
+| `C6.4` | ACP SDK 0.26 → 1.x 独立迁移（不混入行为 PR）                      | `proposed`  | `G5`                      | `G6`      |
+| `C6.5` | RC compatibility tuple 和 release notes                           | `proposed`  | `C6.1..4`                 | `G6`      |
+| `C6.6` | 每周 version watch 与每次发布回归协议                             | `proposed`  | `C6.5`                    | recurring |
 
 ## 7. Checkpoint 验收细则
 
@@ -550,32 +550,47 @@ structured signature。因此本 checkpoint 不改写 immutable manifest/artifac
 
 #### `C1.2` Runtime extension error visibility
 
-- [ ] Pi `0.83.0` post-subscription `extension_error` 的 canonical
+- [x] Pi `0.83.0` post-subscription `extension_error` 的 canonical
       `extensionPath`、`event`、`error` fields 映射为 exactly one ordered ACP
       `agent_message_chunk`；visible text 与 `_meta.piAcp.diagnostic` 使用 stable
       `PI_EXTENSION_RUNTIME_ERROR` / `runtime` envelope，notify level 为 `error`。
-- [ ] 完整 visible summary（含 deterministic truncation marker）最多 `4,096`
+- [x] 完整 visible summary（含 deterministic truncation marker）最多 `4,096`
       UTF-8 bytes，source/event 分别最多 `512` / `128` bytes。project/global path
       只显示 `project:<relative>` / `global:<relative>`，external/unsafe/malformed
       source 使用 `external:<redacted>` / `unknown`；raw path、raw oversized error、
       credential value 与 internal-only stack 不进入 wire metadata、stderr、telemetry
       或持久化状态。
-- [ ] runtime error 复用已接受的 C1.1 display/privacy vocabulary 与 benign-field
+- [x] runtime error 复用已接受的 C1.1 display/privacy vocabulary 与 benign-field
       actionability，不在本 checkpoint 扩展 matcher vocabulary。Pi/extension →
       pi-acp → ACP UI 仍是 trusted application output；caps/masking 是 wire/UX/privacy
       product guarantees，不是 adversarial-agent security boundary。
-- [ ] `extension_error` 保持 Pi `0.83.0` 的 nonterminal semantics：不 resolve/reject
+- [x] `extension_error` 保持 Pi `0.83.0` 的 nonterminal semantics：不 resolve/reject
       pending turn、不清 queue、不 kill/restart child、不合成 JSON-RPC failure，也不单独
       改变 stop reason。active prompt 等 authoritative `agent_settled`，先 flush error
       update，再 exactly once 返回 `end_turn`（除非另有 cancel）；repeated events 不去重。
-- [ ] opt-in sibling real-Pi fixture 在 successful `session/new` 后从
+- [x] opt-in sibling real-Pi fixture 在 successful `session/new` 后从
       `before_agent_start` throw deterministic sentinel；同一 prompt 可见 exactly one
       bounded diagnostic，完成 exactly one configured-loopback provider turn，正常
       `end_turn`，Pi 继续可用且 cleanup clean。default C0.6/C0.7 fixture bytes/behavior
       在 option off 时不变。
-- [ ] current/exact Node `22.19.0` 的 formatter/session/real-Pi focused 与 full suites、
+- [x] current/exact Node `22.19.0` 的 formatter/session/real-Pi focused 与 full suites、
       network-denied load-boundaries、typecheck/lint/build/Prettier/diff-check 全绿；C0.7
       manifest/transcripts/artifacts byte-identical 且不 recapture。
+
+run-scoped accepted implementation identity 为 PR #15 final replacement head
+[`f4efabed74bb54b493f5059ff1fd55bcf895789b`](https://github.com/Eric-Song-Nop/pi-acp/commit/f4efabed74bb54b493f5059ff1fd55bcf895789b)；
+repair parent `9d8b82a3…` 保持 invalidated，stacked base 为 `d3e61c4…`。
+[CI run `30687676868`](https://github.com/Eric-Song-Nop/pi-acp/actions/runs/30687676868)
+在该 exact head 的 provenance、typecheck、lint、test、build、两个 network-denied
+real-Pi rows 与 stable `required` job 全绿。Node `26.5.0` 与 exact Node
+`22.19.0` 本地 full suites 均为 `205/205`，focused formatter/session/real-Pi
+均为 `69/69`，load boundaries 均为 `8/8`；typecheck、lint、build、
+whole-tree Prettier、diff-check 与 transcript verifier `3/3` 全绿。C0.7 manifest
+SHA-256 仍为 `edfbbf2807e84f409e826a853e514debb30bd51a964a711cccd0577dea469ce3`，
+manifest/transcripts/artifacts 与 stacked base byte-identical，未 recapture。independent
+exact-head [review `4833897641`](https://github.com/Eric-Song-Nop/pi-acp/pull/15#pullrequestreview-4833897641)
+接受该 final replacement head，无 P1/P2/P3，unresolved review threads 为 `0`。
+后续 documentation-only publication commit 不替换这个 implementation/run identity。
 
 证据计划：fork
 [issue #14](https://github.com/Eric-Song-Nop/pi-acp/issues/14)、
