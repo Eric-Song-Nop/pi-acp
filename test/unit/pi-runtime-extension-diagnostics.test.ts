@@ -223,6 +223,111 @@ test('runtime extension diagnostics apply current control, path, credential, env
   assert.equal(sanitized.redacted, true)
 })
 
+test('runtime extension diagnostics retain actionable prefixes before sensitive assignments', () => {
+  const cases = [
+    {
+      error: 'Initialization failed: apiKey=PRIVATE_PLAIN_VALUE',
+      expectedPrefix: 'Initialization failed: '
+    },
+    {
+      error: 'C1.2_SAFE_PREFIX headers["Authorization"]="PRIVATE_BRACKET_VALUE"',
+      expectedPrefix: 'C1.2_SAFE_PREFIX '
+    },
+    {
+      error: 'C1.2_SAFE_PREFIX outer=token=PRIVATE_NESTED_VALUE',
+      expectedPrefix: 'C1.2_SAFE_PREFIX '
+    },
+    {
+      error: 'Initialization failed: API Key: PRIVATE_SPACED_VALUE',
+      expectedPrefix: 'Initialization failed: '
+    },
+    {
+      error: 'C1.2_SAFE_PREFIX headers["API Key"]=PRIVATE_BRACKET_SPACED_VALUE',
+      expectedPrefix: 'C1.2_SAFE_PREFIX '
+    },
+    {
+      error: 'C1.2_SAFE_PREFIX headers["API Key"][0]=PRIVATE_MULTI_BRACKET_VALUE',
+      expectedPrefix: 'C1.2_SAFE_PREFIX '
+    },
+    {
+      error: 'C1.2_SAFE_PREFIX outer=API Key[0]=PRIVATE_NESTED_SPACED_VALUE',
+      expectedPrefix: 'C1.2_SAFE_PREFIX '
+    },
+    {
+      error: 'C1.2_SAFE_PREFIX headers[API][Key]=PRIVATE_SPLIT_VALUE',
+      expectedPrefix: 'C1.2_SAFE_PREFIX '
+    },
+    {
+      error: 'C1.2_SAFE_PREFIX headers[API][Key][0]=PRIVATE_SPLIT_INDEX_VALUE',
+      expectedPrefix: 'C1.2_SAFE_PREFIX '
+    },
+    {
+      error: 'C1.2_SAFE_PREFIX API[Key][0]=PRIVATE_PRIMARY_SPLIT_INDEX_VALUE',
+      expectedPrefix: 'C1.2_SAFE_PREFIX '
+    },
+    {
+      error: 'C1.2_SAFE_PREFIX headers["x]Authorization"]=PRIVATE_QUOTED_BRACKET_VALUE',
+      expectedPrefix: 'C1.2_SAFE_PREFIX '
+    },
+    {
+      error: 'C1.2_SAFE_PREFIX headers["x\\]Authorization"][0]=PRIVATE_ESCAPED_BRACKET_VALUE',
+      expectedPrefix: 'C1.2_SAFE_PREFIX '
+    },
+    {
+      error: "C1.2_SAFE_PREFIX headers['x\\]API Key'][0]=PRIVATE_ESCAPED_SPACED_VALUE",
+      expectedPrefix: 'C1.2_SAFE_PREFIX '
+    },
+    {
+      error: 'C1.2_SAFE_PREFIX headers[API][0][Key]=PRIVATE_INTERPOSED_INDEX_VALUE',
+      expectedPrefix: 'C1.2_SAFE_PREFIX '
+    },
+    {
+      error: 'C1.2_SAFE_PREFIX API[0][Key]=PRIVATE_PRIMARY_INTERPOSED_INDEX_VALUE',
+      expectedPrefix: 'C1.2_SAFE_PREFIX '
+    }
+  ] as const
+
+  for (const entry of cases) {
+    const diagnostic = formatPiRuntimeExtensionError(
+      {
+        extensionPath: 'external:<redacted>',
+        event: 'before_agent_start',
+        error: entry.error
+      },
+      options()
+    )
+    const reason = diagnostic.summary.slice(diagnostic.summary.indexOf('\n') + 1)
+
+    assert.equal(reason.startsWith(entry.expectedPrefix), true, entry.error)
+    assert.equal(reason.includes(PI_DIAGNOSTIC_REDACTION), true, entry.error)
+    assert.equal(reason.includes('PRIVATE_'), false, entry.error)
+    assert.equal(diagnostic.redacted, true, entry.error)
+  }
+})
+
+test('runtime extension diagnostics retain benign sensitive words that are not assignment-name suffixes', () => {
+  const reasons = [
+    'Token refresh failed: service unavailable',
+    'Authorization handshake failed: unsupported scheme',
+    'C1.2_SAFE_PREFIX token count=VISIBLE_VALUE',
+    'headers["service token metadata"]=VISIBLE_VALUE'
+  ] as const
+
+  for (const reason of reasons) {
+    const diagnostic = formatPiRuntimeExtensionError(
+      {
+        extensionPath: 'external:<redacted>',
+        event: 'before_agent_start',
+        error: reason
+      },
+      options()
+    )
+
+    assert.equal(diagnostic.summary.endsWith(reason), true, reason)
+    assert.equal(diagnostic.redacted, false, reason)
+  }
+})
+
 test('runtime extension diagnostics normalize terminal sequences before applying existing privacy matchers', () => {
   const cases = [
     {

@@ -640,6 +640,54 @@ test('benign assignment and environment names containing secret substrings remai
   assert.equal(sensitiveDiagnostic.summary.includes('ASSIGNMENT-SUFFIX-SECRET'), false)
   assert.equal(sensitiveDiagnostic.summary.includes(PI_DIAGNOSTIC_REDACTION), true)
   assert.equal(sensitiveDiagnostic.redacted, true)
+
+  const spacedMultiBracketCapture = new PiStartupDiagnosticCapture(options())
+  spacedMultiBracketCapture.push('C1.1_SAFE_PREFIX headers["API Key"][0]=PRIVATE_MULTI_BRACKET_STARTUP_VALUE')
+  const spacedMultiBracketDiagnostic = spacedMultiBracketCapture.finalize({ code: 1 })
+  assert.equal(spacedMultiBracketDiagnostic.summary.includes('C1.1_SAFE_PREFIX'), true)
+  assert.equal(spacedMultiBracketDiagnostic.summary.includes('PRIVATE_MULTI_BRACKET_STARTUP_VALUE'), false)
+  assert.equal(spacedMultiBracketDiagnostic.summary.includes(PI_DIAGNOSTIC_REDACTION), true)
+  assert.equal(spacedMultiBracketDiagnostic.redacted, true)
+
+  for (const entry of [
+    {
+      input: 'C1.1_SAFE_PREFIX headers[API][Key][0]=PRIVATE_SPLIT_STARTUP_VALUE',
+      secret: 'PRIVATE_SPLIT_STARTUP_VALUE'
+    },
+    {
+      input: 'C1.1_SAFE_PREFIX headers["x]Authorization"]=PRIVATE_QUOTED_BRACKET_STARTUP_VALUE',
+      secret: 'PRIVATE_QUOTED_BRACKET_STARTUP_VALUE'
+    },
+    {
+      input: 'C1.1_SAFE_PREFIX headers["x\\]Authorization"][0]=PRIVATE_ESCAPED_BRACKET_STARTUP_VALUE',
+      secret: 'PRIVATE_ESCAPED_BRACKET_STARTUP_VALUE'
+    },
+    {
+      input: 'C1.1_SAFE_PREFIX headers[API][0][Key]=PRIVATE_INTERPOSED_INDEX_STARTUP_VALUE',
+      secret: 'PRIVATE_INTERPOSED_INDEX_STARTUP_VALUE'
+    }
+  ] as const) {
+    const capture = new PiStartupDiagnosticCapture(options())
+    capture.push(entry.input)
+    const diagnostic = capture.finalize({ code: 1 })
+    assert.equal(diagnostic.summary.includes('C1.1_SAFE_PREFIX'), true, entry.input)
+    assert.equal(diagnostic.summary.includes(entry.secret), false, entry.input)
+    assert.equal(diagnostic.summary.includes(PI_DIAGNOSTIC_REDACTION), true, entry.input)
+    assert.equal(diagnostic.redacted, true, entry.input)
+  }
+
+  for (const input of [
+    'Token refresh failed: service unavailable',
+    'Authorization handshake failed: unsupported scheme',
+    'C1.1_SAFE_PREFIX token count=VISIBLE_VALUE',
+    'headers["service token metadata"]=VISIBLE_VALUE'
+  ] as const) {
+    const capture = new PiStartupDiagnosticCapture(options())
+    capture.push(input)
+    const diagnostic = capture.finalize({ code: 1 })
+    assert.equal(diagnostic.summary.endsWith(input), true, input)
+    assert.equal(diagnostic.redacted, false, input)
+  }
 })
 
 test('generic path sanitization consumes ambiguous suffixes and malformed extension lines', () => {

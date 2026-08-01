@@ -229,6 +229,92 @@ test('PiAcpSession: runtime extension errors flush before end_turn and leave the
   assert.equal(firstResolutionCount, 1)
 })
 
+test('PiAcpSession: drains a reentrant runtime extension error before end_turn', async () => {
+  const conn = new FakeAgentSideConnection()
+  const proc = new FakePiRpcProcess()
+  const timeline: string[] = []
+  const originalSessionUpdate = conn.sessionUpdate.bind(conn)
+  let diagnosticDeliveryCount = 0
+  let markSecondDiagnosticStarted!: () => void
+  let releaseDiagnostic!: () => void
+  const secondDiagnosticStarted = new Promise<void>(resolve => {
+    markSecondDiagnosticStarted = resolve
+  })
+  const diagnosticGate = new Promise<void>(resolve => {
+    releaseDiagnostic = resolve
+  })
+
+  conn.sessionUpdate = async message => {
+    await originalSessionUpdate(message)
+    const update = message.update as any
+    if (update._meta?.piAcp?.diagnostic?.code === 'PI_EXTENSION_RUNTIME_ERROR') {
+      diagnosticDeliveryCount += 1
+      if (diagnosticDeliveryCount === 1) {
+        timeline.push('first_diagnostic_reentrant_emit')
+        proc.emit({ ...RUNTIME_EXTENSION_EVENT, error: 'C1.2_SECOND_REENTRANT_REASON' })
+        return
+      }
+      timeline.push('second_diagnostic_started')
+      markSecondDiagnosticStarted()
+      await diagnosticGate
+      timeline.push('second_diagnostic_flushed')
+    }
+  }
+
+  const session = new PiAcpSession({
+    sessionId: 's-runtime-reentrant',
+    cwd: '/workspace/acme',
+    mcpServers: [],
+    proc: proc as any,
+    conn: asAgentConn(conn),
+    fileCommands: []
+  })
+
+  let firstResolutionCount = 0
+  const first = session.prompt('one').then(reason => {
+    firstResolutionCount += 1
+    timeline.push(`first_${reason}`)
+    return reason
+  })
+  const second = session.prompt('two')
+
+  proc.emit(RUNTIME_EXTENSION_EVENT)
+  proc.emit({ type: 'agent_settled' })
+
+  try {
+    await secondDiagnosticStarted
+    await new Promise(resolve => setTimeout(resolve, 0))
+    assert.equal(firstResolutionCount, 0)
+    assert.deepEqual(
+      proc.prompts.map(prompt => prompt.message),
+      ['one']
+    )
+  } finally {
+    releaseDiagnostic()
+  }
+
+  assert.equal(await first, 'end_turn')
+  assert.deepEqual(timeline, [
+    'first_diagnostic_reentrant_emit',
+    'second_diagnostic_started',
+    'second_diagnostic_flushed',
+    'first_end_turn'
+  ])
+  assert.deepEqual(
+    proc.prompts.map(prompt => prompt.message),
+    ['one', 'two']
+  )
+  assert.equal(
+    conn.updates.filter(entry => (entry.update as any)._meta?.piAcp?.diagnostic?.code === 'PI_EXTENSION_RUNTIME_ERROR')
+      .length,
+    2
+  )
+
+  proc.emit({ type: 'agent_settled' })
+  assert.equal(await second, 'end_turn')
+  assert.equal(firstResolutionCount, 1)
+})
+
 test('PiAcpSession: snapshots the parent environment and Pi agent directory for runtime diagnostics', async () => {
   const previousAgentDir = process.env.PI_CODING_AGENT_DIR
   const previousApiKey = process.env.C1_2_SNAPSHOT_API_KEY

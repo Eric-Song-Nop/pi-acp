@@ -426,7 +426,11 @@ export class PiAcpSession {
   }
 
   private async flushEmits(): Promise<void> {
-    await this.lastEmit
+    let tail: Promise<void>
+    do {
+      tail = this.lastEmit
+      await tail
+    } while (tail !== this.lastEmit)
   }
 
   private emitBashToolCall(params: {
