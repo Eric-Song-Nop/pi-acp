@@ -161,7 +161,7 @@ commands 宣称为稳定支持。
 | `C0.6` | 建立真实 Pi fixture extension pack                                | `verified`  | `C0.5`                    | `G0`      |
 | `C0.7` | 记录当前失败基线和 immutable transcripts                          | `verified`  | `C0.3`, `C0.6`            | `G0`      |
 | `C1.1` | extension stderr/load diagnostics 可见且安全限长                  | `verified`  | `C0.7`                    | `G1`      |
-| `C1.2` | `extension_error` 映射为可见、可测试错误                          | `proposed`  | `C0.7`                    | `G1`      |
+| `C1.2` | `extension_error` 映射为可见、可测试错误                          | `verified`  | `C0.7`                    | `G1`      |
 | `C1.3` | Pi child 退出时 fail pending command，并提供确定恢复路径          | `proposed`  | `C0.5`                    | `G1`      |
 | `C1.4` | 使用严格 LF JSONL reader                                          | `proposed`  | `C0.3`                    | `G1`      |
 | `C1.5` | 已知但未实现的 Pi built-in 被明确拒绝，不进入 LLM                 | `proposed`  | `C0.4`                    | `G1`      |
@@ -547,6 +547,67 @@ C0.7 live expected-failure replay 先要求 runtime-source allowlist 对当前 h
 再比较当前与 frozen capture 的 allowlist tree。tree 相同则保留 frozen provenance，
 并在 recording runtime 做 artifact byte equality；tree 不同则绑定当前 head、只校验
 structured signature。因此本 checkpoint 不改写 immutable manifest/artifact。
+
+#### `C1.2` Runtime extension error visibility
+
+- [x] Pi `0.83.0` post-subscription `extension_error` 的 canonical
+      `extensionPath`、`event`、`error` fields 映射为 exactly one ordered ACP
+      `agent_message_chunk`；visible text 与 `_meta.piAcp.diagnostic` 使用 stable
+      `PI_EXTENSION_RUNTIME_ERROR` / `runtime` envelope，notify level 为 `error`。
+- [x] 完整 visible summary（含 deterministic truncation marker）最多 `4,096`
+      UTF-8 bytes，source/event 分别最多 `512` / `128` bytes。project/global path
+      只显示 `project:<relative>` / `global:<relative>`，external/unsafe/malformed
+      source 使用 `external:<redacted>` / `unknown`；raw path、raw oversized error、
+      credential value 与 internal-only stack 不进入 wire metadata、stderr、telemetry
+      或持久化状态。
+- [x] runtime error 复用已接受的 C1.1 display/privacy vocabulary 与 benign-field
+      actionability，不在本 checkpoint 扩展 matcher vocabulary。Pi/extension →
+      pi-acp → ACP UI 仍是 trusted application output；caps/masking 是 wire/UX/privacy
+      product guarantees，不是 adversarial-agent security boundary。
+- [x] `extension_error` 保持 Pi `0.83.0` 的 nonterminal semantics：不 resolve/reject
+      pending turn、不清 queue、不 kill/restart child、不合成 JSON-RPC failure，也不单独
+      改变 stop reason。active prompt 等 authoritative `agent_settled`，先 flush error
+      update，再 exactly once 返回 `end_turn`（除非另有 cancel）；repeated events 不去重。
+- [x] opt-in sibling real-Pi fixture 在 successful `session/new` 后从
+      `before_agent_start` throw deterministic sentinel；同一 prompt 可见 exactly one
+      bounded diagnostic，完成 exactly one configured-loopback provider turn，正常
+      `end_turn`，Pi 继续可用且 cleanup clean。default C0.6/C0.7 fixture bytes/behavior
+      在 option off 时不变。
+- [x] current/exact Node `22.19.0` 的 formatter/session/real-Pi focused 与 full suites、
+      network-denied load-boundaries、typecheck/lint/build/Prettier/diff-check 全绿；C0.7
+      manifest/transcripts/artifacts byte-identical 且不 recapture。
+
+run-scoped accepted implementation identity 为 PR #15 final replacement head
+[`f4efabed74bb54b493f5059ff1fd55bcf895789b`](https://github.com/Eric-Song-Nop/pi-acp/commit/f4efabed74bb54b493f5059ff1fd55bcf895789b)；
+repair parent `9d8b82a3…` 保持 invalidated，stacked base 为 `d3e61c4…`。
+[CI run `30687676868`](https://github.com/Eric-Song-Nop/pi-acp/actions/runs/30687676868)
+在该 exact head 的 provenance、typecheck、lint、test、build、两个 network-denied
+real-Pi rows 与 stable `required` job 全绿。Node `26.5.0` 与 exact Node
+`22.19.0` 本地 full suites 均为 `205/205`，focused formatter/session/real-Pi
+均为 `69/69`，load boundaries 均为 `8/8`；typecheck、lint、build、
+whole-tree Prettier、diff-check 与 transcript verifier `3/3` 全绿。C0.7 manifest
+SHA-256 仍为 `edfbbf2807e84f409e826a853e514debb30bd51a964a711cccd0577dea469ce3`，
+manifest/transcripts/artifacts 与 stacked base byte-identical，未 recapture。independent
+exact-head [review `4833897641`](https://github.com/Eric-Song-Nop/pi-acp/pull/15#pullrequestreview-4833897641)
+接受该 final replacement head，无 P1/P2/P3，unresolved review threads 为 `0`。
+后续 documentation-only publication commit 不替换这个 implementation/run identity。
+
+证据计划：fork
+[issue #14](https://github.com/Eric-Song-Nop/pi-acp/issues/14)、
+`README.md`、`src/pi-rpc/diagnostics.ts`、`src/acp/session.ts`、
+`test/unit/pi-runtime-extension-diagnostics.test.ts`、
+`test/component/session-events.test.ts`、
+`test/component/real-pi-fixture-pack.test.ts`、
+`test/component/real-pi-extension-error.test.ts`、
+`test/fixtures/pi-extension-pack/runtime-error/index.ts`、
+`test/helpers/real-pi-fixture.ts` 与
+`.github/scripts/run-network-denied-ci.sh`。
+
+边界：本 checkpoint 只处理 `PiAcpSession` handler 安装之后观察到的 runtime JSON
+event。startup stderr/spawn/load failure 属于 `C1.1`；general child exit/EPIPE recovery
+属于 `C1.3`；trust/loaded-extension inventory/stable source identity 属于 `C1.6`；
+pre-subscription buffering/readiness 属于 `C1.7`；command publication/routing/execution
+属于 `C2/C3`。source 仅是 best-effort display label，不构成 authenticity claim。
 
 ### M2 — Command Catalog
 

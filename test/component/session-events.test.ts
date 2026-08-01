@@ -6,6 +6,26 @@ import { join } from 'node:path'
 import { PiAcpSession } from '../../src/acp/session.js'
 import { FakeAgentSideConnection, FakePiRpcProcess, asAgentConn } from '../helpers/fakes.js'
 
+const RUNTIME_EXTENSION_EVENT = {
+  type: 'extension_error',
+  extensionPath: '/workspace/acme/.pi/extensions/failing.ts',
+  event: 'before_agent_start',
+  error: 'C1.2_SAFE_REASON'
+}
+const RUNTIME_EXTENSION_SUMMARY =
+  'Pi extension error (source: project:.pi/extensions/failing.ts; event: before_agent_start):\nC1.2_SAFE_REASON'
+const RUNTIME_EXTENSION_DIAGNOSTIC = {
+  schemaVersion: 1,
+  code: 'PI_EXTENSION_RUNTIME_ERROR',
+  phase: 'runtime',
+  source: 'project:.pi/extensions/failing.ts',
+  event: 'before_agent_start',
+  summary: RUNTIME_EXTENSION_SUMMARY,
+  truncated: false,
+  redacted: true,
+  summaryLimitBytes: 4096
+}
+
 test('PiAcpSession: emits agent_message_chunk for text_delta', async () => {
   const conn = new FakeAgentSideConnection()
   const proc = new FakePiRpcProcess()
@@ -60,6 +80,336 @@ test('PiAcpSession: emits agent_thought_chunk for thinking_delta', async () => {
     sessionUpdate: 'agent_thought_chunk',
     content: { type: 'text', text: 'thinking...' }
   })
+})
+
+test('PiAcpSession: emits the canonical runtime extension diagnostic without an active prompt', async () => {
+  const conn = new FakeAgentSideConnection()
+  const proc = new FakePiRpcProcess()
+
+  new PiAcpSession({
+    sessionId: 's-runtime',
+    cwd: '/workspace/acme',
+    mcpServers: [],
+    proc: proc as any,
+    conn: asAgentConn(conn),
+    fileCommands: []
+  })
+
+  proc.emit(RUNTIME_EXTENSION_EVENT)
+
+  // Notifications are serialized asynchronously even when no prompt is active.
+  assert.equal(conn.updates.length, 0)
+  await new Promise(r => setTimeout(r, 0))
+
+  assert.deepEqual(conn.updates, [
+    {
+      sessionId: 's-runtime',
+      update: {
+        sessionUpdate: 'agent_message_chunk',
+        content: { type: 'text', text: RUNTIME_EXTENSION_SUMMARY },
+        _meta: {
+          piAcp: {
+            notify: { level: 'error' },
+            diagnostic: RUNTIME_EXTENSION_DIAGNOSTIC
+          }
+        }
+      }
+    }
+  ])
+  assert.equal(proc.prompts.length, 0)
+})
+
+test('PiAcpSession: preserves repeated runtime extension errors in event order exactly once each', async () => {
+  const conn = new FakeAgentSideConnection()
+  const proc = new FakePiRpcProcess()
+
+  new PiAcpSession({
+    sessionId: 's-runtime-order',
+    cwd: '/workspace/acme',
+    mcpServers: [],
+    proc: proc as any,
+    conn: asAgentConn(conn),
+    fileCommands: []
+  })
+
+  proc.emit({ type: 'message_update', assistantMessageEvent: { type: 'text_delta', delta: 'before' } })
+  proc.emit(RUNTIME_EXTENSION_EVENT)
+  proc.emit({ type: 'message_update', assistantMessageEvent: { type: 'text_delta', delta: 'between' } })
+  proc.emit(RUNTIME_EXTENSION_EVENT)
+  proc.emit({ type: 'message_update', assistantMessageEvent: { type: 'text_delta', delta: 'after' } })
+
+  await new Promise(r => setTimeout(r, 0))
+
+  assert.deepEqual(
+    conn.updates.map(entry => (entry.update as any).content?.text),
+    ['before', RUNTIME_EXTENSION_SUMMARY, 'between', RUNTIME_EXTENSION_SUMMARY, 'after']
+  )
+  assert.equal(
+    conn.updates.filter(entry => (entry.update as any)._meta?.piAcp?.diagnostic?.code === 'PI_EXTENSION_RUNTIME_ERROR')
+      .length,
+    2
+  )
+  assert.deepEqual((conn.updates[1]!.update as any)._meta, (conn.updates[3]!.update as any)._meta)
+})
+
+test('PiAcpSession: runtime extension errors flush before end_turn and leave the queued prompt intact', async () => {
+  const conn = new FakeAgentSideConnection()
+  const proc = new FakePiRpcProcess()
+  const timeline: string[] = []
+  const originalSessionUpdate = conn.sessionUpdate.bind(conn)
+  let markExtensionUpdateStarted!: () => void
+  let releaseExtensionUpdate!: () => void
+  const extensionUpdateStarted = new Promise<void>(resolve => {
+    markExtensionUpdateStarted = resolve
+  })
+  const extensionUpdateGate = new Promise<void>(resolve => {
+    releaseExtensionUpdate = resolve
+  })
+
+  conn.sessionUpdate = async message => {
+    await originalSessionUpdate(message)
+    if ((message.update as any)._meta?.piAcp?.diagnostic?.code === 'PI_EXTENSION_RUNTIME_ERROR') {
+      timeline.push('extension_update_started')
+      markExtensionUpdateStarted()
+      await extensionUpdateGate
+      timeline.push('extension_update_flushed')
+    }
+  }
+
+  const session = new PiAcpSession({
+    sessionId: 's-runtime-turn',
+    cwd: '/workspace/acme',
+    mcpServers: [],
+    proc: proc as any,
+    conn: asAgentConn(conn),
+    fileCommands: []
+  })
+
+  let firstResolutionCount = 0
+  const first = session.prompt('one').then(reason => {
+    firstResolutionCount += 1
+    timeline.push(`first_${reason}`)
+    return reason
+  })
+  const second = session.prompt('two')
+
+  proc.emit(RUNTIME_EXTENSION_EVENT)
+  proc.emit({ type: 'agent_start' })
+  proc.emit({ type: 'agent_end' })
+
+  await extensionUpdateStarted
+  assert.equal(firstResolutionCount, 0)
+  assert.deepEqual(
+    proc.prompts.map(prompt => prompt.message),
+    ['one']
+  )
+
+  proc.emit({ type: 'agent_settled' })
+  await new Promise(r => setTimeout(r, 0))
+  assert.equal(firstResolutionCount, 0)
+
+  releaseExtensionUpdate()
+  assert.equal(await first, 'end_turn')
+  assert.equal(firstResolutionCount, 1)
+  assert.deepEqual(timeline, ['extension_update_started', 'extension_update_flushed', 'first_end_turn'])
+  assert.deepEqual(
+    proc.prompts.map(prompt => prompt.message),
+    ['one', 'two']
+  )
+  assert.equal(
+    conn.updates.filter(entry => (entry.update as any)._meta?.piAcp?.diagnostic?.code === 'PI_EXTENSION_RUNTIME_ERROR')
+      .length,
+    1
+  )
+
+  proc.emit({ type: 'agent_start' })
+  proc.emit({ type: 'agent_end' })
+  proc.emit({ type: 'agent_settled' })
+  assert.equal(await second, 'end_turn')
+  assert.equal(firstResolutionCount, 1)
+})
+
+test('PiAcpSession: drains a reentrant runtime extension error before end_turn', async () => {
+  const conn = new FakeAgentSideConnection()
+  const proc = new FakePiRpcProcess()
+  const timeline: string[] = []
+  const originalSessionUpdate = conn.sessionUpdate.bind(conn)
+  let diagnosticDeliveryCount = 0
+  let markSecondDiagnosticStarted!: () => void
+  let releaseDiagnostic!: () => void
+  const secondDiagnosticStarted = new Promise<void>(resolve => {
+    markSecondDiagnosticStarted = resolve
+  })
+  const diagnosticGate = new Promise<void>(resolve => {
+    releaseDiagnostic = resolve
+  })
+
+  conn.sessionUpdate = async message => {
+    await originalSessionUpdate(message)
+    const update = message.update as any
+    if (update._meta?.piAcp?.diagnostic?.code === 'PI_EXTENSION_RUNTIME_ERROR') {
+      diagnosticDeliveryCount += 1
+      if (diagnosticDeliveryCount === 1) {
+        timeline.push('first_diagnostic_reentrant_emit')
+        proc.emit({ ...RUNTIME_EXTENSION_EVENT, error: 'C1.2_SECOND_REENTRANT_REASON' })
+        return
+      }
+      timeline.push('second_diagnostic_started')
+      markSecondDiagnosticStarted()
+      await diagnosticGate
+      timeline.push('second_diagnostic_flushed')
+    }
+  }
+
+  const session = new PiAcpSession({
+    sessionId: 's-runtime-reentrant',
+    cwd: '/workspace/acme',
+    mcpServers: [],
+    proc: proc as any,
+    conn: asAgentConn(conn),
+    fileCommands: []
+  })
+
+  let firstResolutionCount = 0
+  const first = session.prompt('one').then(reason => {
+    firstResolutionCount += 1
+    timeline.push(`first_${reason}`)
+    return reason
+  })
+  const second = session.prompt('two')
+
+  proc.emit(RUNTIME_EXTENSION_EVENT)
+  proc.emit({ type: 'agent_settled' })
+
+  try {
+    await secondDiagnosticStarted
+    await new Promise(resolve => setTimeout(resolve, 0))
+    assert.equal(firstResolutionCount, 0)
+    assert.deepEqual(
+      proc.prompts.map(prompt => prompt.message),
+      ['one']
+    )
+  } finally {
+    releaseDiagnostic()
+  }
+
+  assert.equal(await first, 'end_turn')
+  assert.deepEqual(timeline, [
+    'first_diagnostic_reentrant_emit',
+    'second_diagnostic_started',
+    'second_diagnostic_flushed',
+    'first_end_turn'
+  ])
+  assert.deepEqual(
+    proc.prompts.map(prompt => prompt.message),
+    ['one', 'two']
+  )
+  assert.equal(
+    conn.updates.filter(entry => (entry.update as any)._meta?.piAcp?.diagnostic?.code === 'PI_EXTENSION_RUNTIME_ERROR')
+      .length,
+    2
+  )
+
+  proc.emit({ type: 'agent_settled' })
+  assert.equal(await second, 'end_turn')
+  assert.equal(firstResolutionCount, 1)
+})
+
+test('PiAcpSession: snapshots the parent environment and Pi agent directory for runtime diagnostics', async () => {
+  const previousAgentDir = process.env.PI_CODING_AGENT_DIR
+  const previousApiKey = process.env.C1_2_SNAPSHOT_API_KEY
+  const originalAgentDir = '/home/tester/.pi/agent-snapshot'
+  const originalSecret = 'C1_2_ORIGINAL_INHERITED_SECRET'
+  const replacementSecret = 'C1_2_LATER_PROCESS_VALUE'
+
+  try {
+    process.env.PI_CODING_AGENT_DIR = originalAgentDir
+    process.env.C1_2_SNAPSHOT_API_KEY = originalSecret
+
+    const conn = new FakeAgentSideConnection()
+    const proc = new FakePiRpcProcess()
+
+    new PiAcpSession({
+      sessionId: 's-runtime-env',
+      cwd: '/workspace/acme',
+      mcpServers: [],
+      proc: proc as any,
+      conn: asAgentConn(conn),
+      fileCommands: []
+    })
+
+    process.env.PI_CODING_AGENT_DIR = '/home/tester/.pi/different-agent'
+    process.env.C1_2_SNAPSHOT_API_KEY = replacementSecret
+
+    proc.emit({
+      type: 'extension_error',
+      extensionPath: `${originalAgentDir}/extensions/failing.ts`,
+      event: 'before_agent_start',
+      error: `failed with ${originalSecret}; later value ${replacementSecret}`
+    })
+
+    await new Promise(r => setTimeout(r, 0))
+
+    const diagnostic = (conn.updates[0]!.update as any)._meta.piAcp.diagnostic
+    assert.equal(diagnostic.source, 'global:extensions/failing.ts')
+    assert.equal(diagnostic.summary.includes(originalAgentDir), false)
+    assert.equal(diagnostic.summary.includes(originalSecret), false)
+    assert.equal(diagnostic.summary.includes('[REDACTED]'), true)
+    assert.equal(diagnostic.summary.includes(replacementSecret), true)
+  } finally {
+    if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR
+    else process.env.PI_CODING_AGENT_DIR = previousAgentDir
+
+    if (previousApiKey === undefined) delete process.env.C1_2_SNAPSHOT_API_KEY
+    else process.env.C1_2_SNAPSHOT_API_KEY = previousApiKey
+  }
+})
+
+test('PiAcpSession: malformed runtime extension errors never throw and use safe fallbacks', async () => {
+  const conn = new FakeAgentSideConnection()
+  const proc = new FakePiRpcProcess()
+
+  new PiAcpSession({
+    sessionId: 's-runtime-malformed',
+    cwd: '/workspace/acme',
+    mcpServers: [],
+    proc: proc as any,
+    conn: asAgentConn(conn),
+    fileCommands: []
+  })
+
+  assert.doesNotThrow(() => {
+    proc.emit({
+      type: 'extension_error',
+      extensionPath: 42,
+      event: null,
+      error: { message: 'nested raw error must be ignored' },
+      stack: 'internal stack must be ignored'
+    })
+  })
+
+  await new Promise(r => setTimeout(r, 0))
+
+  assert.equal(conn.updates.length, 1)
+  const update = conn.updates[0]!.update as any
+  assert.deepEqual(
+    {
+      sessionUpdate: update.sessionUpdate,
+      text: update.content.text,
+      notify: update._meta.piAcp.notify,
+      source: update._meta.piAcp.diagnostic.source,
+      event: update._meta.piAcp.diagnostic.event
+    },
+    {
+      sessionUpdate: 'agent_message_chunk',
+      text: 'Pi extension error (source: unknown; event: unknown):\nPi reported an extension runtime error.',
+      notify: { level: 'error' },
+      source: 'unknown',
+      event: 'unknown'
+    }
+  )
+  assert.equal(update.content.text.includes('nested raw error'), false)
+  assert.equal(update.content.text.includes('internal stack'), false)
 })
 
 test('PiAcpSession: emits tool_call + tool_call_update + completes', async () => {

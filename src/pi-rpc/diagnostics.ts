@@ -4,12 +4,16 @@ import { URL } from 'node:url'
 
 export const PI_STARTUP_STDERR_LIMIT_BYTES = 16_384
 export const PI_STARTUP_SUMMARY_LIMIT_BYTES = 4_096
+export const PI_RUNTIME_EXTENSION_SUMMARY_LIMIT_BYTES = 4_096
+export const PI_RUNTIME_EXTENSION_SOURCE_LIMIT_BYTES = 512
+export const PI_RUNTIME_EXTENSION_EVENT_LIMIT_BYTES = 128
 export const PI_STARTUP_STDERR_DRAIN_TIMEOUT_MS = 100
 export const PI_STARTUP_TRUNCATION_MARKER = '[diagnostic truncated]\n'
 export const PI_STARTUP_STDERR_OMISSION_MARKER = '\n[stderr omitted]\n'
 export const PI_DIAGNOSTIC_REDACTION = '[REDACTED]'
 const PI_STARTUP_SAFE_FALLBACK = 'Pi failed to start before the RPC channel became ready.'
 const PI_EXTENSION_SAFE_FALLBACK = 'Pi rejected the extension during startup.'
+const PI_RUNTIME_EXTENSION_SAFE_FALLBACK = 'Pi reported an extension runtime error.'
 
 const PI_STARTUP_STDERR_HEAD_BYTES = PI_STARTUP_STDERR_LIMIT_BYTES / 2
 const PI_STARTUP_STDERR_TAIL_BYTES = PI_STARTUP_STDERR_LIMIT_BYTES / 2
@@ -27,6 +31,18 @@ export interface PiStartupDiagnostic {
   redacted: boolean
   stderrLimitBytes: typeof PI_STARTUP_STDERR_LIMIT_BYTES
   summaryLimitBytes: typeof PI_STARTUP_SUMMARY_LIMIT_BYTES
+}
+
+export interface PiRuntimeExtensionDiagnostic {
+  schemaVersion: 1
+  code: 'PI_EXTENSION_RUNTIME_ERROR'
+  phase: 'runtime'
+  source: string
+  event: string
+  summary: string
+  truncated: boolean
+  redacted: boolean
+  summaryLimitBytes: typeof PI_RUNTIME_EXTENSION_SUMMARY_LIMIT_BYTES
 }
 
 export interface PiStartupDiagnosticOptions {
@@ -61,6 +77,7 @@ const SENSITIVE_ENV_NAME =
   /(?:^|[_./:/-])(?:API_?KEYS?|TOKENS?|SECRETS?|PASSWORDS?|PASSWD|AUTHS?|AUTH(?:ORIZATION|_?TOKENS?)?|CREDENTIALS?|PRIVATE_?KEYS?|ACCESS_?KEYS?|SESSION_?KEYS?|COOKIES?|SIGNATURES?)(?:$|[_./:/-])|^(?:PGPASSWORD|MYSQL_PWD)$/i
 const SENSITIVE_COMPACT_KEY_SUFFIX =
   /(?:APIKEYS?|AUTHS?|AUTHORIZATION|AUTHTOKENS?|TOKENS?|SECRETS?|PASSWORDS?|PASSWD|CREDENTIALS?|PRIVATEKEYS?|ACCESSKEYS?|SESSIONKEYS?|COOKIES?|PGPASSWORD|MYSQLPWD|SIGNATURES?)$/i
+const SENSITIVE_ASSIGNMENT_TOKEN_WINDOW = 64
 const KEYED_NAME_ASSIGNMENT =
   /(?<![\p{L}\p{N}_./:@=-])(["']?)([\p{L}\p{N}_./:@-][\p{L}\p{N}_./:@ \t-]{0,511})\1(?:(?:[\t \r\n]*\[[^\]\r\n]{0,512}\])|(?:[\t \r\n]*\])){0,16}[\t \r\n]*[:=]/gu
 const NESTED_KEYED_NAME_ASSIGNMENT =
@@ -233,6 +250,127 @@ export class PiStartupDiagnosticCapture {
     const overlap = this.head.length + this.tail.length - this.totalBytes
     return [Buffer.concat([this.head, this.tail.subarray(Math.max(0, overlap))], this.totalBytes)]
   }
+}
+
+export function formatPiRuntimeExtensionError(
+  input: unknown,
+  options: PiStartupDiagnosticOptions
+): Readonly<PiRuntimeExtensionDiagnostic> {
+  try {
+    const sensitiveValues = sensitiveEnvironmentValues(options.env)
+    const rawSource = readNonEmptyStringField(input, 'extensionPath')
+    const rawEvent = readNonEmptyStringField(input, 'event')
+    const rawReason = readNonEmptyStringField(input, 'error')
+
+    let redacted = rawSource === null || rawEvent === null || rawReason === null
+    const source =
+      rawSource === null
+        ? 'unknown'
+        : rawSource.trim() === rawSource
+          ? labelExtensionPath(rawSource, options, sensitiveValues)
+          : 'external:<redacted>'
+    redacted ||= rawSource !== null && source !== rawSource
+
+    let event = 'unknown'
+    let eventTruncated = false
+    if (rawEvent !== null) {
+      const normalizedEvent = normalizeTerminalText(rawEvent)
+      const sanitizedEvent = sanitizeStartupText(normalizedEvent, '', undefined, options, sensitiveValues)
+      if (isSafeRuntimeEvent(sanitizedEvent.text, sensitiveValues)) {
+        eventTruncated = Buffer.byteLength(sanitizedEvent.text, 'utf8') > PI_RUNTIME_EXTENSION_EVENT_LIMIT_BYTES
+        event = eventTruncated
+          ? takeUtf8Head(sanitizedEvent.text, PI_RUNTIME_EXTENSION_EVENT_LIMIT_BYTES)
+          : sanitizedEvent.text
+        redacted ||= sanitizedEvent.redacted || event !== rawEvent
+      } else {
+        redacted = true
+      }
+    }
+
+    let reason = PI_RUNTIME_EXTENSION_SAFE_FALLBACK
+    if (rawReason !== null) {
+      const normalizedReason = normalizeTerminalText(rawReason)
+      const sanitizedReason = sanitizeStartupText(normalizedReason, '', undefined, options, sensitiveValues)
+      if (sanitizedReason.text && isSafeRuntimeReason(sanitizedReason.text, sensitiveValues)) {
+        reason = sanitizedReason.text
+        redacted ||= sanitizedReason.redacted || reason !== rawReason
+      } else {
+        redacted = true
+      }
+    }
+
+    const prefix = `Pi extension error (source: ${source}; event: ${event}):\n`
+    const limited = limitSummary(reason, false, prefix)
+    const truncated = eventTruncated || limited.truncated
+    redacted ||= truncated
+
+    if (
+      Buffer.byteLength(source, 'utf8') > PI_RUNTIME_EXTENSION_SOURCE_LIMIT_BYTES ||
+      Buffer.byteLength(event, 'utf8') > PI_RUNTIME_EXTENSION_EVENT_LIMIT_BYTES ||
+      !isSafeFinalSource(source, sensitiveValues) ||
+      !isSafeRuntimeEvent(event, sensitiveValues) ||
+      !isSafeFinalSummary(limited.summary, sensitiveValues)
+    ) {
+      return fallbackRuntimeExtensionDiagnostic()
+    }
+
+    return Object.freeze({
+      schemaVersion: 1,
+      code: 'PI_EXTENSION_RUNTIME_ERROR',
+      phase: 'runtime',
+      source,
+      event,
+      summary: limited.summary,
+      truncated,
+      redacted,
+      summaryLimitBytes: PI_RUNTIME_EXTENSION_SUMMARY_LIMIT_BYTES
+    })
+  } catch {
+    return fallbackRuntimeExtensionDiagnostic()
+  }
+}
+
+function readNonEmptyStringField(input: unknown, key: 'extensionPath' | 'event' | 'error'): string | null {
+  if ((typeof input !== 'object' && typeof input !== 'function') || input === null) return null
+
+  try {
+    const value = (input as Record<string, unknown>)[key]
+    return typeof value === 'string' && value.length > 0 ? value : null
+  } catch {
+    return null
+  }
+}
+
+function isSafeRuntimeEvent(event: string, sensitiveValues: readonly string[]): boolean {
+  if (!event || containsSensitiveText(event, sensitiveValues)) return false
+  for (const character of event) {
+    if (UNSAFE_FINAL_CHARACTER.test(character)) return false
+  }
+  return true
+}
+
+function isSafeRuntimeReason(reason: string, sensitiveValues: readonly string[]): boolean {
+  if (containsSensitiveText(reason, sensitiveValues)) return false
+  for (const character of reason) {
+    if (character !== '\n' && UNSAFE_FINAL_CHARACTER.test(character)) return false
+  }
+  return true
+}
+
+function fallbackRuntimeExtensionDiagnostic(): Readonly<PiRuntimeExtensionDiagnostic> {
+  const source = 'unknown'
+  const event = 'unknown'
+  return Object.freeze({
+    schemaVersion: 1,
+    code: 'PI_EXTENSION_RUNTIME_ERROR',
+    phase: 'runtime',
+    source,
+    event,
+    summary: `Pi extension error (source: ${source}; event: ${event}):\n${PI_RUNTIME_EXTENSION_SAFE_FALLBACK}`,
+    truncated: false,
+    redacted: true,
+    summaryLimitBytes: PI_RUNTIME_EXTENSION_SUMMARY_LIMIT_BYTES
+  })
 }
 
 function prepareStartupText(decodedParts: readonly string[], rawTruncated: boolean): PreparedStartupText {
@@ -411,30 +549,114 @@ function isSensitiveAssignmentName(value: string): boolean {
   return SENSITIVE_COMPACT_KEY_SUFFIX.test(compactName)
 }
 
-function findNestedSensitiveAssignmentOffset(match: RegExpExecArray): number | null {
-  for (const token of match[0].matchAll(/[\p{L}\p{N}_./:@-]+/gu)) {
-    if (isSensitiveAssignmentName(token[0])) {
-      return token.index === match[1].length ? match.index : match.index + token.index
+function normalizeSensitiveAssignmentSearchInput(input: string): string {
+  let output = ''
+  let inBracket = false
+  let quote: '"' | "'" | null = null
+  let escaped = false
+
+  for (const character of input) {
+    if (!inBracket) {
+      if (character === '[') inBracket = true
+      output += character
+      continue
     }
+
+    if (quote !== null) {
+      if (escaped) {
+        escaped = false
+        output += character === ']' ? ' ' : character
+      } else if (character === '\\') {
+        escaped = true
+        output += character
+      } else if (character === quote) {
+        quote = null
+        output += character
+      } else {
+        output += character === ']' ? ' ' : character
+      }
+      continue
+    }
+
+    if (character === '"' || character === "'") {
+      quote = character
+    } else if (character === ']') {
+      inBracket = false
+    }
+    output += character
   }
 
-  return isSensitiveAssignmentName(match[0]) ? match.index : null
+  return output
+}
+
+type SensitiveAssignmentToken = Readonly<{ text: string; index: number }>
+
+function sensitiveAssignmentSegments(match: RegExpExecArray): SensitiveAssignmentToken[][] {
+  const segments: SensitiveAssignmentToken[][] = []
+  const addSegment = (value: string, offset: number): void => {
+    const tokens = [...value.matchAll(/[\p{L}\p{N}_./:@-]+/gu)].map(token => ({
+      text: token[0],
+      index: offset + token.index
+    }))
+    if (tokens.length > 0) segments.push(tokens)
+  }
+
+  if (match[1]) {
+    addSegment(match[2], match[1].length)
+  } else {
+    let segmentStart = 0
+    for (let index = 0; index <= match[2].length; index += 1) {
+      if (index < match[2].length && match[2][index] !== ':') continue
+      addSegment(match[2].slice(segmentStart, index), segmentStart)
+      segmentStart = index + 1
+    }
+  }
+  for (const bracket of match[0].matchAll(/\[([^\]\r\n]{0,512})\]/gu)) {
+    if (/^[\t ]*(?:["']?[0-9]+["']?)[\t ]*$/u.test(bracket[1])) continue
+    addSegment(bracket[1], bracket.index + 1)
+  }
+  return segments
+}
+
+function findNestedSensitiveAssignmentOffset(match: RegExpExecArray): number | null {
+  const tokens: SensitiveAssignmentToken[] = []
+  const segmentEnds: number[] = []
+  for (const segment of sensitiveAssignmentSegments(match)) {
+    tokens.push(...segment)
+    segmentEnds.push(tokens.length - 1)
+  }
+
+  for (let segmentIndex = segmentEnds.length - 1; segmentIndex >= 0; segmentIndex -= 1) {
+    const end = segmentEnds[segmentIndex]!
+    const first = Math.max(0, end - (SENSITIVE_ASSIGNMENT_TOKEN_WINDOW - 1))
+    let candidate = ''
+    for (let start = end; start >= first; start -= 1) {
+      const token = tokens[start]!
+      candidate = candidate ? `${token.text} ${candidate}` : token.text
+      if (isSensitiveAssignmentName(candidate)) {
+        return token.index === match[1].length ? match.index : match.index + token.index
+      }
+    }
+  }
+  return null
 }
 
 function findSensitiveKeyAssignment(input: string): number | null {
   let earliestOffset: number | null = null
+  const searchInput = normalizeSensitiveAssignmentSearchInput(input)
   KEYED_NAME_ASSIGNMENT.lastIndex = 0
   let match: RegExpExecArray | null
-  while ((match = KEYED_NAME_ASSIGNMENT.exec(input)) !== null) {
-    if (findNestedSensitiveAssignmentOffset(match) !== null) {
-      earliestOffset = match.index
+  while ((match = KEYED_NAME_ASSIGNMENT.exec(searchInput)) !== null) {
+    const sensitiveOffset = findNestedSensitiveAssignmentOffset(match)
+    if (sensitiveOffset !== null) {
+      earliestOffset = sensitiveOffset
       break
     }
   }
   KEYED_NAME_ASSIGNMENT.lastIndex = 0
 
   NESTED_KEYED_NAME_ASSIGNMENT.lastIndex = 0
-  while ((match = NESTED_KEYED_NAME_ASSIGNMENT.exec(input)) !== null) {
+  while ((match = NESTED_KEYED_NAME_ASSIGNMENT.exec(searchInput)) !== null) {
     const nestedOffset = findNestedSensitiveAssignmentOffset(match)
     if (nestedOffset !== null) {
       earliestOffset = earliestOffset === null ? nestedOffset : Math.min(earliestOffset, nestedOffset)

@@ -10,7 +10,9 @@ import type {
 } from '@agentclientprotocol/sdk'
 import { RequestError } from '@agentclientprotocol/sdk'
 import { readFileSync } from 'node:fs'
-import { isAbsolute, resolve as resolvePath } from 'node:path'
+import { homedir } from 'node:os'
+import { isAbsolute, join, resolve as resolvePath } from 'node:path'
+import { formatPiRuntimeExtensionError } from '../pi-rpc/diagnostics.js'
 import { PiRpcProcess, PiRpcSpawnError, piRpcSpawnErrorData, type PiRpcEvent } from '../pi-rpc/process.js'
 import { maybeAuthRequiredError } from './auth-required.js'
 import { SessionStore } from './session-store.js'
@@ -268,6 +270,11 @@ export class PiAcpSession {
   readonly proc: PiRpcProcess
   private readonly conn: AgentSideConnection
   private readonly fileCommands: FileSlashCommand[]
+  private readonly runtimeExtensionDiagnosticOptions: {
+    cwd: string
+    agentDir: string
+    env: Readonly<NodeJS.ProcessEnv>
+  }
 
   // Used to map abort semantics to ACP stopReason.
   // Applies to the currently running turn.
@@ -312,6 +319,9 @@ export class PiAcpSession {
     this.proc = opts.proc
     this.conn = opts.conn
     this.fileCommands = opts.fileCommands ?? []
+    const env = { ...process.env }
+    const agentDir = env.PI_CODING_AGENT_DIR ?? join(env.HOME ?? env.USERPROFILE ?? homedir(), '.pi', 'agent')
+    this.runtimeExtensionDiagnosticOptions = { cwd: this.cwd, agentDir, env }
 
     this.proc.onEvent(ev => this.handlePiEvent(ev))
   }
@@ -416,7 +426,11 @@ export class PiAcpSession {
   }
 
   private async flushEmits(): Promise<void> {
-    await this.lastEmit
+    let tail: Promise<void>
+    do {
+      tail = this.lastEmit
+      await tail
+    } while (tail !== this.lastEmit)
   }
 
   private emitBashToolCall(params: {
@@ -778,6 +792,16 @@ export class PiAcpSession {
           }
 
           void this.proc.sendExtensionUiResponse({ id, cancelled: true }).catch(() => {})
+        })
+        break
+      }
+
+      case 'extension_error': {
+        const diagnostic = formatPiRuntimeExtensionError(ev, this.runtimeExtensionDiagnosticOptions)
+        this.emit({
+          sessionUpdate: 'agent_message_chunk',
+          content: { type: 'text', text: diagnostic.summary } satisfies ContentBlock,
+          _meta: { piAcp: { notify: { level: 'error' }, diagnostic } }
         })
         break
       }
