@@ -186,7 +186,7 @@ export type RealPiFixtureOptions = {
   lfJsonlResponse?: true
   hardDeadlineMs?: number
   clientShutdownTimeoutMs?: number
-  transcriptCheckpoint?: 'C0.6' | 'C0.7' | 'C1.1' | 'C1.2' | 'C1.3' | 'C1.4'
+  transcriptCheckpoint?: 'C0.6' | 'C0.7' | 'C1.1' | 'C1.2' | 'C1.3' | 'C1.4' | 'C1.5'
   transcriptCaseId?: string
   transcriptMetadata?: AcpTranscriptMetadata
   projectPrompts?: readonly {

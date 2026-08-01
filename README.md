@@ -155,16 +155,20 @@ Loaded from:
 - `/export` – export the current session to HTML in the session `cwd`
 - `/session` – show session stats (tokens/messages/cost/session file)
 - `/name <name>` – set session display name
-- `/queue all|one-at-a-time` – set pi queue mode (unstable feature)
 - `/changelog` – print the installed pi changelog (best-effort)
-- `/steering` - maps to `pi` Steering Mode, get/set
-- `/follow-up` - pats to `pi` Follow-up Mode, get/set
+- `/steering` – get or set pi's steering delivery mode
+- `/follow-up` – get or set pi's follow-up delivery mode
 
-Other built-in commands:
+The following known Pi built-ins require interactive-TUI or adapter work that is not available
+over ACP yet:
 
-- `/model` - not implemented (use the model selector UI in Zed)
-- `/thinking` - maps to 'mode' selector in Zed
-- `/clear` - not implemented (use ACP client 'new' command)
+- `/settings`, `/model`, `/scoped-models`, `/import`, `/share`, `/copy`, `/hotkeys`
+- `/fork`, `/clone`, `/tree`, `/trust`, `/login`, `/logout`, `/new`, `/resume`, `/reload`, `/quit`
+
+These names are not advertised. If a raw ACP client sends one anyway, after any required session
+restoration `pi-acp` returns an ACP `refusal` before that prompt content can enter Pi's prompt/turn
+path or the model. Other unrecognized slash names keep their existing prompt/skill/extension
+routing behavior.
 
 #### 3) Skill commands
 

@@ -164,7 +164,7 @@ commands 宣称为稳定支持。
 | `C1.2` | `extension_error` 映射为可见、可测试错误                          | `verified`  | `C0.7`                    | `G1`      |
 | `C1.3` | Pi child 退出时 fail pending command，并提供确定恢复路径          | `verified`  | `C0.5`                    | `G1`      |
 | `C1.4` | 使用严格 LF JSONL reader                                          | `verified`  | `C0.3`                    | `G1`      |
-| `C1.5` | 已知但未实现的 Pi built-in 被明确拒绝，不进入 LLM                 | `proposed`  | `C0.4`                    | `G1`      |
+| `C1.5` | 已知但未实现的 Pi built-in 被明确拒绝，不进入 LLM                 | `active`    | `C0.4`                    | `G1`      |
 | `C1.6` | trust/loaded extensions/command source 可诊断，无隐式批准         | `proposed`  | `DEC-004`, `C1.1`         | `G1`      |
 | `C1.7` | startup readiness 与 early-event buffering                        | `proposed`  | `C0.6`                    | `G1`      |
 | `C2.1` | 保存 ACP client capabilities                                      | `proposed`  | `C0.4`                    | `G2`      |
@@ -776,6 +776,74 @@ policy，也不实现 C1.7 readiness buffering、C2/C3 command routing/execution
 certification 或 dependency/runtime upgrade。rollback 为 revert 后续 C1.4
 implementation/publication commits，精确回到 verified C1.3 publication
 `00cbe24e1f9506fd379c9dd1bb422aa09e90c33f`；C0.7 immutable artifact 不改写。
+
+#### `C1.5` Known unsupported Pi built-in refusal fence
+
+- [ ] 单一 ordered inventory 固定 Pi `0.80.5` / `0.83.0` 相同的 22 个 published
+      built-ins，exhaustive disposition map 精确分为 5 个 adapter-handled overlap 与
+      17 个 `reject`；3 个 adapter-only command 单独记录，不重复维护 runtime blocklist。
+- [ ] pinned provenance 记录两端 gitHead、registry SRI、upstream source path/SHA-256 与
+      published dist leaf path/SHA-256；installed Pi `0.83.0` private leaf 只作为 data
+      读取、hash 与 static parse，不 import/execute；`0.80.5` 只作 provenance endpoint，
+      不虚构新的 runtime CI axis。
+- [ ] restore/recovery 仍先执行；随后只匹配 `trimStart()` 后第一个 leading slash token，
+      token 以 end-of-string 或任意 ECMAScript whitespace 结束，exact/case-sensitive。
+      精确 17 个名字在 args、tab/newline、split text blocks、resource suffix 与 images
+      存在时均不能 bypass；case/prefix/path/double-slash/non-leading near miss 保持原 routing。
+- [ ] rejection 在 file prompt expansion、Pi prompt/turn queue 与 provider dispatch 前完成；不
+      abort、不改变 session、不加入/清空 active queue，并返回一次 request-bound ACP
+      `stopReason: refusal` 与 fixed bounded `_meta.piAcp` diagnostic/routing metadata。
+      不发送无 request identity 的 `session/update`，也不抛会令 SDK `0.26.0` 把完整
+      request 打到 stderr 的 `RequestError`。restore/spawn/control RPC 为建立 session 所需的
+      既有前置工作，不误计作 classifier 后的 prompt/turn dispatch。
+- [ ] diagnostic 只由固定 template 与 allowlisted ASCII command name 组成；不包含 args、
+      content/image bytes 或 metadata、session ID、cwd/path、environment。agent-to-client
+      response wire、adapter stderr、persisted session 与所有 diagnostic 均不得出现
+      sensitive sentinels；client request wire 必然含原始 prompt，不作不可能的隐藏声明。
+- [ ] new/load 的 Pi-derived primary catalog 与 file-command fallback catalog 都过滤精确
+      17-name collision；现有 8 个 adapter advertisements 保持不变。supported-name/general
+      collision 仍属 `C2.4`，non-colliding unknown/prompt/skill/extension route 不在本
+      checkpoint 改写；精确 17-name collision 则按上一条明确过滤/refuse。
+- [ ] fake/unit matrix 覆盖 17 个精确 refusal、grammar/attachment bypass、negative routing、
+      restore precedence、active/queued isolation 及两条 catalog paths；successful restore 后
+      每个 rejected request 都有一个 terminal response，且 classifier 后的
+      `session.prompt()` / Pi prompt-turn/provider 调用为 `0`。invalid/dead/recovery error
+      仍先于 classifier，测试不得把该 pre-existing
+      SDK error logging path 错写为 C1.5 sentinel-secrecy guarantee。
+- [ ] pinned-real-Pi `0.83.0` isolated loopback/network-denied evidence 同时覆盖 strict local
+      refusal 与 raw 全 17 个 server refusal，drain 后 provider observations 为 `0`；随后
+      `/session` 证明 child/session live，adapter clean shutdown 且无遗留 port/process。
+- [ ] current Node 与 exact Node `22.19.0` 的 focused/full、serialized load-boundaries、
+      typecheck/lint/build/Prettier/diff-check、immutable replay/transcript verifier 与 exact-head
+      CI 全绿；C0.7 manifest/tree/artifacts byte-identical 且不 recapture。
+
+fork [issue #20](https://github.com/Eric-Song-Nop/pi-acp/issues/20) 冻结 active contract。
+实现从 verified C1.4 publication
+`14981cf7192ef344fb89aafd39a74de7cac0d479` 开始。受拒绝集合精确为
+`settings`、`model`、`scoped-models`、`import`、`share`、`copy`、`hotkeys`、
+`fork`、`clone`、`tree`、`trust`、`login`、`logout`、`new`、`resume`、
+`reload`、`quit`。ACP `refusal` 令被拒 user prompt 及其后内容不进入 next prompt；
+request-bound response metadata 避免 concurrent active turn 中无法归属的 assistant chunk。
+privacy/non-forwarding 保证从 successful session restore 到达 refusal path 后开始；更早的
+invalid/dead/recovery `RequestError` 仍可能触发 SDK `0.26.0` 的完整 request stderr logging，
+修复该 SDK-wide behavior 不在本 checkpoint 范围。
+
+两端 upstream source leaf
+`packages/coding-agent/src/core/slash-commands.ts` SHA-256 均为
+`788b87d9bbeb4498f9669de75e8233e63dcb9b6893179f497a1b6db61bd9a6b1`，
+published `dist/core/slash-commands.js` SHA-256 均为
+`9c0ec9e616b5577d80ef98632c40ca0332ac6125868e1a981307efc12d29d3a6`。
+Pi `0.80.5` gitHead 为 `cc62baa442b5c0333923fdfdcc1d7264f445b5b0`，Pi
+`0.83.0` gitHead 为 `845d6ff1f6643aba440341cce877ce1c43ebbc39`；完整 SRI 与
+compatibility tuple 记录在 issue #20，publication 时以 accepted candidate/run 补全。
+
+边界：本 checkpoint 不实现 17 个命令或 ACP-native replacement，不 blanket reject
+unknown slash names，不加入 unpublished hidden debug handlers，不改变现有 5 个 supported
+built-ins 的 accepted invocation shape，不做 case folding/Unicode normalization/abbreviation，
+不实现 extension execution/reload 或 `C2.4` general collision policy，不升级 Pi/SDK/runtime，
+也不 recapture C0.7 immutable artifacts。rollback 为 revert C1.5 runtime guard、inventory/
+provenance fixture、tests 与 publication docs，精确回到 verified C1.4 publication
+`14981cf7192ef344fb89aafd39a74de7cac0d479`。
 
 ### M2 — Command Catalog
 
