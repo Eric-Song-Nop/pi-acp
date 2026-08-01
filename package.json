@@ -40,7 +40,7 @@
     "format": "prettier . --write",
     "typecheck": "tsc --noEmit",
     "lint": "eslint .",
-    "test": "node --import tsx --test test/**/*.test.ts",
+    "test": "node --import tsx --test --test-concurrency=2 test/**/*.test.ts",
     "transcripts:check": "node --import tsx scripts/check-command-transcripts.ts",
     "transcripts:update": "node --import tsx scripts/update-command-transcripts.ts",
     "smoke": "node scripts/smoke-acp.mjs",

@@ -52,6 +52,10 @@ function outboundMethods(
   })
 }
 
+function record(value: unknown): Record<string, unknown> {
+  return typeof value === 'object' && value !== null ? (value as Record<string, unknown>) : {}
+}
+
 test(
   'C0.6 loads the pinned real Pi fixture pack without ambient trust, credentials, or model calls',
   {
@@ -271,5 +275,146 @@ test(
     assert.equal(serializedEvidence.includes(parentMarker), false)
     assert.equal(serializedEvidence.includes(`pi-acp-fixture-${fixture.nonce}`), false)
     assert.equal(serializedEvidence.includes('session/prompt'), false)
+  }
+)
+
+test(
+  'C1.3 adapter shutdown fences abandoned prompt output while real Pi cleanup completes',
+  { timeout: TEST_TIMEOUT_MS },
+  async t => {
+    const fixture = await startRealPiFixture({
+      hardDeadlineMs: 20_000,
+      clientShutdownTimeoutMs: 5_000,
+      transcriptCheckpoint: 'C1.3',
+      transcriptCaseId: 'C1.3-shutdown-egress-fence'
+    })
+    t.after(fixture.cleanup)
+
+    await fixture.client.initialize()
+    const session = await fixture.client.newSession({ cwd: fixture.cwd, mcpServers: [] })
+    await fixture.client.waitForSessionUpdate(
+      notification =>
+        notification.sessionId === session.sessionId &&
+        notification.update.sessionUpdate === 'available_commands_update',
+      { timeoutMs: 10_000 }
+    )
+
+    const { receipt } = await fixture.readRegistrationReceipt()
+    const adapterPid = fixture.client.processId
+    assert.ok(adapterPid)
+    assert.equal(isProcessRunning(receipt.piPid), true)
+
+    const afterIndex = fixture.client.retainedSessionUpdateCount
+    const notified = fixture.client.waitForSessionUpdate(
+      notification =>
+        notification.sessionId === session.sessionId &&
+        notification.update.sessionUpdate === 'agent_message_chunk' &&
+        notification.update.content.type === 'text' &&
+        notification.update.content.text === 'Pi ACP fixture loaded',
+      { afterIndex, timeoutMs: 10_000 }
+    )
+    let promptSettled = false
+    const promptOutcome = fixture.client
+      .prompt(
+        {
+          sessionId: session.sessionId,
+          prompt: [{ type: 'text', text: `/${REAL_PI_FIXTURE_COMMAND_ID}` }]
+        },
+        { timeoutMs: 15_000 }
+      )
+      .then(
+        value => {
+          promptSettled = true
+          return { status: 'resolved' as const, value }
+        },
+        error => {
+          promptSettled = true
+          return { status: 'rejected' as const, error }
+        }
+      )
+
+    const notification = await notified
+    assert.deepEqual(record(record(notification.update._meta).piAcp), {
+      notify: { level: 'info' }
+    })
+    await Promise.resolve()
+    assert.equal(promptSettled, false)
+
+    const firstClose = fixture.client.close()
+    assert.strictEqual(fixture.client.close(), firstClose)
+    const [exit, outcome] = await Promise.all([firstClose, promptOutcome])
+    assert.equal(outcome.status, 'rejected')
+    if (outcome.status === 'rejected') assert.ok(outcome.error instanceof Error)
+    assert.equal(exit.code, 0)
+    assert.equal(exit.signal, null)
+    await fixture.assertWithinHardDeadline()
+
+    const transcript = fixture.client.transcript()
+    const promptEntries = transcript.filter(
+      entry =>
+        entry.kind === 'message' &&
+        entry.direction === 'client_to_agent' &&
+        record(entry.message).method === 'session/prompt'
+    )
+    assert.equal(promptEntries.length, 1)
+    const promptEntry = promptEntries[0]!
+    if (promptEntry.kind !== 'message') throw new Error('prompt transcript entry was not a message')
+    const promptId = record(promptEntry.message).id
+    assert.ok(typeof promptId === 'string' || typeof promptId === 'number' || promptId === null)
+    const notificationEntries = transcript.filter(entry => {
+      if (
+        entry.kind !== 'message' ||
+        entry.direction !== 'agent_to_client' ||
+        record(entry.message).method !== 'session/update'
+      ) {
+        return false
+      }
+      const update = record(record(record(entry.message).params).update)
+      const content = record(update.content)
+      return update.sessionUpdate === 'agent_message_chunk' && content.text === 'Pi ACP fixture loaded'
+    })
+    assert.equal(notificationEntries.length, 1)
+    const notificationEntry = notificationEntries[0]!
+    assert.equal(notificationEntry.kind, 'message')
+    if (notificationEntry.kind === 'message') assert.ok(notificationEntry.seq > promptEntry.seq)
+
+    const postFenceMessages = transcript.filter(
+      entry =>
+        notificationEntry.kind === 'message' &&
+        entry.kind === 'message' &&
+        entry.direction === 'agent_to_client' &&
+        entry.seq > notificationEntry.seq
+    )
+    assert.deepEqual(postFenceMessages, [])
+
+    const promptResponses = transcript.filter(entry => {
+      if (entry.kind !== 'message' || entry.direction !== 'agent_to_client') return false
+      const message = record(entry.message)
+      return message.id === promptId && (Object.hasOwn(message, 'result') || Object.hasOwn(message, 'error'))
+    })
+    assert.equal(promptResponses.length, 0)
+    assert.equal(fixture.requests.length, 0)
+
+    const processExit = transcript.at(-1)
+    assert.equal(transcript.filter(entry => entry.kind === 'process_exit').length, 1)
+    assert.equal(processExit?.kind, 'process_exit')
+    if (processExit?.kind === 'process_exit') {
+      assert.equal(processExit.code, 0)
+      assert.equal(processExit.signal, null)
+    }
+
+    await waitForProcessExit(receipt.piPid, 5_000)
+    await waitForProcessExit(adapterPid, 5_000)
+    const { receipt: shutdownReceipt } = await fixture.readShutdownReceipt()
+    assert.deepEqual(shutdownReceipt, {
+      schemaVersion: 1,
+      checkpoint: 'C0.6',
+      fixtureId: 'pi-extension-pack-v1',
+      phase: 'session_shutdown',
+      reason: 'quit',
+      nonce: fixture.nonce,
+      piVersion: REAL_PI_VERSION,
+      piPid: receipt.piPid
+    })
   }
 )

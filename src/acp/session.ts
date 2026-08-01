@@ -13,7 +13,14 @@ import { readFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { isAbsolute, join, resolve as resolvePath } from 'node:path'
 import { formatPiRuntimeExtensionError } from '../pi-rpc/diagnostics.js'
-import { PiRpcProcess, PiRpcSpawnError, piRpcSpawnErrorData, type PiRpcEvent } from '../pi-rpc/process.js'
+import {
+  PI_RPC_PROCESS_TERMINATED_CODE,
+  PiRpcProcess,
+  PiRpcProcessTerminatedError,
+  PiRpcSpawnError,
+  piRpcSpawnErrorData,
+  type PiRpcEvent
+} from '../pi-rpc/process.js'
 import { maybeAuthRequiredError } from './auth-required.js'
 import { SessionStore } from './session-store.js'
 import { expandSlashCommand, type FileSlashCommand } from './slash-commands.js'
@@ -38,18 +45,23 @@ type SessionCreateParams = {
   piCommand?: string
 }
 
-export type StopReason = 'end_turn' | 'cancelled' | 'error'
+export type StopReason = 'end_turn' | 'cancelled'
 
-type PendingTurn = {
+type TurnClaim = { kind: 'settled'; reason: StopReason } | { kind: 'failed'; error: RequestError }
+
+type PromptTurn = {
+  readonly id: number
+  readonly message: string
+  readonly images: unknown[]
   resolve: (reason: StopReason) => void
   reject: (err: unknown) => void
-}
-
-type QueuedTurn = {
-  message: string
-  images: unknown[]
-  resolve: (reason: StopReason) => void
-  reject: (err: unknown) => void
+  cancelRequested: boolean
+  claim: TurnClaim | null
+  completed: boolean
+  completionBarrier: Promise<void> | null
+  completionBatch: PromptTurn[] | null
+  requiresAgentStart: boolean
+  agentStarted: boolean
 }
 
 type PermissionResponse = Awaited<ReturnType<AgentSideConnection['requestPermission']>>
@@ -60,6 +72,28 @@ const CONFIRM_PERMISSION_OPTIONS: PermissionOption[] = [
 ]
 const EXTENSION_UI_RAW_INPUT_KEYS = ['title', 'message', 'options', 'placeholder', 'prefill'] as const
 const CHOICE_OPTION_PREFIX = 'choice-'
+
+/** Terminal failures cannot wait forever for a client notification sink. */
+export const TERMINAL_UPDATE_FLUSH_TIMEOUT_MS = 500
+
+export function piRpcProcessRequestError(error: PiRpcProcessTerminatedError): RequestError {
+  const data =
+    (error as PiRpcProcessTerminatedError & { data?: unknown }).data ??
+    Object.freeze({ code: PI_RPC_PROCESS_TERMINATED_CODE })
+  return new RequestError(-32603, error.message, data)
+}
+
+function promptRequestError(error: unknown): RequestError {
+  if (error instanceof RequestError) return error
+
+  const authError = maybeAuthRequiredError(error)
+  if (authError) return authError
+
+  return RequestError.internalError(
+    { code: 'PI_PROMPT_FAILED' },
+    'Pi did not accept the prompt command; the prompt was not replayed.'
+  )
+}
 
 function findUniqueLineNumber(text: string, needle: string): number | undefined {
   if (!needle) return undefined
@@ -149,54 +183,336 @@ function toToolCallLocations(args: unknown, cwd: string, line?: number): ToolCal
   return [{ path: resolvedPath, ...(typeof line === 'number' ? { line } : {}) }]
 }
 
+export type SessionCreateRollbackStatus = 'process_stopped' | 'process_unconfirmed'
+
+/**
+ * Internal handoff for a create that published its immutable identity but
+ * failed before the durable mapping committed. The agent owns exact artifact
+ * cleanup; callers must only observe `originalError`.
+ */
+export class SessionCreateRollbackError extends Error {
+  readonly #session: PiAcpSession
+  readonly #originalError: unknown
+  readonly #cleanupStatus: SessionCreateRollbackStatus
+
+  constructor(session: PiAcpSession, originalError: unknown, cleanupStatus: SessionCreateRollbackStatus) {
+    super('Session creation rollback requires agent cleanup.')
+    Object.defineProperty(this, 'name', { value: 'SessionCreateRollbackError', configurable: true })
+    this.#session = session
+    this.#originalError = originalError
+    this.#cleanupStatus = cleanupStatus
+  }
+
+  get session(): PiAcpSession {
+    return this.#session
+  }
+
+  get originalError(): unknown {
+    return this.#originalError
+  }
+
+  get cleanupStatus(): SessionCreateRollbackStatus {
+    return this.#cleanupStatus
+  }
+}
+
 export class SessionManager {
-  private sessions = new Map<string, PiAcpSession>()
+  private sessions = new Map<string, { generation: number; session: PiAcpSession }>()
+  private generations = new Map<string, number>()
+  private failedSpawnCandidates = new Set<PiRpcProcess>()
+  private failedCandidateSessions = new Map<PiRpcProcess, PiAcpSession>()
+  private unpublishedCandidates = new Set<PiRpcProcess>()
+  private provenStoppedCandidates = new WeakSet<PiRpcProcess>()
+  private createTransactions = new Set<Promise<void>>()
+  private acceptingCreates = true
+  private spawnLeaseTail: Promise<void> = Promise.resolve()
   private readonly store = new SessionStore()
 
   /** Dispose all sessions and their underlying pi subprocesses. */
-  disposeAll(): void {
-    for (const [id] of this.sessions) this.close(id)
+  async disposeAll(): Promise<void> {
+    this.acceptingCreates = false
+    const spawnDrain = this.spawnLeaseTail
+
+    // Stop any process already materialized inside create(). This unblocks an
+    // authoritative get_state that is pending while shutdown starts.
+    const registeredProcesses = new Set([...this.sessions.values()].map(entry => entry.session.proc))
+    const initiallyUnpublished = new Set(
+      [...this.unpublishedCandidates].filter(candidate => !registeredProcesses.has(candidate))
+    )
+    const initialStops = [...initiallyUnpublished].map(async candidate => {
+      try {
+        await this.stopOwnedCandidate(candidate)
+        this.provenStoppedCandidates.add(candidate)
+        this.unpublishedCandidates.delete(candidate)
+        this.failedSpawnCandidates.delete(candidate)
+      } catch (error) {
+        this.failedSpawnCandidates.add(candidate)
+        throw error
+      }
+    })
+
+    await Promise.allSettled([...this.createTransactions])
+    await spawnDrain.catch(() => undefined)
+    const initialStopResults = await Promise.allSettled(initialStops)
+
+    // A create whose spawn completed after the shutdown snapshot transfers its
+    // unpublished process here. Stop it exactly once in this dispose attempt.
+    const registeredAtCleanup = new Set([...this.sessions.values()].map(entry => entry.session.proc))
+    const lateCandidates = new Set(
+      [...this.unpublishedCandidates, ...this.failedSpawnCandidates].filter(
+        candidate => !initiallyUnpublished.has(candidate) && !registeredAtCleanup.has(candidate)
+      )
+    )
+    const results = await Promise.allSettled([
+      ...[...this.sessions.keys()].map(id => this.close(id)),
+      ...[...lateCandidates].map(async candidate => {
+        await this.stopOwnedCandidate(candidate)
+        this.provenStoppedCandidates.add(candidate)
+        this.unpublishedCandidates.delete(candidate)
+        this.failedSpawnCandidates.delete(candidate)
+      })
+    ])
+    results.push(...initialStopResults)
+    const failure = results.find(result => result.status === 'rejected')
+    if (failure?.status === 'rejected') throw failure.reason
   }
 
   /** Get a registered session if it exists (no throw). */
   maybeGet(sessionId: string): PiAcpSession | undefined {
-    return this.sessions.get(sessionId)
+    return this.sessions.get(sessionId)?.session
+  }
+
+  snapshot(sessionId: string): { generation: number; session: PiAcpSession } | undefined {
+    const entry = this.sessions.get(sessionId)
+    return entry ? { generation: entry.generation, session: entry.session } : undefined
+  }
+
+  currentGeneration(sessionId: string): number {
+    return this.generations.get(sessionId) ?? 0
+  }
+
+  /** Forget a fully deleted session's recovery tombstone. */
+  forget(sessionId: string): void {
+    if (this.sessions.has(sessionId)) return
+    this.generations.delete(sessionId)
   }
 
   /**
    * Dispose a session's underlying pi process and remove it from the manager.
    * Used when clients explicitly reload a session and we want a fresh pi subprocess.
    */
-  close(sessionId: string): void {
-    const s = this.sessions.get(sessionId)
-    if (!s) return
+  close(sessionId: string, expected?: PiAcpSession): Promise<boolean> {
+    // Enqueue the teardown synchronously on the same ownership lease used by
+    // child spawning. A future spawn therefore cannot begin while stop proof
+    // is pending, even before a failed stop is retained for retry.
+    return (async () => {
+      const releaseOwnershipLease = await this.acquireOwnershipLease()
+      try {
+        return await this.closeOwned(sessionId, expected)
+      } finally {
+        releaseOwnershipLease()
+      }
+    })()
+  }
+
+  /** Close while the caller already owns the child-ownership transaction lease. */
+  private async closeOwned(sessionId: string, expected?: PiAcpSession): Promise<boolean> {
+    const entry = this.sessions.get(sessionId)
+    if (!entry || (expected && entry.session !== expected)) return false
+
+    // Keep the old generation registered until teardown is proven. If cleanup
+    // fails, later recovery attempts must see and retry/block on this same
+    // generation instead of publishing a second live child.
     try {
-      s.proc.dispose?.()
-    } catch {
-      // ignore
+      await entry.session.dispose()
+    } catch (error) {
+      this.retainUnconfirmedCandidate(entry.session.proc, entry.session)
+      throw error
     }
-    this.sessions.delete(sessionId)
+    this.releaseCandidate(entry.session.proc)
+    if (this.sessions.get(sessionId) === entry) this.sessions.delete(sessionId)
+    return true
   }
 
   /** Close all sessions except the one with `keepSessionId`. */
-  closeAllExcept(keepSessionId: string): void {
-    for (const [id] of this.sessions) {
-      if (id === keepSessionId) continue
-      this.close(id)
+  async closeAllExcept(keepSessionId: string): Promise<void> {
+    const results = await Promise.allSettled(
+      [...this.sessions.keys()].filter(id => id !== keepSessionId).map(id => this.close(id))
+    )
+    const failure = results.find(result => result.status === 'rejected')
+    if (failure?.status === 'rejected') throw failure.reason
+  }
+
+  /** Close every registered session without closing future create admission. */
+  async closeAll(): Promise<void> {
+    const results = await Promise.allSettled([...this.sessions.keys()].map(id => this.close(id)))
+    const failure = results.find(result => result.status === 'rejected')
+    if (failure?.status === 'rejected') throw failure.reason
+  }
+
+  /** Prove retained unpublished-candidate cleanup before any new spawn. */
+  async prepareSpawn(): Promise<void> {
+    if (!this.acceptingCreates) {
+      throw RequestError.internalError({ code: 'PI_ACP_AGENT_DISPOSED' }, 'The ACP agent is shutting down.')
+    }
+    await this.cleanupFailedSpawnCandidates()
+    if (!this.acceptingCreates) {
+      throw RequestError.internalError({ code: 'PI_ACP_AGENT_DISPOSED' }, 'The ACP agent is shutting down.')
     }
   }
 
-  async create(params: SessionCreateParams): Promise<PiAcpSession> {
+  /** Serialize every child-spawn ownership transaction across create/recovery. */
+  async acquireSpawnLease(): Promise<() => void> {
+    const release = await this.acquireOwnershipLease()
+    try {
+      await this.prepareSpawn()
+      return release
+    } catch (error) {
+      release()
+      throw error
+    }
+  }
+
+  /** Raw lease used by teardown; unlike spawn admission it never retries blockers. */
+  private async acquireOwnershipLease(): Promise<() => void> {
+    let release!: () => void
+    const lease = new Promise<void>(resolve => {
+      release = resolve
+    })
+    const previous = this.spawnLeaseTail
+    this.spawnLeaseTail = previous.catch(() => undefined).then(() => lease)
+    await previous.catch(() => undefined)
+    return release
+  }
+
+  trackUnpublishedCandidate(candidate: PiRpcProcess, session?: PiAcpSession): void {
+    this.unpublishedCandidates.add(candidate)
+    if (session) this.failedCandidateSessions.set(candidate, session)
+  }
+
+  retainUnconfirmedCandidate(candidate: PiRpcProcess, session?: PiAcpSession): void {
+    this.unpublishedCandidates.add(candidate)
+    this.failedSpawnCandidates.add(candidate)
+    if (session) this.failedCandidateSessions.set(candidate, session)
+  }
+
+  releaseCandidate(candidate: PiRpcProcess): void {
+    this.unpublishedCandidates.delete(candidate)
+    this.failedSpawnCandidates.delete(candidate)
+    this.failedCandidateSessions.delete(candidate)
+  }
+
+  private async stopOwnedCandidate(candidate: PiRpcProcess): Promise<void> {
+    const session = this.failedCandidateSessions.get(candidate)
+    if (session) await session.dispose()
+    else await candidate.stop()
+    if (session) {
+      for (const [sessionId, entry] of this.sessions) {
+        if (entry.session === session) this.sessions.delete(sessionId)
+      }
+    }
+    this.failedCandidateSessions.delete(candidate)
+  }
+
+  private async cleanupFailedSpawnCandidates(): Promise<void> {
+    if (!this.failedSpawnCandidates.size) return
+    const cleanup = await Promise.allSettled(
+      [...this.failedSpawnCandidates].map(async candidate => {
+        await this.stopOwnedCandidate(candidate)
+        this.provenStoppedCandidates.add(candidate)
+        this.unpublishedCandidates.delete(candidate)
+        this.failedSpawnCandidates.delete(candidate)
+      })
+    )
+    const failure = cleanup.find(result => result.status === 'rejected')
+    if (failure?.status === 'rejected') {
+      throw RequestError.internalError(
+        { code: 'PI_RPC_PROCESS_CLEANUP_UNCONFIRMED' },
+        'A previous Pi process could not be confirmed stopped.'
+      )
+    }
+  }
+
+  private publish(sessionId: string, session: PiAcpSession): PiAcpSession {
+    if (this.sessions.has(sessionId)) {
+      throw RequestError.internalError(
+        { code: 'PI_RPC_SESSION_ID_COLLISION' },
+        `Pi returned an already registered session ID: ${sessionId}`
+      )
+    }
+    const generation = this.currentGeneration(sessionId) + 1
+    this.generations.set(sessionId, generation)
+    this.sessions.set(sessionId, { generation, session })
+    return session
+  }
+
+  publishReplacement(sessionId: string, expectedGeneration: number, session: PiAcpSession): boolean {
+    if (this.sessions.has(sessionId) || this.currentGeneration(sessionId) !== expectedGeneration) return false
+    const generation = expectedGeneration + 1
+    this.generations.set(sessionId, generation)
+    this.sessions.set(sessionId, { generation, session })
+    return true
+  }
+
+  createDetached(sessionId: string, params: SessionCreateParams & { proc: PiRpcProcess }): PiAcpSession {
+    return new PiAcpSession({
+      sessionId,
+      cwd: params.cwd,
+      mcpServers: params.mcpServers,
+      proc: params.proc,
+      conn: params.conn,
+      fileCommands: params.fileCommands ?? []
+    })
+  }
+
+  create(params: SessionCreateParams): Promise<PiAcpSession> {
+    if (!this.acceptingCreates) {
+      return Promise.reject(
+        RequestError.internalError({ code: 'PI_ACP_AGENT_DISPOSED' }, 'The ACP agent is shutting down.')
+      )
+    }
+
+    let finishTransaction!: () => void
+    const transaction = new Promise<void>(resolve => {
+      finishTransaction = resolve
+    })
+    this.createTransactions.add(transaction)
+
+    const operation = (async () => {
+      const releaseSpawnLease = await this.acquireSpawnLease()
+      try {
+        return await this.createOwned(params)
+      } finally {
+        releaseSpawnLease()
+      }
+    })()
+    void operation
+      .finally(() => {
+        this.createTransactions.delete(transaction)
+        finishTransaction()
+      })
+      .catch(() => undefined)
+    return operation
+  }
+
+  private async createOwned(params: SessionCreateParams): Promise<PiAcpSession> {
+    if (!this.acceptingCreates) {
+      throw RequestError.internalError({ code: 'PI_ACP_AGENT_DISPOSED' }, 'The ACP agent is shutting down.')
+    }
+
     // Let pi manage session persistence in its default location (~/.pi/agent/sessions/...)
     // so sessions are visible to the regular `pi` CLI.
-    let proc: PiRpcProcess
+    let proc: PiRpcProcess | null = null
+    let publishedSession: PiAcpSession | null = null
     try {
       proc = await PiRpcProcess.spawn({
         cwd: params.cwd,
         piCommand: params.piCommand
       })
+      this.unpublishedCandidates.add(proc)
     } catch (e) {
       if (e instanceof PiRpcSpawnError) {
+        if (e.candidate) this.failedSpawnCandidates.add(e.candidate)
         const data = piRpcSpawnErrorData(e)
         if (e.diagnostic) throw new RequestError(-32603, e.message, data)
         throw RequestError.internalError(data, e.message)
@@ -204,37 +520,88 @@ export class SessionManager {
       throw e
     }
 
-    let state: any = null
     try {
-      state = (await proc.getState()) as any
-    } catch {
-      state = null
+      if (!this.acceptingCreates) {
+        throw RequestError.internalError({ code: 'PI_ACP_AGENT_DISPOSED' }, 'The ACP agent is shutting down.')
+      }
+
+      const state = (await proc.getState()) as any
+      const sessionId = typeof state?.sessionId === 'string' ? state.sessionId.trim() : ''
+      const sessionFile = typeof state?.sessionFile === 'string' ? state.sessionFile.trim() : ''
+      if (!sessionId || !sessionFile || !isAbsolute(sessionFile)) {
+        throw RequestError.internalError(
+          { code: 'PI_RPC_SESSION_IDENTITY_UNAVAILABLE' },
+          'Pi did not return an authoritative session ID and file.'
+        )
+      }
+      if (!this.acceptingCreates) {
+        throw RequestError.internalError({ code: 'PI_ACP_AGENT_DISPOSED' }, 'The ACP agent is shutting down.')
+      }
+      if (this.sessions.has(sessionId) || this.currentGeneration(sessionId) > 0 || this.store.get(sessionId)) {
+        throw RequestError.internalError(
+          { code: 'PI_RPC_SESSION_ID_COLLISION' },
+          `Pi returned an already registered session ID: ${sessionId}`
+        )
+      }
+
+      const session = new PiAcpSession({
+        sessionId,
+        initialState: state,
+        sessionFile,
+        cwd: params.cwd,
+        mcpServers: params.mcpServers,
+        proc,
+        conn: params.conn,
+        fileCommands: params.fileCommands ?? []
+      })
+      this.failedCandidateSessions.set(proc, session)
+
+      publishedSession = this.publish(sessionId, session)
+      // No await may separate private publication from the durable commit.
+      // This keeps the identity unavailable to another JS transaction until
+      // either both records exist or rollback ownership has been captured.
+      this.store.upsert({
+        sessionId,
+        cwd: params.cwd,
+        sessionFile
+      })
+      this.failedCandidateSessions.delete(proc)
+      this.unpublishedCandidates.delete(proc)
+      proc = null
+      return publishedSession
+    } catch (error) {
+      let rollbackStatus: SessionCreateRollbackStatus = 'process_unconfirmed'
+      if (proc && !this.provenStoppedCandidates.has(proc)) {
+        this.failedSpawnCandidates.add(proc)
+        // During shutdown, disposeAll owns the one cleanup attempt. For an
+        // ordinary pre-publication failure, clean up immediately but retain
+        // the exact handle when proof fails.
+        if (this.acceptingCreates) {
+          try {
+            await this.stopOwnedCandidate(proc)
+            this.provenStoppedCandidates.add(proc)
+            this.unpublishedCandidates.delete(proc)
+            this.failedSpawnCandidates.delete(proc)
+            rollbackStatus = 'process_stopped'
+          } catch {
+            // retained for the next create/dispose attempt
+          }
+        }
+      }
+      const originalError = error instanceof PiRpcProcessTerminatedError ? piRpcProcessRequestError(error) : error
+      if (publishedSession) {
+        // The manager deliberately retains the generation tombstone. Only the
+        // agent can prove and remove the exact durable artifact/mapping.
+        throw new SessionCreateRollbackError(publishedSession, originalError, rollbackStatus)
+      }
+      throw originalError
     }
-
-    const sessionId = typeof state?.sessionId === 'string' ? state.sessionId : crypto.randomUUID()
-    const sessionFile = typeof state?.sessionFile === 'string' ? state.sessionFile : null
-
-    if (sessionFile) {
-      this.store.upsert({ sessionId, cwd: params.cwd, sessionFile })
-    }
-
-    const session = new PiAcpSession({
-      sessionId,
-      cwd: params.cwd,
-      mcpServers: params.mcpServers,
-      proc,
-      conn: params.conn,
-      fileCommands: params.fileCommands ?? []
-    })
-
-    this.sessions.set(sessionId, session)
-    return session
   }
 
   get(sessionId: string): PiAcpSession {
-    const s = this.sessions.get(sessionId)
-    if (!s) throw RequestError.invalidParams(`Unknown sessionId: ${sessionId}`)
-    return s
+    const entry = this.sessions.get(sessionId)
+    if (!entry) throw RequestError.invalidParams(`Unknown sessionId: ${sessionId}`)
+    return entry.session
   }
 
   /**
@@ -243,24 +610,15 @@ export class SessionManager {
    */
   getOrCreate(sessionId: string, params: SessionCreateParams & { proc: PiRpcProcess }): PiAcpSession {
     const existing = this.sessions.get(sessionId)
-    if (existing) return existing
-
-    const session = new PiAcpSession({
-      sessionId,
-      cwd: params.cwd,
-      mcpServers: params.mcpServers,
-      proc: params.proc,
-      conn: params.conn,
-      fileCommands: params.fileCommands ?? []
-    })
-
-    this.sessions.set(sessionId, session)
-    return session
+    if (existing) return existing.session
+    return this.publish(sessionId, this.createDetached(sessionId, params))
   }
 }
 
 export class PiAcpSession {
   readonly sessionId: string
+  readonly sessionFile: string | null
+  readonly initialState: unknown | null
   readonly cwd: string
   readonly mcpServers: McpServer[]
 
@@ -276,13 +634,17 @@ export class PiAcpSession {
     env: Readonly<NodeJS.ProcessEnv>
   }
 
-  // Used to map abort semantics to ACP stopReason.
-  // Applies to the currently running turn.
-  private cancelRequested = false
-
   // Current in-flight turn (if any). Additional prompts are queued.
-  private pendingTurn: PendingTurn | null = null
-  private readonly turnQueue: QueuedTurn[] = []
+  private nextTurnId = 1
+  private pendingTurn: PromptTurn | null = null
+  private readonly turnQueue: PromptTurn[] = []
+  private terminalError: RequestError | null = null
+  private readonly unsubscribeEvent: () => void
+  private readonly unsubscribeTerminal: () => void
+  private disposePromise: Promise<void> | null = null
+  private disposalStarted = false
+  private terminalBarrier: Promise<void> | null = null
+  private readonly completionBarriers = new Set<Promise<void>>()
   // Track tool call statuses and ensure they are monotonic (pending -> in_progress -> completed).
   // Some pi events can arrive out of order (e.g. late toolcall_* deltas after execution starts),
   // and clients may hide progress if we ever downgrade back to `pending`.
@@ -307,6 +669,8 @@ export class PiAcpSession {
 
   constructor(opts: {
     sessionId: string
+    sessionFile?: string | null
+    initialState?: unknown
     cwd: string
     mcpServers: McpServer[]
     proc: PiRpcProcess
@@ -314,6 +678,8 @@ export class PiAcpSession {
     fileCommands?: FileSlashCommand[]
   }) {
     this.sessionId = opts.sessionId
+    this.sessionFile = opts.sessionFile ?? null
+    this.initialState = opts.initialState ?? null
     this.cwd = opts.cwd
     this.mcpServers = opts.mcpServers
     this.proc = opts.proc
@@ -323,7 +689,64 @@ export class PiAcpSession {
     const agentDir = env.PI_CODING_AGENT_DIR ?? join(env.HOME ?? env.USERPROFILE ?? homedir(), '.pi', 'agent')
     this.runtimeExtensionDiagnosticOptions = { cwd: this.cwd, agentDir, env }
 
-    this.proc.onEvent(ev => this.handlePiEvent(ev))
+    this.unsubscribeEvent = this.proc.onEvent(ev => this.handlePiEvent(ev))
+    const onTerminal = (
+      this.proc as PiRpcProcess & {
+        onTerminal?: (handler: (error: PiRpcProcessTerminatedError) => void) => () => void
+      }
+    ).onTerminal
+    this.unsubscribeTerminal =
+      typeof onTerminal === 'function' ? onTerminal.call(this.proc, error => this.handleTerminal(error)) : () => {}
+  }
+
+  isAlive(): boolean {
+    const check = (this.proc as PiRpcProcess & { isAlive?: () => boolean }).isAlive
+    return !this.disposalStarted && !this.terminalError && (typeof check !== 'function' || check.call(this.proc))
+  }
+
+  async runRpc<T>(operation: (proc: PiRpcProcess) => Promise<T>): Promise<T> {
+    try {
+      return await operation(this.proc)
+    } catch (error) {
+      if (!(error instanceof PiRpcProcessTerminatedError)) throw error
+      this.handleTerminal(error)
+      if (this.terminalBarrier) await this.terminalBarrier
+      throw this.terminalError ?? piRpcProcessRequestError(error)
+    }
+  }
+
+  async dispose(): Promise<void> {
+    // A session is permanently ineligible for new RPC work once teardown
+    // begins, even if process stop proof fails and dispose() remains retryable.
+    // Its event subscriptions are removed during this attempt, so reporting it
+    // as healthy afterward would reuse an unusable half-disposed session.
+    this.disposalStarted = true
+    if (!this.disposePromise) {
+      const attempt = (async () => {
+        let stopError: unknown
+        try {
+          const stop = (this.proc as PiRpcProcess & { stop?: () => Promise<void> }).stop
+          if (typeof stop === 'function') await stop.call(this.proc)
+          else this.proc.dispose?.()
+        } catch (error) {
+          stopError = error
+        } finally {
+          // A terminal transition supersedes any unbounded normal stable-tail
+          // flush with its fixed-cut barrier. Do not snapshot-await a stale
+          // notification promise that the terminal barrier has quarantined.
+          if (this.terminalBarrier) await this.terminalBarrier
+          else await this.awaitCompletionBarriers()
+          this.unsubscribeEvent()
+          this.unsubscribeTerminal()
+        }
+        if (stopError) throw stopError
+      })()
+      this.disposePromise = attempt
+      void attempt.catch(() => {
+        if (this.disposePromise === attempt) this.disposePromise = null
+      })
+    }
+    await this.disposePromise
   }
 
   setStartupInfo(text: string) {
@@ -347,11 +770,27 @@ export class PiAcpSession {
   }
 
   async prompt(message: string, images: unknown[] = []): Promise<StopReason> {
+    if (this.terminalError) throw this.terminalError
+
     // pi RPC mode disables slash command expansion, so we do it here.
     const expandedMessage = expandSlashCommand(message, this.fileCommands)
 
     const turnPromise = new Promise<StopReason>((resolve, reject) => {
-      const queued: QueuedTurn = { message: expandedMessage, images, resolve, reject }
+      const queued: PromptTurn = {
+        id: this.nextTurnId,
+        message: expandedMessage,
+        images,
+        resolve,
+        reject,
+        cancelRequested: false,
+        claim: null,
+        completed: false,
+        completionBarrier: null,
+        completionBatch: null,
+        requiresAgentStart: false,
+        agentStarted: false
+      }
+      this.nextTurnId += 1
 
       // If a turn is already running, enqueue.
       if (this.pendingTurn) {
@@ -385,12 +824,21 @@ export class PiAcpSession {
   }
 
   async cancel(): Promise<void> {
-    // Cancel current and clear any queued prompts.
-    this.cancelRequested = true
+    const active = this.pendingTurn
+
+    // An idle cancel, or one that lost the completion claim, must not write an
+    // abort command to pi.
+    if (!active || active.claim) return
+
+    // Record cancellation before any asynchronous abort result or terminal
+    // callback can race it.
+    active.cancelRequested = true
 
     if (this.turnQueue.length) {
       const queued = this.turnQueue.splice(0, this.turnQueue.length)
-      for (const t of queued) t.resolve('cancelled')
+      for (const t of queued) {
+        if (this.claimTurn(t, { kind: 'settled', reason: 'cancelled' })) this.settleClaimedTurn(t)
+      }
 
       this.emit({
         sessionUpdate: 'agent_message_chunk',
@@ -398,19 +846,27 @@ export class PiAcpSession {
       })
       this.emit({
         sessionUpdate: 'session_info_update',
-        _meta: { piAcp: { queueDepth: 0, running: Boolean(this.pendingTurn) } }
+        _meta: { piAcp: { queueDepth: 0, running: true } }
       })
     }
 
-    // Abort the currently running turn (if any). If nothing is running, this is a no-op.
-    await this.proc.abort()
+    // Abort the currently running turn. Completion still comes from
+    // `agent_settled` or the process terminal lifecycle.
+    await this.runRpc(proc => proc.abort())
   }
 
   wasCancelRequested(): boolean {
-    return this.cancelRequested
+    return this.pendingTurn?.cancelRequested ?? false
   }
 
   private emit(update: SessionUpdate): void {
+    // Once terminal is latched, its final idle update is the fixed cut. Late pi
+    // events or reentrant notification producers cannot extend that cut.
+    if (this.terminalError) return
+    this.enqueueEmit(update)
+  }
+
+  private enqueueEmit(update: SessionUpdate): void {
     // Serialize update delivery.
     this.lastEmit = this.lastEmit
       .then(() =>
@@ -425,12 +881,49 @@ export class PiAcpSession {
       })
   }
 
+  private enqueueTerminalIdle(): Promise<void> {
+    this.enqueueEmit({
+      sessionUpdate: 'session_info_update',
+      _meta: { piAcp: { queueDepth: 0, running: false } }
+    })
+    return this.lastEmit
+  }
+
   private async flushEmits(): Promise<void> {
     let tail: Promise<void>
     do {
       tail = this.lastEmit
       await tail
     } while (tail !== this.lastEmit)
+  }
+
+  private async flushTerminalCut(cut: Promise<void>): Promise<void> {
+    let timer: NodeJS.Timeout | undefined
+    try {
+      await Promise.race([
+        cut,
+        new Promise<void>(resolve => {
+          timer = setTimeout(resolve, TERMINAL_UPDATE_FLUSH_TIMEOUT_MS)
+        })
+      ])
+    } finally {
+      if (timer) clearTimeout(timer)
+    }
+  }
+
+  private trackCompletionBarrier(barrier: Promise<void>): void {
+    this.completionBarriers.add(barrier)
+    void barrier
+      .finally(() => {
+        this.completionBarriers.delete(barrier)
+      })
+      .catch(() => undefined)
+  }
+
+  private async awaitCompletionBarriers(): Promise<void> {
+    while (this.completionBarriers.size) {
+      await Promise.allSettled([...this.completionBarriers])
+    }
   }
 
   private emitBashToolCall(params: {
@@ -487,11 +980,17 @@ export class PiAcpSession {
     this.bashOutputSnapshots.delete(toolCallId)
   }
 
-  private startTurn(t: QueuedTurn): void {
-    this.cancelRequested = false
-    this.inAgentLoop = false
+  private startTurn(t: PromptTurn, requiresAgentStart = false): void {
+    if (this.terminalError) {
+      if (this.claimTurn(t, { kind: 'failed', error: this.terminalError })) this.settleClaimedTurn(t)
+      return
+    }
 
-    this.pendingTurn = { resolve: t.resolve, reject: t.reject }
+    this.inAgentLoop = false
+    t.requiresAgentStart = requiresAgentStart
+    t.agentStarted = false
+
+    this.pendingTurn = t
 
     // Publish queue depth (0 because we're starting the turn now).
     this.emit({
@@ -502,31 +1001,114 @@ export class PiAcpSession {
     // Kick off pi, but completion is determined by pi events, not the RPC response.
     // The prompt RPC only acknowledges acceptance; retry, compaction, or queued
     // continuations may emit multiple `agent_end` events before `agent_settled`.
-    this.proc.prompt(t.message, t.images).catch(err => {
-      // If the subprocess errors before we get `agent_settled`, treat as error unless cancelled.
-      // Also ensure we flush any already-enqueued updates first.
-      void this.flushEmits().finally(() => {
-        // If this looks like an auth/config issue, surface AUTH_REQUIRED so clients can offer terminal login.
-        const authErr = maybeAuthRequiredError(err)
-        if (authErr) {
-          this.pendingTurn?.reject(authErr)
-        } else {
-          const reason: StopReason = this.cancelRequested ? 'cancelled' : 'error'
-          this.pendingTurn?.resolve(reason)
-        }
+    this.proc.prompt(t.message, t.images).catch(error => {
+      // A process-terminal rejection must use the terminal path so the active
+      // and queued turns share one causal RequestError instance.
+      if (error instanceof PiRpcProcessTerminatedError) {
+        this.handleTerminal(error)
+        return
+      }
 
-        this.pendingTurn = null
-        this.inAgentLoop = false
-
-        // If the prompt failed, do not automatically proceed—pi may be unhealthy.
-        // But we still clear the queueDepth metadata.
-        this.emit({
-          sessionUpdate: 'session_info_update',
-          _meta: { piAcp: { queueDepth: this.turnQueue.length, running: false } }
-        })
-      })
-      void err
+      this.handlePromptFailure(t, promptRequestError(error))
     })
+  }
+
+  private claimTurn(turn: PromptTurn, claim: TurnClaim): boolean {
+    if (turn.claim) return false
+    turn.claim = claim
+    return true
+  }
+
+  private settleClaimedTurn(turn: PromptTurn): void {
+    const claim = turn.claim
+    if (!claim || turn.completed) return
+    turn.completed = true
+    if (claim.kind === 'failed') turn.reject(claim.error)
+    else turn.resolve(claim.reason)
+  }
+
+  private handlePromptFailure(turn: PromptTurn, error: RequestError): void {
+    if (this.pendingTurn !== turn || turn.claim) return
+
+    const failed: PromptTurn[] = []
+    const activeClaim: TurnClaim = turn.cancelRequested
+      ? { kind: 'settled', reason: 'cancelled' }
+      : { kind: 'failed', error }
+    if (this.claimTurn(turn, activeClaim)) failed.push(turn)
+
+    for (const queued of this.turnQueue.splice(0, this.turnQueue.length)) {
+      if (this.claimTurn(queued, { kind: 'failed', error })) failed.push(queued)
+    }
+
+    this.emit({
+      sessionUpdate: 'session_info_update',
+      _meta: { piAcp: { queueDepth: 0, running: false } }
+    })
+
+    const barrier = this.flushEmits().finally(() => {
+      for (const claimed of failed) this.settleClaimedTurn(claimed)
+      if (this.pendingTurn === turn) this.pendingTurn = null
+      this.inAgentLoop = false
+
+      // Prompts that arrive after the failure claim belong to a new immutable
+      // turn generation. They were not part of the frozen failure batch and
+      // must be handed off rather than stranded behind the claimed turn.
+      if (this.terminalError || this.pendingTurn) return
+      const next = this.turnQueue.shift()
+      if (next) {
+        this.emit({
+          sessionUpdate: 'agent_message_chunk',
+          content: { type: 'text', text: `Starting queued message. (${this.turnQueue.length} remaining)` }
+        })
+        this.startTurn(next, true)
+      }
+    })
+    turn.completionBarrier = barrier
+    turn.completionBatch = failed
+    this.trackCompletionBarrier(barrier)
+  }
+
+  private handleTerminal(error: PiRpcProcessTerminatedError): void {
+    if (this.terminalError) return
+
+    const requestError = piRpcProcessRequestError(error)
+    this.terminalError = requestError
+
+    const terminalTurns: PromptTurn[] = []
+    const active = this.pendingTurn
+    if (active) {
+      if (!active.claim) {
+        const claim: TurnClaim = active.cancelRequested
+          ? { kind: 'settled', reason: 'cancelled' }
+          : { kind: 'failed', error: requestError }
+        this.claimTurn(active, claim)
+      }
+      if (active.claim) terminalTurns.push(active)
+    }
+
+    for (const claimed of active?.completionBatch ?? []) {
+      if (claimed.claim && !terminalTurns.includes(claimed)) terminalTurns.push(claimed)
+    }
+
+    for (const queued of this.turnQueue.splice(0, this.turnQueue.length)) {
+      if (this.claimTurn(queued, { kind: 'failed', error: requestError })) terminalTurns.push(queued)
+    }
+
+    // This is deliberately a fixed cut, not the normal stable-tail flush: a
+    // broken client notification sink cannot keep ACP requests pending forever.
+    const terminalCut = this.enqueueTerminalIdle()
+    const supersededActiveBarrier = active?.completionBarrier ?? null
+    this.terminalBarrier = this.flushTerminalCut(terminalCut).finally(() => {
+      for (const claimed of terminalTurns) this.settleClaimedTurn(claimed)
+      if (active && terminalTurns.includes(active) && this.pendingTurn === active) this.pendingTurn = null
+      if (supersededActiveBarrier) {
+        this.completionBarriers.delete(supersededActiveBarrier)
+        if (active?.completionBarrier === supersededActiveBarrier) active.completionBarrier = null
+        if (active) active.completionBatch = null
+      }
+      this.inAgentLoop = false
+    })
+    this.trackCompletionBarrier(this.terminalBarrier)
   }
 
   private handlePiEvent(ev: PiRpcEvent) {
@@ -846,6 +1428,7 @@ export class PiAcpSession {
 
       case 'agent_start': {
         this.inAgentLoop = true
+        if (this.pendingTurn) this.pendingTurn.agentStarted = true
         break
       }
 
@@ -863,13 +1446,26 @@ export class PiAcpSession {
       }
 
       case 'agent_settled': {
+        const active = this.pendingTurn
+        if (!active) break
+        if (active.requiresAgentStart && !active.agentStarted) break
+
+        // Claim before awaiting notifications. A later terminal callback can
+        // fail the queue, but cannot rewrite this authoritative completion.
+        const reason: StopReason = active.cancelRequested ? 'cancelled' : 'end_turn'
+        if (!this.claimTurn(active, { kind: 'settled', reason })) break
+
         // Ensure all updates derived from pi events are delivered before we resolve
         // the ACP `session/prompt` request.
-        void this.flushEmits().finally(() => {
-          const reason: StopReason = this.cancelRequested ? 'cancelled' : 'end_turn'
-          this.pendingTurn?.resolve(reason)
+        const barrier = this.flushEmits().finally(() => {
+          this.settleClaimedTurn(active)
+          if (this.pendingTurn !== active) return
           this.pendingTurn = null
           this.inAgentLoop = false
+
+          // A terminal observed after this turn claimed completion still owns
+          // the queue. It must never start a successor on the dead generation.
+          if (this.terminalError) return
 
           // Start next queued prompt, if any.
           const next = this.turnQueue.shift()
@@ -878,7 +1474,7 @@ export class PiAcpSession {
               sessionUpdate: 'agent_message_chunk',
               content: { type: 'text', text: `Starting queued message. (${this.turnQueue.length} remaining)` }
             })
-            this.startTurn(next)
+            this.startTurn(next, true)
           } else {
             this.emit({
               sessionUpdate: 'session_info_update',
@@ -886,6 +1482,9 @@ export class PiAcpSession {
             })
           }
         })
+        active.completionBarrier = barrier
+        active.completionBatch = [active]
+        this.trackCompletionBarrier(barrier)
         break
       }
 

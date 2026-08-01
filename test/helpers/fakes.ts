@@ -1,5 +1,5 @@
 import type { AgentSideConnection } from '@agentclientprotocol/sdk'
-import type { PiRpcEvent } from '../../src/pi-rpc/process.js'
+import { PiRpcProcessTerminatedError, type PiRpcEvent } from '../../src/pi-rpc/process.js'
 
 type SessionUpdateMsg = Parameters<AgentSideConnection['sessionUpdate']>[0]
 
@@ -24,11 +24,14 @@ export class FakeAgentSideConnection {
 
 export class FakePiRpcProcess {
   private handlers: Array<(ev: PiRpcEvent) => void> = []
+  private terminalHandlers: Array<(error: PiRpcProcessTerminatedError) => void> = []
+  private terminalError: PiRpcProcessTerminatedError | null = null
 
   // spies
   readonly prompts: Array<{ message: string; attachments: unknown[] }> = []
   readonly extensionUiResponses: unknown[] = []
   abortCount = 0
+  stopCount = 0
 
   onEvent(handler: (ev: PiRpcEvent) => void): () => void {
     this.handlers.push(handler)
@@ -41,12 +44,35 @@ export class FakePiRpcProcess {
     for (const h of this.handlers) h(ev)
   }
 
+  onTerminal(handler: (error: PiRpcProcessTerminatedError) => void): () => void {
+    this.terminalHandlers.push(handler)
+    if (this.terminalError) handler(this.terminalError)
+    return () => {
+      this.terminalHandlers = this.terminalHandlers.filter(h => h !== handler)
+    }
+  }
+
+  isAlive(): boolean {
+    return !this.terminalError
+  }
+
+  terminate(error = new PiRpcProcessTerminatedError('The Pi RPC process terminated.')): void {
+    if (this.terminalError) return
+    this.terminalError = error
+    for (const handler of this.terminalHandlers) handler(error)
+  }
+
   async prompt(message: string, attachments: unknown[] = []): Promise<void> {
     this.prompts.push({ message, attachments })
   }
 
   async abort(): Promise<void> {
     this.abortCount += 1
+  }
+
+  async stop(): Promise<void> {
+    this.stopCount += 1
+    this.terminate()
   }
 
   async sendExtensionUiResponse(response: unknown): Promise<void> {

@@ -19,15 +19,14 @@ import {
   type SetSessionConfigOptionResponse,
   type SetSessionModeRequest,
   type SetSessionModeResponse,
-  type StopReason,
   type DeleteSessionRequest,
   type DeleteSessionResponse
 } from '@agentclientprotocol/sdk'
 import { getAuthMethods } from './auth.js'
-import { SessionManager, type PiAcpSession } from './session.js'
+import { SessionCreateRollbackError, SessionManager, piRpcProcessRequestError, type PiAcpSession } from './session.js'
 import { SessionStore } from './session-store.js'
-import { PiRpcProcess, PiRpcSpawnError, piRpcSpawnErrorData } from '../pi-rpc/process.js'
-import { listPiSessions, findPiSession } from './pi-sessions.js'
+import { PiRpcProcess, PiRpcProcessTerminatedError, PiRpcSpawnError, piRpcSpawnErrorData } from '../pi-rpc/process.js'
+import { listPiSessions } from './pi-sessions.js'
 import { normalizePiAssistantText, normalizePiMessageText } from './translate/pi-messages.js'
 import { toolResultToText } from './translate/pi-tools.js'
 import {
@@ -46,7 +45,17 @@ import { getAgentDir, getEnableSkillCommands, getQuietStartup } from './pi-setti
 import { toAvailableCommandsFromPiGetCommands } from './pi-commands.js'
 import { maybeAuthRequiredError } from './auth-required.js'
 import { isAbsolute } from 'node:path'
-import { existsSync, readFileSync, realpathSync, readdirSync, statSync, unlinkSync } from 'node:fs'
+import {
+  closeSync,
+  existsSync,
+  openSync,
+  readFileSync,
+  readSync,
+  realpathSync,
+  readdirSync,
+  statSync,
+  unlinkSync
+} from 'node:fs'
 import type { AvailableCommand } from '@agentclientprotocol/sdk'
 import { join, dirname, basename } from 'node:path'
 import { spawnSync } from 'node:child_process'
@@ -60,6 +69,47 @@ type AdvertisedModel = {
 
 const MODEL_CONFIG_ID = 'model'
 const THOUGHT_LEVEL_CONFIG_ID = 'thought_level'
+const SESSION_RECOVERY_UNAVAILABLE_CODE = 'PI_ACP_SESSION_RECOVERY_UNAVAILABLE'
+/** Distinct from the sealed 500ms terminal-update cut in session.ts. */
+export const SESSION_RECOVERY_HANDSHAKE_TIMEOUT_MS = 2_000
+
+function sessionRecoveryUnavailableError(): RequestError {
+  return RequestError.internalError(
+    { code: SESSION_RECOVERY_UNAVAILABLE_CODE },
+    'The Pi session could not be recovered safely; load the session again or create a new session.'
+  )
+}
+
+async function runSessionRpc<T>(session: PiAcpSession, operation: (proc: PiRpcProcess) => Promise<T>): Promise<T> {
+  const runRpc = (
+    session as PiAcpSession & {
+      runRpc?: <R>(operation: (proc: PiRpcProcess) => Promise<R>) => Promise<R>
+    }
+  ).runRpc
+  if (typeof runRpc === 'function') return (await runRpc.call(session, operation)) as T
+
+  // Compatibility for narrow unit-test sessions. Production sessions always
+  // provide runRpc(), which also waits for the fixed terminal update cut.
+  try {
+    return await operation(session.proc)
+  } catch (error) {
+    if (error instanceof PiRpcProcessTerminatedError) throw piRpcProcessRequestError(error)
+    throw error
+  }
+}
+
+type SessionRecovery = {
+  readonly identity: symbol
+  readonly generation: number
+  readonly promise: Promise<PiAcpSession>
+  candidate: PiRpcProcess | null
+  candidateSession: PiAcpSession | null
+  cancelled: boolean
+  blockedCleanup: boolean
+  cleanupRetry: Promise<void> | null
+}
+
+type FailedNewSessionCleanupResult = 'complete' | 'superseded' | 'process_unconfirmed' | 'artifact_quarantined'
 
 function builtinAvailableCommands(): AvailableCommand[] {
   return [
@@ -124,10 +174,38 @@ export class PiAcpAgent implements ACPAgent {
   private readonly conn: AgentSideConnection
   private readonly sessions = new SessionManager()
   private readonly store = new SessionStore()
-  private readonly restoringSessions = new Map<string, Promise<PiAcpSession>>()
+  private readonly restoringSessions = new Map<string, SessionRecovery>()
+  private readonly deletingSessionIds = new Set<string>()
+  private readonly deleteAttempts = new Map<string, Promise<DeleteSessionResponse>>()
+  private readonly pendingFailedNewSessionCleanups = new Set<PiAcpSession>()
+  private readonly quarantinedSessionIds = new Set<string>()
+  private explicitSessionTail: Promise<void> = Promise.resolve()
+  private disposePromise: Promise<void> | null = null
+  private disposed = false
 
-  dispose(): void {
-    this.sessions.disposeAll()
+  async dispose(): Promise<void> {
+    if (!this.disposePromise) {
+      this.disposed = true
+      const recoveries = [...this.restoringSessions.values()]
+      const explicitSessionDrain = this.explicitSessionTail
+      for (const recovery of recoveries) recovery.cancelled = true
+      // Close manager admission synchronously before awaiting any recovery
+      // cleanup, so an already-started session/new cannot publish after the
+      // shutdown snapshot.
+      const sessionsCleanupAttempt = this.sessions.disposeAll()
+      const attempt = (async () => {
+        await Promise.allSettled([explicitSessionDrain, ...recoveries.map(recovery => recovery.promise)])
+        const sessionsCleanup = await Promise.allSettled([sessionsCleanupAttempt])
+        const cleanupFailure = sessionsCleanup.find(result => result.status === 'rejected')
+        if (cleanupFailure?.status === 'rejected') throw cleanupFailure.reason
+        await this.retryFailedNewSessionCleanups()
+      })()
+      this.disposePromise = attempt
+      void attempt.catch(() => {
+        if (this.disposePromise === attempt) this.disposePromise = null
+      })
+    }
+    await this.disposePromise
   }
 
   // Remember recent session cwd and use it as the default filter.
@@ -138,23 +216,114 @@ export class PiAcpAgent implements ACPAgent {
     void _config
   }
 
-  private cleanupFailedNewSession(sessionId: string, state?: any | null): void {
-    this.sessions.close(sessionId)
+  private runExplicitSessionTransaction<T>(operation: () => Promise<T>): Promise<T> {
+    let release!: () => void
+    const slot = new Promise<void>(resolve => {
+      release = resolve
+    })
+    const previous = this.explicitSessionTail
+    this.explicitSessionTail = previous.catch(() => undefined).then(() => slot)
 
-    const sessionFile =
-      typeof state?.sessionFile === 'string' && state.sessionFile.trim()
-        ? state.sessionFile
-        : this.store.get(sessionId)?.sessionFile
-
-    if (typeof sessionFile === 'string' && sessionFile.trim()) {
+    return (async () => {
+      await previous.catch(() => undefined)
       try {
-        if (existsSync(sessionFile)) unlinkSync(sessionFile)
-      } catch {
-        // ignore cleanup failures; the auth/internal error is the primary result
+        return await operation()
+      } finally {
+        release()
       }
+    })()
+  }
+
+  private async cleanupFailedNewSession(session: PiAcpSession): Promise<FailedNewSessionCleanupResult> {
+    const sessionId = session.sessionId
+    try {
+      const closed = await this.sessions.close(sessionId, session)
+      if (closed === false) {
+        const current = (
+          this.sessions as SessionManager & { maybeGet?: (id: string) => PiAcpSession | undefined }
+        ).maybeGet?.(sessionId)
+        // A different live generation owns this ID: never touch its mapping.
+        // If shutdown already proved the original child stopped and removed
+        // it, exact durable cleanup may still finish below.
+        if (current && current !== session) return 'superseded'
+        if (current || this.sessionIsAlive(session)) return 'process_unconfirmed'
+      }
+    } catch {
+      // Preserve the primary startup/auth error, but keep the durable file and
+      // mapping while child cleanup is unconfirmed.
+      return 'process_unconfirmed'
     }
 
-    this.store.delete(sessionId)
+    return this.cleanupFailedNewSessionArtifacts(session)
+  }
+
+  private cleanupFailedNewSessionArtifacts(session: PiAcpSession): FailedNewSessionCleanupResult {
+    const sessionId = session.sessionId
+    const exactMapping = session.sessionFile ? { cwd: session.cwd, sessionFile: session.sessionFile } : null
+
+    // Only the immutable identity captured before publication is safe to
+    // delete. If the exact header/file cannot be proven, retain both the cache
+    // mapping and generation tombstone for an explicit cleanup retry.
+    if (!exactMapping) return 'artifact_quarantined'
+    let currentMapping: ReturnType<SessionStore['get']>
+    try {
+      currentMapping = this.store.get(sessionId)
+    } catch {
+      return 'artifact_quarantined'
+    }
+    if (
+      currentMapping &&
+      (currentMapping.cwd !== exactMapping.cwd || currentMapping.sessionFile !== exactMapping.sessionFile)
+    ) {
+      return 'artifact_quarantined'
+    }
+    if (existsSync(exactMapping.sessionFile)) {
+      if (!this.validDurableMapping(sessionId, exactMapping)) return 'artifact_quarantined'
+      try {
+        unlinkSync(exactMapping.sessionFile)
+      } catch {
+        return 'artifact_quarantined'
+      }
+    }
+    if (currentMapping) {
+      try {
+        this.store.delete(sessionId)
+      } catch {
+        return 'artifact_quarantined'
+      }
+    }
+    ;(this.sessions as SessionManager & { forget?: (id: string) => void }).forget?.(sessionId)
+    return 'complete'
+  }
+
+  private async retryFailedNewSessionCleanups(): Promise<Set<string>> {
+    const processed = new Set<string>()
+    for (const session of [...this.pendingFailedNewSessionCleanups]) {
+      const result = await this.cleanupFailedNewSession(session)
+      if (result === 'process_unconfirmed') throw sessionRecoveryUnavailableError()
+      this.pendingFailedNewSessionCleanups.delete(session)
+      if (result === 'artifact_quarantined') this.quarantinedSessionIds.add(session.sessionId)
+      processed.add(session.sessionId)
+    }
+    return processed
+  }
+
+  private retireDeletedSessionCleanupState(sessionId: string): void {
+    this.quarantinedSessionIds.delete(sessionId)
+    for (const session of [...this.pendingFailedNewSessionCleanups]) {
+      if (session.sessionId === sessionId && !this.sessionIsAlive(session)) {
+        this.pendingFailedNewSessionCleanups.delete(session)
+      }
+    }
+  }
+
+  private async cleanupFailedLoadSession(session: PiAcpSession): Promise<void> {
+    try {
+      await this.sessions.close(session.sessionId, session)
+    } catch {
+      // SessionManager retains an unconfirmed exact child as the admission
+      // blocker. Loading never deletes the durable transcript or mapping.
+    }
   }
 
   private findStoredSession(sessionId: string): { cwd: string; sessionFile: string } | null {
@@ -163,14 +332,21 @@ export class PiAcpAgent implements ACPAgent {
       return { cwd: stored.cwd, sessionFile: stored.sessionFile }
     }
 
-    const piSession = findPiSession(sessionId)
+    const discovered = listPiSessions().filter(session => session.sessionId === sessionId)
+    if (discovered.length > 1) throw sessionRecoveryUnavailableError()
+    const piSession = discovered.length === 1 ? discovered[0] : null
     if (!piSession) return null
 
-    this.store.upsert({
-      sessionId,
-      cwd: piSession.cwd,
-      sessionFile: piSession.sessionFile
-    })
+    try {
+      this.store.upsert({
+        sessionId,
+        cwd: piSession.cwd,
+        sessionFile: piSession.sessionFile
+      })
+    } catch {
+      // Discovery remains usable for this recovery attempt even if the cache
+      // refresh cannot be persisted.
+    }
 
     return {
       cwd: piSession.cwd,
@@ -182,58 +358,396 @@ export class PiAcpAgent implements ACPAgent {
     sessionId: string,
     opts?: { cwd?: string; mcpServers?: LoadSessionRequest['mcpServers'] }
   ): Promise<PiAcpSession> {
-    const existing = this.sessions.maybeGet(sessionId)
-    if (existing) return existing
+    if (this.disposed) throw sessionRecoveryUnavailableError()
+    if (this.deletingSessionIds.has(sessionId)) throw sessionRecoveryUnavailableError()
 
     const inFlight = this.restoringSessions.get(sessionId)
-    if (inFlight) return inFlight
+    if (inFlight) {
+      if (inFlight.blockedCleanup) return this.retryBlockedRecovery(sessionId, inFlight, opts)
+      return inFlight.promise
+    }
+    if (this.quarantinedSessionIds.has(sessionId)) throw sessionRecoveryUnavailableError()
 
-    const restorePromise = (async () => {
-      const stored = this.findStoredSession(sessionId)
-      if (!stored) {
-        throw RequestError.invalidParams(`Unknown sessionId: ${sessionId}`)
+    const snapshot = this.sessionSnapshot(sessionId)
+    if (
+      snapshot &&
+      this.sessionIsAlive(snapshot.session) &&
+      !this.pendingFailedNewSessionCleanups.has(snapshot.session)
+    ) {
+      return snapshot.session
+    }
+
+    const stored = this.findStoredSession(sessionId)
+    const generation = snapshot?.generation ?? this.currentSessionGeneration(sessionId)
+    if (!stored && !snapshot) {
+      if (generation > 0) throw sessionRecoveryUnavailableError()
+      throw RequestError.invalidParams(`Unknown sessionId: ${sessionId}`)
+    }
+    let resolveRecovery!: (session: PiAcpSession) => void
+    let rejectRecovery!: (error: unknown) => void
+    const promise = new Promise<PiAcpSession>((resolve, reject) => {
+      resolveRecovery = resolve
+      rejectRecovery = reject
+    })
+    const recovery: SessionRecovery = {
+      identity: Symbol(`session-recovery:${sessionId}:${generation}`),
+      generation,
+      promise,
+      candidate: null,
+      candidateSession: null,
+      cancelled: false,
+      blockedCleanup: false,
+      cleanupRetry: null
+    }
+
+    // This synchronous publication is the active(g) -> recovering(g, identity,
+    // promise) CAS. Every peer observes and awaits this exact promise.
+    this.restoringSessions.set(sessionId, recovery)
+    void this.runSessionRecovery(sessionId, stored, recovery, opts)
+      .then(resolveRecovery, rejectRecovery)
+      .finally(() => {
+        if (!recovery.blockedCleanup && this.restoringSessions.get(sessionId) === recovery) {
+          this.restoringSessions.delete(sessionId)
+        }
+      })
+
+    return promise
+  }
+
+  private async retryBlockedRecovery(
+    sessionId: string,
+    recovery: SessionRecovery,
+    opts?: { cwd?: string; mcpServers?: LoadSessionRequest['mcpServers'] }
+  ): Promise<PiAcpSession> {
+    if (this.disposed || recovery.cancelled) throw sessionRecoveryUnavailableError()
+    if (this.restoringSessions.get(sessionId) !== recovery) return this.restoreSession(sessionId, opts)
+
+    if (!recovery.cleanupRetry) {
+      const retry = (async () => {
+        const candidate = recovery.candidate
+        if (recovery.candidateSession) await recovery.candidateSession.dispose()
+        else if (candidate) await candidate.stop()
+        else throw sessionRecoveryUnavailableError()
+        if (candidate) this.releaseRecoveryCandidate(candidate)
+        recovery.candidateSession = null
+        recovery.candidate = null
+        recovery.blockedCleanup = false
+      })()
+      recovery.cleanupRetry = retry
+      void retry
+        .finally(() => {
+          if (recovery.cleanupRetry === retry) recovery.cleanupRetry = null
+        })
+        .catch(() => undefined)
+    }
+
+    try {
+      await recovery.cleanupRetry
+    } catch {
+      // Reuse the original stable public failure while retaining the candidate
+      // handle for another bounded cleanup attempt.
+      return recovery.promise
+    }
+    if (this.disposed || recovery.cancelled) throw sessionRecoveryUnavailableError()
+    if (this.restoringSessions.get(sessionId) !== recovery) return this.restoreSession(sessionId, opts)
+    this.restoringSessions.delete(sessionId)
+    return this.restoreSession(sessionId, opts)
+  }
+
+  private async runSessionRecovery(
+    sessionId: string,
+    stored: { cwd: string; sessionFile: string } | null,
+    recovery: SessionRecovery,
+    opts?: { cwd?: string; mcpServers?: LoadSessionRequest['mcpServers'] }
+  ): Promise<PiAcpSession> {
+    const isDeadGenerationRecovery = recovery.generation > 0
+    let candidateSession: PiAcpSession | null = null
+    let releaseSpawnLease: (() => void) | null = null
+
+    try {
+      // The recovery identity is already synchronously published, so peers
+      // coalesce while the leader proves any globally retained failed-create
+      // process. Cleanup can remove this same ID's mapping/tombstone; rebuild
+      // all recovery inputs afterward and never spawn from the stale capture.
+      await this.retryFailedNewSessionCleanups()
+      if (this.quarantinedSessionIds.has(sessionId)) throw sessionRecoveryUnavailableError()
+
+      if (this.disposed || recovery.cancelled) throw sessionRecoveryUnavailableError()
+      const currentSnapshot = this.sessionSnapshot(sessionId)
+      if (currentSnapshot) {
+        if (currentSnapshot.generation !== recovery.generation) {
+          if (this.sessionIsAlive(currentSnapshot.session)) return currentSnapshot.session
+          throw sessionRecoveryUnavailableError()
+        }
+        if (this.sessionIsAlive(currentSnapshot.session)) return currentSnapshot.session
+        const closed = await this.sessions.close(sessionId, currentSnapshot.session)
+        if (!closed) {
+          const winner = this.sessions.maybeGet(sessionId)
+          if (winner && this.sessionIsAlive(winner)) return winner
+          throw sessionRecoveryUnavailableError()
+        }
+      }
+
+      if (this.disposed || recovery.cancelled) throw sessionRecoveryUnavailableError()
+      const refreshedStored = this.findStoredSession(sessionId)
+      if (
+        this.currentSessionGeneration(sessionId) !== recovery.generation ||
+        !refreshedStored ||
+        !this.validDurableMapping(sessionId, refreshedStored)
+      ) {
+        throw sessionRecoveryUnavailableError()
+      }
+      stored = refreshedStored
+
+      try {
+        const acquire = (
+          this.sessions as SessionManager & {
+            acquireSpawnLease?: () => Promise<() => void>
+          }
+        ).acquireSpawnLease
+        releaseSpawnLease = typeof acquire === 'function' ? await acquire.call(this.sessions) : () => undefined
+      } catch {
+        throw sessionRecoveryUnavailableError()
       }
 
       const cwd = opts?.cwd ?? stored.cwd
+      recovery.candidate = await PiRpcProcess.spawn({
+        cwd,
+        sessionPath: stored.sessionFile,
+        piCommand: process.env.PI_ACP_PI_COMMAND,
+        handshakeTimeoutMs: SESSION_RECOVERY_HANDSHAKE_TIMEOUT_MS
+      })
+      this.trackRecoveryCandidate(recovery.candidate)
 
-      let proc: PiRpcProcess
-      try {
-        proc = await PiRpcProcess.spawn({
-          cwd,
-          sessionPath: stored.sessionFile,
-          piCommand: process.env.PI_ACP_PI_COMMAND
-        })
-      } catch (e: unknown) {
-        if (e instanceof PiRpcSpawnError) {
-          const data = piRpcSpawnErrorData(e)
-          if (e.diagnostic) throw new RequestError(-32603, e.message, data)
-          throw RequestError.internalError(data, e.message)
-        }
-        throw e
+      if (this.disposed || recovery.cancelled) throw sessionRecoveryUnavailableError()
+
+      // Timeout-mode spawn requires and retains one successful get_state. Use
+      // that exact response so recovery has one 2s handshake budget rather
+      // than starting a second independently bounded identity probe.
+      const state = recovery.candidate.getStartupHandshakeState() as any
+      if (
+        state?.sessionId !== sessionId ||
+        state?.sessionFile !== stored.sessionFile ||
+        !recovery.candidate.isAlive()
+      ) {
+        throw sessionRecoveryUnavailableError()
       }
 
       const fileCommands = loadSlashCommands(cwd)
-      const session = this.sessions.getOrCreate(sessionId, {
+      candidateSession = this.createDetachedSession(sessionId, {
         cwd,
         mcpServers: opts?.mcpServers ?? [],
         conn: this.conn,
-        proc,
+        proc: recovery.candidate,
         fileCommands
       })
+      recovery.candidateSession = candidateSession
+      this.trackRecoveryCandidate(recovery.candidate, candidateSession)
 
+      if (this.disposed || recovery.cancelled || !this.sessionIsAlive(candidateSession)) {
+        throw sessionRecoveryUnavailableError()
+      }
+
+      if (this.restoringSessions.get(sessionId) !== recovery) {
+        throw sessionRecoveryUnavailableError()
+      }
+
+      if (!this.publishReplacementSession(sessionId, recovery.generation, candidateSession)) {
+        try {
+          await candidateSession.dispose()
+        } catch {
+          recovery.blockedCleanup = true
+          this.retainRecoveryCandidate(recovery.candidate, candidateSession)
+          throw sessionRecoveryUnavailableError()
+        }
+        this.releaseRecoveryCandidate(recovery.candidate)
+        candidateSession = null
+        recovery.candidateSession = null
+        recovery.candidate = null
+        const winner = this.sessions.maybeGet(sessionId)
+        if (winner && this.sessionIsAlive(winner)) return winner
+        throw sessionRecoveryUnavailableError()
+      }
+
+      this.releaseRecoveryCandidate(recovery.candidate)
+      recovery.candidate = null
+      recovery.candidateSession = null
+      const publishedSession = candidateSession
+      candidateSession = null
       this.lastSessionCwd = cwd
-      this.store.upsert({ sessionId, cwd, sessionFile: stored.sessionFile })
+      try {
+        // Refresh only after winning the generation CAS. A losing candidate
+        // must never overwrite a concurrent winner's newer durable mapping,
+        // and a redundant refresh failure must not contradict live g+1.
+        this.store.upsert({ sessionId, cwd, sessionFile: stored.sessionFile })
+      } catch {
+        // The mapping was already validated before spawn and remains usable.
+      }
+      return publishedSession
+    } catch (error) {
+      if (error instanceof PiRpcSpawnError && error.candidate) {
+        recovery.candidate = error.candidate
+        this.retainRecoveryCandidate(error.candidate)
+        // spawn() exposes a candidate only after its own bounded cleanup
+        // attempt failed. Do not issue a second stop in this transaction.
+        recovery.blockedCleanup = true
+      }
 
-      return session
-    })()
+      // A failed cleanup attempt is proof of nothing; retain the exact
+      // candidate and do not immediately issue a second stop in the same
+      // recovery transaction. The next request/dispose/delete owns the retry.
+      if (!recovery.blockedCleanup && !this.disposed && !recovery.cancelled) {
+        if (candidateSession) {
+          const cleanupSession = candidateSession
+          try {
+            await cleanupSession.dispose()
+            if (recovery.candidate) this.releaseRecoveryCandidate(recovery.candidate)
+            candidateSession = null
+            recovery.candidateSession = null
+            recovery.candidate = null
+            recovery.blockedCleanup = false
+          } catch {
+            // Retain the exact losing candidate and recovery promise. Future
+            // operations must observe this blocked slot, never spawn around an
+            // unconfirmed cleanup.
+            recovery.blockedCleanup = true
+            if (recovery.candidate) this.retainRecoveryCandidate(recovery.candidate, cleanupSession)
+          }
+        } else if (recovery.candidate) {
+          const cleanupCandidate = recovery.candidate
+          try {
+            await cleanupCandidate.stop()
+            this.releaseRecoveryCandidate(cleanupCandidate)
+            recovery.candidate = null
+            recovery.blockedCleanup = false
+          } catch {
+            recovery.blockedCleanup = true
+            this.retainRecoveryCandidate(cleanupCandidate)
+          }
+        }
+      }
 
-    this.restoringSessions.set(sessionId, restorePromise)
-
-    try {
-      return await restorePromise
+      if (recovery.blockedCleanup) throw sessionRecoveryUnavailableError()
+      if (!isDeadGenerationRecovery && error instanceof PiRpcSpawnError) {
+        const data = piRpcSpawnErrorData(error)
+        if (error.diagnostic) throw new RequestError(-32603, error.message, data)
+        throw RequestError.internalError(data, error.message)
+      }
+      if (!isDeadGenerationRecovery && error instanceof RequestError) throw error
+      throw sessionRecoveryUnavailableError()
     } finally {
-      this.restoringSessions.delete(sessionId)
+      releaseSpawnLease?.()
     }
+  }
+
+  private sessionSnapshot(sessionId: string): { generation: number; session: PiAcpSession } | undefined {
+    const snapshot = (
+      this.sessions as SessionManager & {
+        snapshot?: (id: string) => { generation: number; session: PiAcpSession } | undefined
+      }
+    ).snapshot
+    if (typeof snapshot === 'function') return snapshot.call(this.sessions, sessionId)
+
+    const session = this.sessions.maybeGet(sessionId)
+    return session ? { generation: 0, session } : undefined
+  }
+
+  private trackRecoveryCandidate(candidate: PiRpcProcess, session?: PiAcpSession): void {
+    ;(
+      this.sessions as SessionManager & {
+        trackUnpublishedCandidate?: (candidate: PiRpcProcess, session?: PiAcpSession) => void
+      }
+    ).trackUnpublishedCandidate?.(candidate, session)
+  }
+
+  private retainRecoveryCandidate(candidate: PiRpcProcess, session?: PiAcpSession): void {
+    ;(
+      this.sessions as SessionManager & {
+        retainUnconfirmedCandidate?: (candidate: PiRpcProcess, session?: PiAcpSession) => void
+      }
+    ).retainUnconfirmedCandidate?.(candidate, session)
+  }
+
+  private releaseRecoveryCandidate(candidate: PiRpcProcess): void {
+    ;(
+      this.sessions as SessionManager & {
+        releaseCandidate?: (candidate: PiRpcProcess) => void
+      }
+    ).releaseCandidate?.(candidate)
+  }
+
+  private currentSessionGeneration(sessionId: string): number {
+    const current = (this.sessions as SessionManager & { currentGeneration?: (id: string) => number }).currentGeneration
+    return typeof current === 'function' ? current.call(this.sessions, sessionId) : 0
+  }
+
+  private createDetachedSession(
+    sessionId: string,
+    params: Parameters<SessionManager['createDetached']>[1]
+  ): PiAcpSession {
+    const createDetached = (
+      this.sessions as SessionManager & {
+        createDetached?: SessionManager['createDetached']
+      }
+    ).createDetached
+    if (typeof createDetached === 'function') return createDetached.call(this.sessions, sessionId, params)
+    return this.sessions.getOrCreate(sessionId, params)
+  }
+
+  private publishReplacementSession(sessionId: string, generation: number, session: PiAcpSession): boolean {
+    const publish = (
+      this.sessions as SessionManager & {
+        publishReplacement?: SessionManager['publishReplacement']
+      }
+    ).publishReplacement
+    return typeof publish === 'function' ? publish.call(this.sessions, sessionId, generation, session) : true
+  }
+
+  private validDurableMapping(sessionId: string, stored: { cwd: string; sessionFile: string }): boolean {
+    if (!isAbsolute(stored.cwd) || !isAbsolute(stored.sessionFile)) return false
+
+    let fd: number | null = null
+    try {
+      const stat = statSync(stored.sessionFile)
+      if (!stat.isFile() || stat.size <= 0) return false
+
+      fd = openSync(stored.sessionFile, 'r')
+      const buffer = Buffer.alloc(Math.min(stat.size, 64 * 1024))
+      const bytesRead = readSync(fd, buffer, 0, buffer.length, 0)
+      const head = buffer.subarray(0, bytesRead).toString('utf8')
+      const newline = head.indexOf('\n')
+      if (newline < 0 && stat.size > buffer.length) return false
+      const firstLine = (newline < 0 ? head : head.slice(0, newline)).trim()
+      const header = JSON.parse(firstLine) as any
+      return (
+        header?.type === 'session' &&
+        typeof header?.version === 'number' &&
+        Number.isFinite(header.version) &&
+        header?.id === sessionId &&
+        typeof header?.cwd === 'string' &&
+        isAbsolute(header.cwd)
+      )
+    } catch {
+      return false
+    } finally {
+      if (fd !== null) {
+        try {
+          closeSync(fd)
+        } catch {
+          // ignore
+        }
+      }
+    }
+  }
+
+  private sessionIsAlive(session: PiAcpSession): boolean {
+    const sessionCheck = (session as PiAcpSession & { isAlive?: () => boolean }).isAlive
+    if (typeof sessionCheck === 'function') return sessionCheck.call(session)
+
+    // Compatibility for narrowly mocked sessions in unit tests. Production
+    // PiAcpSession instances always expose isAlive().
+    const procCheck = (session.proc as PiRpcProcess & { isAlive?: () => boolean }).isAlive
+    return typeof procCheck === 'function' ? procCheck.call(session.proc) : true
   }
 
   async initialize(params: InitializeRequest): Promise<InitializeResponse> {
@@ -271,10 +785,19 @@ export class PiAcpAgent implements ACPAgent {
     }
   }
 
-  async newSession(params: NewSessionRequest) {
+  newSession(params: NewSessionRequest) {
+    return this.runExplicitSessionTransaction(() => this.newSessionOwned(params))
+  }
+
+  private async newSessionOwned(params: NewSessionRequest) {
     if (!isAbsolute(params.cwd)) {
       throw RequestError.invalidParams(`cwd must be an absolute path: ${params.cwd}`)
     }
+    if (this.disposed) throw sessionRecoveryUnavailableError()
+
+    // A previously unreturned child must have both process teardown and exact
+    // artifact cleanup proven before another explicit create may spawn.
+    await this.retryFailedNewSessionCleanups()
 
     this.lastSessionCwd = params.cwd
 
@@ -282,153 +805,209 @@ export class PiAcpAgent implements ACPAgent {
     const enableSkillCommands = getEnableSkillCommands(params.cwd)
 
     // Pi doesn't support mcpServers, but we accept and store.
-    const session = await this.sessions.create({
-      cwd: params.cwd,
-      mcpServers: params.mcpServers,
-      conn: this.conn,
-      fileCommands,
-      piCommand: process.env.PI_ACP_PI_COMMAND
-    })
+    let session: PiAcpSession
+    try {
+      session = await this.sessions.create({
+        cwd: params.cwd,
+        mcpServers: params.mcpServers,
+        conn: this.conn,
+        fileCommands,
+        piCommand: process.env.PI_ACP_PI_COMMAND
+      })
+    } catch (error) {
+      if (!(error instanceof SessionCreateRollbackError)) throw error
 
-    // Fetch state + models once (parallel) to reduce startup latency.
-    let state: any = null
-    let availableModels: any = null
-    let stateErr: unknown = null
-    let availableModelsErr: unknown = null
-
-    await Promise.all([
-      session.proc
-        .getState()
-        .then(s => {
-          state = s as any
-        })
-        .catch(err => {
-          stateErr = err
-          state = null
-        }),
-      session.proc
-        .getAvailableModels()
-        .then(m => {
-          availableModels = m as any
-        })
-        .catch(err => {
-          availableModelsErr = err
-          availableModels = null
-        })
-    ])
-
-    const availableModelsAuthErr = maybeAuthRequiredError(availableModelsErr)
-
-    if (availableModelsAuthErr) {
-      this.cleanupFailedNewSession(session.sessionId, state)
-      throw availableModelsAuthErr
+      // SessionManager already made the transaction's one process-cleanup
+      // attempt. A failed proof becomes the exact pending admission barrier;
+      // a successful proof permits artifact-only cleanup without another stop.
+      const cleanup =
+        error.cleanupStatus === 'process_stopped'
+          ? this.cleanupFailedNewSessionArtifacts(error.session)
+          : 'process_unconfirmed'
+      if (!this.deletingSessionIds.has(error.session.sessionId)) {
+        if (cleanup === 'process_unconfirmed') this.pendingFailedNewSessionCleanups.add(error.session)
+        else this.pendingFailedNewSessionCleanups.delete(error.session)
+        if (cleanup === 'artifact_quarantined') this.quarantinedSessionIds.add(error.session.sessionId)
+      }
+      throw error.originalError
     }
 
-    if (availableModelsErr) {
-      this.cleanupFailedNewSession(session.sessionId, state)
-      throw RequestError.internalError({}, String((availableModelsErr as Error)?.message ?? availableModelsErr))
-    }
+    try {
+      // Reuse the authoritative pre-publication state captured by SessionManager
+      // and fetch models in parallel. Narrow test doubles without initialState
+      // retain the legacy getState fallback.
+      let state: any = null
+      let availableModels: any = null
+      let stateErr: unknown = null
+      let availableModelsErr: unknown = null
 
-    // If pi has no models available after spawning, it's effectively unauthenticated.
-    const rawModelsCount = Array.isArray(availableModels?.models) ? availableModels.models.length : 0
+      const initialState = (session as PiAcpSession & { initialState?: unknown }).initialState
+      await Promise.all([
+        initialState != null
+          ? Promise.resolve().then(() => {
+              state = initialState as any
+            })
+          : session.proc
+              .getState()
+              .then(s => {
+                state = s as any
+              })
+              .catch(err => {
+                stateErr = err
+                state = null
+              }),
+        session.proc
+          .getAvailableModels()
+          .then(m => {
+            availableModels = m as any
+          })
+          .catch(err => {
+            availableModelsErr = err
+            availableModels = null
+          })
+      ])
 
-    if (rawModelsCount === 0) {
-      this.cleanupFailedNewSession(session.sessionId, state)
-      throw RequestError.authRequired(
-        { authMethods: getAuthMethods() },
-        'Configure an API key or log in with an OAuth provider.'
+      const terminalProbeError = [stateErr, availableModelsErr].find(
+        error => error instanceof PiRpcProcessTerminatedError
+      ) as PiRpcProcessTerminatedError | undefined
+      if (terminalProbeError) {
+        throw piRpcProcessRequestError(terminalProbeError)
+      }
+
+      const availableModelsAuthErr = maybeAuthRequiredError(availableModelsErr)
+
+      if (availableModelsAuthErr) {
+        throw availableModelsAuthErr
+      }
+
+      if (availableModelsErr) {
+        throw RequestError.internalError({}, String((availableModelsErr as Error)?.message ?? availableModelsErr))
+      }
+
+      // If pi has no models available after spawning, it's effectively unauthenticated.
+      const rawModelsCount = Array.isArray(availableModels?.models) ? availableModels.models.length : 0
+
+      if (rawModelsCount === 0) {
+        throw RequestError.authRequired(
+          { authMethods: getAuthMethods() },
+          'Configure an API key or log in with an OAuth provider.'
+        )
+      }
+
+      if (stateErr && maybeAuthRequiredError(stateErr)) {
+        throw RequestError.authRequired(
+          { authMethods: getAuthMethods() },
+          'Configure an API key or log in with an OAuth provider.'
+        )
+      }
+
+      const configuration = await runSessionRpc(session, proc =>
+        getSessionConfiguration(proc, {
+          state,
+          availableModels
+        })
       )
-    }
+      const { configOptions, models, modes } = configuration
 
-    if (stateErr && maybeAuthRequiredError(stateErr)) {
-      this.cleanupFailedNewSession(session.sessionId, state)
-      throw RequestError.authRequired(
-        { authMethods: getAuthMethods() },
-        'Configure an API key or log in with an OAuth provider.'
-      )
-    }
+      const quietStartup = getQuietStartup(params.cwd)
+      const updateNotice = buildUpdateNotice()
 
-    const { configOptions, models, modes } = await getSessionConfiguration(session.proc, {
-      state,
-      availableModels
-    })
+      // If quietStartup is enabled, suppress the full "startup info" prelude, but still surface
+      // the "New version available" notice (if any) since it's high-signal and actionable.
+      const preludeText = quietStartup
+        ? updateNotice
+          ? updateNotice + '\n'
+          : ''
+        : buildStartupInfo({
+            cwd: params.cwd,
+            fileCommands,
+            updateNotice
+          })
 
-    const quietStartup = getQuietStartup(params.cwd)
-    const updateNotice = buildUpdateNotice()
+      if (preludeText) session.setStartupInfo(preludeText)
 
-    // If quietStartup is enabled, suppress the full "startup info" prelude, but still surface
-    // the "New version available" notice (if any) since it's high-signal and actionable.
-    const preludeText = quietStartup
-      ? updateNotice
-        ? updateNotice + '\n'
-        : ''
-      : buildStartupInfo({
-          cwd: params.cwd,
-          fileCommands,
-          updateNotice
-        })
+      try {
+        // Preserve the healthy current session until the candidate is fully
+        // configured. Commit the one-child policy only at the response boundary.
+        await (this.sessions as any).closeAllExcept?.(session.sessionId)
+      } catch {
+        // This candidate was never returned to the client. Remove its mapping
+        // and file only after SessionManager proves exact child cleanup; on
+        // failure it retains the registered session as the global barrier.
+        throw sessionRecoveryUnavailableError()
+      }
 
-    if (preludeText)
-      session.setStartupInfo(preludeText)
+      const maybeGet = (this.sessions as SessionManager & { maybeGet?: (id: string) => PiAcpSession | undefined })
+        .maybeGet
+      const exactSessionStillPublished =
+        typeof maybeGet !== 'function' || maybeGet.call(this.sessions, session.sessionId) === session
+      if (this.disposed || !this.sessionIsAlive(session) || !exactSessionStillPublished) {
+        throw sessionRecoveryUnavailableError()
+      }
 
-      // Policy: within a single ACP connection (one client window), keep only one live pi subprocess.
-      // This avoids leaking subprocesses when clients start new sessions but don't explicitly close old ones.
-      // It does NOT affect other client windows because they run in separate agent processes.
-      //
-      // (Tests sometimes stub out `this.sessions`, so guard the call.)
-    ;(this.sessions as any).closeAllExcept?.(session.sessionId)
-
-    const response = {
-      sessionId: session.sessionId,
-      configOptions,
-      models,
-      modes,
-      _meta: {
-        piAcp: {
-          startupInfo: preludeText || null
+      const response = {
+        sessionId: session.sessionId,
+        configOptions,
+        models,
+        modes,
+        _meta: {
+          piAcp: {
+            startupInfo: preludeText || null
+          }
         }
       }
-    }
 
-    // Try to send it immediately after session/new returns; if the client ignores it,
-    // it will still be emitted as the first chunk of the first prompt.
-    if (preludeText) setTimeout(() => session.sendStartupInfoIfPending(), 0)
+      // Try to send it immediately after session/new returns; if the client ignores it,
+      // it will still be emitted as the first chunk of the first prompt.
+      if (preludeText) setTimeout(() => session.sendStartupInfoIfPending(), 0)
 
-    // Advertise slash commands (ACP: available_commands_update)
-    // Important: some clients (e.g. Zed) will ignore notifications for an unknown sessionId.
-    // So we must send this *after* the session/new response has been delivered.
-    setTimeout(() => {
-      void (async () => {
-        try {
-          const pi = (await session.proc.getCommands()) as any
-          const { commands } = toAvailableCommandsFromPiGetCommands(pi, {
-            enableSkillCommands,
-            includeExtensionCommands: false
-          })
+      // Advertise slash commands (ACP: available_commands_update)
+      // Important: some clients (e.g. Zed) will ignore notifications for an unknown sessionId.
+      // So we must send this *after* the session/new response has been delivered.
+      setTimeout(() => {
+        void (async () => {
+          try {
+            const pi = (await runSessionRpc(session, proc => proc.getCommands())) as any
+            const { commands } = toAvailableCommandsFromPiGetCommands(pi, {
+              enableSkillCommands,
+              includeExtensionCommands: false
+            })
+
+            await this.conn.sessionUpdate({
+              sessionId: session.sessionId,
+              update: {
+                sessionUpdate: 'available_commands_update',
+                availableCommands: mergeCommands(commands, builtinAvailableCommands())
+              }
+            })
+            return
+          } catch {
+            // Fall back to file-based prompt templates (legacy behavior).
+          }
 
           await this.conn.sessionUpdate({
             sessionId: session.sessionId,
             update: {
               sessionUpdate: 'available_commands_update',
-              availableCommands: mergeCommands(commands, builtinAvailableCommands())
+              availableCommands: mergeCommands(toAvailableCommands(fileCommands), builtinAvailableCommands())
             }
           })
-          return
-        } catch {
-          // Fall back to file-based prompt templates (legacy behavior).
-        }
+        })()
+      }, 0)
 
-        await this.conn.sessionUpdate({
-          sessionId: session.sessionId,
-          update: {
-            sessionUpdate: 'available_commands_update',
-            availableCommands: mergeCommands(toAvailableCommands(fileCommands), builtinAvailableCommands())
-          }
-        })
-      })()
-    }, 0)
-
-    return response
+      return response
+    } catch (error) {
+      // Once create() publishes a child, every failure before the response is
+      // transactional. Cleanup is exact-session CAS and never touches a newer
+      // replacement that may have won concurrently.
+      const cleanup = await this.cleanupFailedNewSession(session)
+      if (!this.deletingSessionIds.has(session.sessionId)) {
+        if (cleanup === 'process_unconfirmed') this.pendingFailedNewSessionCleanups.add(session)
+        else this.pendingFailedNewSessionCleanups.delete(session)
+        if (cleanup === 'artifact_quarantined') this.quarantinedSessionIds.add(session.sessionId)
+      }
+      throw error
+    }
   }
 
   async authenticate(_params: AuthenticateRequest) {
@@ -453,7 +1032,7 @@ export class PiAcpAgent implements ACPAgent {
 
       if (cmd === 'compact') {
         const customInstructions = args.join(' ').trim() || undefined
-        const res = await session.proc.compact(customInstructions)
+        const res = await runSessionRpc(session, proc => proc.compact(customInstructions))
 
         const r: any = res && typeof res === 'object' ? (res as any) : null
         const tokensBefore = typeof r?.tokensBefore === 'number' ? r.tokensBefore : null
@@ -478,7 +1057,7 @@ export class PiAcpAgent implements ACPAgent {
       }
 
       if (cmd === 'session') {
-        const stats = (await session.proc.getSessionStats()) as any
+        const stats = (await runSessionRpc(session, proc => proc.getSessionStats())) as any
 
         const lines: string[] = []
         if (stats?.sessionId) lines.push(`Session: ${stats.sessionId}`)
@@ -526,8 +1105,9 @@ export class PiAcpAgent implements ACPAgent {
         }
 
         try {
-          await session.proc.setSessionName(name)
+          await runSessionRpc(session, proc => proc.setSessionName(name))
         } catch (e: any) {
+          if (e instanceof RequestError) throw e
           const msg = String(e?.message ?? e)
           const hint = /set_session_name/i.test(msg)
             ? ' This requires a newer pi version that supports `set_session_name` in RPC mode.'
@@ -565,7 +1145,7 @@ export class PiAcpAgent implements ACPAgent {
 
       if (cmd === 'steering') {
         const modeRaw = String(args[0] ?? '').toLowerCase()
-        const state = (await session.proc.getState()) as any
+        const state = (await runSessionRpc(session, proc => proc.getState())) as any
         const current = String(state?.steeringMode ?? '')
 
         // If no arg, just report current.
@@ -597,7 +1177,7 @@ export class PiAcpAgent implements ACPAgent {
           return { stopReason: 'end_turn' }
         }
 
-        await session.proc.setSteeringMode(modeRaw as 'all' | 'one-at-a-time')
+        await runSessionRpc(session, proc => proc.setSteeringMode(modeRaw as 'all' | 'one-at-a-time'))
 
         await this.conn.sessionUpdate({
           sessionId: session.sessionId,
@@ -612,7 +1192,7 @@ export class PiAcpAgent implements ACPAgent {
 
       if (cmd === 'follow-up') {
         const modeRaw = String(args[0] ?? '').toLowerCase()
-        const state = (await session.proc.getState()) as any
+        const state = (await runSessionRpc(session, proc => proc.getState())) as any
         const current = String(state?.followUpMode ?? '')
 
         // If no arg, just report current.
@@ -644,7 +1224,7 @@ export class PiAcpAgent implements ACPAgent {
           return { stopReason: 'end_turn' }
         }
 
-        await session.proc.setFollowUpMode(modeRaw as 'all' | 'one-at-a-time')
+        await runSessionRpc(session, proc => proc.setFollowUpMode(modeRaw as 'all' | 'one-at-a-time'))
 
         await this.conn.sessionUpdate({
           sessionId: session.sessionId,
@@ -740,7 +1320,7 @@ export class PiAcpAgent implements ACPAgent {
         // IMPORTANT: pi's export_html reads the session JSONL file. If it doesn't exist yet
         // (no messages) or is empty, pi throws and RPC mode emits an uncorrelated parse error
         // (no id), which would otherwise hang our request. So we guard here.
-        const state = (await session.proc.getState()) as any
+        const state = (await runSessionRpc(session, proc => proc.getState())) as any
         const sessionFile = typeof state?.sessionFile === 'string' ? state.sessionFile : null
         const messageCount = typeof state?.messageCount === 'number' ? state.messageCount : 0
 
@@ -792,9 +1372,10 @@ export class PiAcpAgent implements ACPAgent {
 
         let resultPath = ''
         try {
-          const result = await session.proc.exportHtml(outputPath)
+          const result = await runSessionRpc(session, proc => proc.exportHtml(outputPath))
           resultPath = result.path
         } catch (e: any) {
+          if (e instanceof RequestError) throw e
           await this.conn.sessionUpdate({
             sessionId: session.sessionId,
             update: {
@@ -862,12 +1443,12 @@ export class PiAcpAgent implements ACPAgent {
 
         if (enabled === null) {
           // toggle: read current state and invert.
-          const state = (await session.proc.getState()) as any
+          const state = (await runSessionRpc(session, proc => proc.getState())) as any
           const current = Boolean(state?.autoCompactionEnabled)
           enabled = !current
         }
 
-        await session.proc.setAutoCompaction(enabled)
+        await runSessionRpc(session, proc => proc.setAutoCompaction(enabled))
 
         await this.conn.sessionUpdate({
           sessionId: session.sessionId,
@@ -884,13 +1465,7 @@ export class PiAcpAgent implements ACPAgent {
       }
     }
 
-    const result = await session.prompt(message, images)
-
-    // ACP StopReason does not include "error"; if pi fails we map to end_turn for now,
-    // unless we know this was a cancellation.
-    const stopReason: StopReason =
-      result === 'error' ? (session.wasCancelRequested() ? 'cancelled' : 'end_turn') : result
-
+    const stopReason = await session.prompt(message, images)
     return { stopReason }
   }
 
@@ -929,15 +1504,24 @@ export class PiAcpAgent implements ACPAgent {
     return { sessions, nextCursor, _meta: {} }
   }
 
-  async loadSession(params: LoadSessionRequest): Promise<LoadSessionResponse> {
+  loadSession(params: LoadSessionRequest): Promise<LoadSessionResponse> {
+    return this.runExplicitSessionTransaction(() => this.loadSessionOwned(params))
+  }
+
+  private async loadSessionOwned(params: LoadSessionRequest): Promise<LoadSessionResponse> {
     if (!isAbsolute(params.cwd)) {
       throw RequestError.invalidParams(`cwd must be an absolute path: ${params.cwd}`)
     }
+    if (this.disposed) throw sessionRecoveryUnavailableError()
 
     // If the client is re-loading a session that is already active, tear down the existing
     // pi subprocess so we can start fresh and re-advertise commands reliably.
     // (Some clients may call session/load when restoring from history.)
-    this.sessions.close(params.sessionId)
+    try {
+      await this.sessions.close(params.sessionId)
+    } catch {
+      throw sessionRecoveryUnavailableError()
+    }
 
     this.lastSessionCwd = params.cwd
 
@@ -951,195 +1535,287 @@ export class PiAcpAgent implements ACPAgent {
       cwd: params.cwd,
       mcpServers: params.mcpServers
     })
-    const proc = session.proc
-    const fileCommands = loadSlashCommands(params.cwd)
+    try {
+      const fileCommands = loadSlashCommands(params.cwd)
 
-    // Policy: within a single ACP connection (one Zed window), keep only one live pi subprocess.
-    // (Tests sometimes stub out `this.sessions`, so guard the call.)
-    ;(this.sessions as any).closeAllExcept?.(session.sessionId)
-
-    // (Optional) ensure mapping stays fresh.
-    this.store.upsert({
-      sessionId: params.sessionId,
-      cwd: params.cwd,
-      sessionFile: stored.sessionFile
-    })
-
-    // Replay full conversation history.
-    const data = (await proc.getMessages()) as any
-    const messages = Array.isArray(data?.messages) ? data.messages : []
-
-    for (const m of messages) {
-      const role = String(m?.role ?? '')
-
-      if (role === 'user') {
-        const text = normalizePiMessageText(m?.content)
-        if (text) {
-          await this.conn.sessionUpdate({
-            sessionId: session.sessionId,
-            update: {
-              sessionUpdate: 'user_message_chunk',
-              content: { type: 'text', text }
-            }
-          })
-        }
+      // Policy: within a single ACP connection (one Zed window), keep only one live pi subprocess.
+      // (Tests sometimes stub out `this.sessions`, so guard the call.)
+      try {
+        await (this.sessions as any).closeAllExcept?.(session.sessionId)
+      } catch {
+        throw sessionRecoveryUnavailableError()
       }
 
-      if (role === 'assistant') {
-        const text = normalizePiAssistantText(m?.content)
-        if (text) {
-          await this.conn.sessionUpdate({
-            sessionId: session.sessionId,
-            update: {
-              sessionUpdate: 'agent_message_chunk',
-              content: { type: 'text', text }
-            }
-          })
-        }
+      // (Optional) ensure mapping stays fresh.
+      try {
+        this.store.upsert({
+          sessionId: params.sessionId,
+          cwd: params.cwd,
+          sessionFile: stored.sessionFile
+        })
+      } catch {
+        // The exact durable mapping used for this recovery was already
+        // validated. A cache refresh failure must not strand the live session.
       }
 
-      if (role === 'toolResult') {
-        const toolName = String((m as any)?.toolName ?? 'tool')
-        const toolCallId = String((m as any)?.toolCallId ?? crypto.randomUUID())
-        const isError = Boolean((m as any)?.isError)
-        const isBash = isBashTool(toolName)
+      // Replay full conversation history.
+      const data = (await runSessionRpc(session, proc => proc.getMessages())) as any
+      const messages = Array.isArray(data?.messages) ? data.messages : []
 
-        if (isBash) {
-          const text = bashResultText(m)
+      for (const m of messages) {
+        const role = String(m?.role ?? '')
+
+        if (role === 'user') {
+          const text = normalizePiMessageText(m?.content)
+          if (text) {
+            await this.conn.sessionUpdate({
+              sessionId: session.sessionId,
+              update: {
+                sessionUpdate: 'user_message_chunk',
+                content: { type: 'text', text }
+              }
+            })
+          }
+        }
+
+        if (role === 'assistant') {
+          const text = normalizePiAssistantText(m?.content)
+          if (text) {
+            await this.conn.sessionUpdate({
+              sessionId: session.sessionId,
+              update: {
+                sessionUpdate: 'agent_message_chunk',
+                content: { type: 'text', text }
+              }
+            })
+          }
+        }
+
+        if (role === 'toolResult') {
+          const toolName = String((m as any)?.toolName ?? 'tool')
+          const toolCallId = String((m as any)?.toolCallId ?? crypto.randomUUID())
+          const isError = Boolean((m as any)?.isError)
+          const isBash = isBashTool(toolName)
+
+          if (isBash) {
+            const text = bashResultText(m)
+            await this.conn.sessionUpdate({
+              sessionId: session.sessionId,
+              update: {
+                sessionUpdate: 'tool_call',
+                toolCallId,
+                title: bashCommand(m) ?? toolName,
+                kind: 'execute',
+                status: 'completed',
+                content: bashTerminalContent(toolCallId),
+                _meta: bashTerminalInfoMeta(toolCallId, params.cwd)
+              }
+            })
+
+            await this.conn.sessionUpdate({
+              sessionId: session.sessionId,
+              update: {
+                sessionUpdate: 'tool_call_update',
+                toolCallId,
+                status: isError ? 'failed' : 'completed',
+                _meta: {
+                  ...(text ? bashTerminalOutputMeta(toolCallId, text) : {}),
+                  ...bashTerminalExitMeta(toolCallId, bashExitCode(m, isError))
+                }
+              }
+            })
+            continue
+          }
+
+          // Create a synthetic ACP tool call to render historic tool usage.
           await this.conn.sessionUpdate({
             sessionId: session.sessionId,
             update: {
               sessionUpdate: 'tool_call',
               toolCallId,
-              title: bashCommand(m) ?? toolName,
-              kind: 'execute',
+              title: toolName,
+              kind: toolName === 'read' ? 'read' : toolName === 'write' || toolName === 'edit' ? 'edit' : 'other',
               status: 'completed',
-              content: bashTerminalContent(toolCallId),
-              _meta: bashTerminalInfoMeta(toolCallId, params.cwd)
+              rawInput: null,
+              rawOutput: m
             }
           })
 
+          const text = toolResultToText(m)
           await this.conn.sessionUpdate({
             sessionId: session.sessionId,
             update: {
               sessionUpdate: 'tool_call_update',
               toolCallId,
               status: isError ? 'failed' : 'completed',
-              _meta: {
-                ...(text ? bashTerminalOutputMeta(toolCallId, text) : {}),
-                ...bashTerminalExitMeta(toolCallId, bashExitCode(m, isError))
-              }
+              content: text ? [{ type: 'content', content: { type: 'text', text } }] : null,
+              rawOutput: m
             }
           })
-          continue
-        }
-
-        // Create a synthetic ACP tool call to render historic tool usage.
-        await this.conn.sessionUpdate({
-          sessionId: session.sessionId,
-          update: {
-            sessionUpdate: 'tool_call',
-            toolCallId,
-            title: toolName,
-            kind: toolName === 'read' ? 'read' : toolName === 'write' || toolName === 'edit' ? 'edit' : 'other',
-            status: 'completed',
-            rawInput: null,
-            rawOutput: m
-          }
-        })
-
-        const text = toolResultToText(m)
-        await this.conn.sessionUpdate({
-          sessionId: session.sessionId,
-          update: {
-            sessionUpdate: 'tool_call_update',
-            toolCallId,
-            status: isError ? 'failed' : 'completed',
-            content: text ? [{ type: 'content', content: { type: 'text', text } }] : null,
-            rawOutput: m
-          }
-        })
-      }
-    }
-
-    const { configOptions, models, modes } = await getSessionConfiguration(proc)
-
-    const response = {
-      configOptions,
-      models,
-      modes,
-      _meta: {
-        piAcp: {
-          startupInfo: null
         }
       }
-    }
 
-    // Advertise slash commands after the response so the client knows the session exists.
-    setTimeout(() => {
-      void (async () => {
-        try {
-          const pi = (await proc.getCommands()) as any
-          const { commands } = toAvailableCommandsFromPiGetCommands(pi, {
-            enableSkillCommands,
-            includeExtensionCommands: false
-          })
+      const { configOptions, models, modes } = await runSessionRpc(session, proc => getSessionConfiguration(proc))
+
+      const response = {
+        configOptions,
+        models,
+        modes,
+        _meta: {
+          piAcp: {
+            startupInfo: null
+          }
+        }
+      }
+
+      const maybeGet = (this.sessions as SessionManager & { maybeGet?: (id: string) => PiAcpSession | undefined })
+        .maybeGet
+      const exactSessionStillPublished =
+        typeof maybeGet !== 'function' || maybeGet.call(this.sessions, session.sessionId) === session
+      if (this.disposed || !this.sessionIsAlive(session) || !exactSessionStillPublished) {
+        throw sessionRecoveryUnavailableError()
+      }
+
+      // Advertise slash commands after the response so the client knows the session exists.
+      setTimeout(() => {
+        void (async () => {
+          try {
+            const pi = (await runSessionRpc(session, proc => proc.getCommands())) as any
+            const { commands } = toAvailableCommandsFromPiGetCommands(pi, {
+              enableSkillCommands,
+              includeExtensionCommands: false
+            })
+
+            await this.conn.sessionUpdate({
+              sessionId: session.sessionId,
+              update: {
+                sessionUpdate: 'available_commands_update',
+                availableCommands: mergeCommands(commands, builtinAvailableCommands())
+              }
+            })
+            return
+          } catch {
+            // fall back
+          }
 
           await this.conn.sessionUpdate({
             sessionId: session.sessionId,
             update: {
               sessionUpdate: 'available_commands_update',
-              availableCommands: mergeCommands(commands, builtinAvailableCommands())
+              availableCommands: mergeCommands(toAvailableCommands(fileCommands), builtinAvailableCommands())
             }
           })
-          return
-        } catch {
-          // fall back
-        }
+        })()
+      }, 0)
 
-        await this.conn.sessionUpdate({
-          sessionId: session.sessionId,
-          update: {
-            sessionUpdate: 'available_commands_update',
-            availableCommands: mergeCommands(toAvailableCommands(fileCommands), builtinAvailableCommands())
-          }
-        })
-      })()
-    }, 0)
-
-    return response
+      return response
+    } catch (error) {
+      await this.cleanupFailedLoadSession(session)
+      throw error
+    }
   }
 
-  async deleteSession(params: DeleteSessionRequest): Promise<DeleteSessionResponse> {
+  deleteSession(params: DeleteSessionRequest): Promise<DeleteSessionResponse> {
+    const existing = this.deleteAttempts.get(params.sessionId)
+    if (existing) return existing
+
+    this.deletingSessionIds.add(params.sessionId)
+    const attempt = this.deleteSessionOwned(params)
+    this.deleteAttempts.set(params.sessionId, attempt)
+    void attempt.then(
+      () => {
+        if (this.deleteAttempts.get(params.sessionId) === attempt) this.deleteAttempts.delete(params.sessionId)
+        this.deletingSessionIds.delete(params.sessionId)
+      },
+      () => {
+        if (this.deleteAttempts.get(params.sessionId) === attempt) this.deleteAttempts.delete(params.sessionId)
+        // Keep admission closed after unconfirmed cleanup. A later delete call
+        // retries the exact retained handles; prompt/recovery cannot race it.
+      }
+    )
+    return attempt
+  }
+
+  private async deleteSessionOwned(params: DeleteSessionRequest): Promise<DeleteSessionResponse> {
     const stored = this.store.get(params.sessionId)
-    const piSession = findPiSession(params.sessionId)
+    const discovered = listPiSessions().filter(session => session.sessionId === params.sessionId)
+    if (discovered.length > 1) throw sessionRecoveryUnavailableError()
+    const piSession = discovered.length === 1 ? discovered[0] : null
+    const registered = this.sessions.maybeGet(params.sessionId)
+    const recovery = this.restoringSessions.get(params.sessionId)
 
     // Per ACP session/delete semantics, deleting a session that does not
     // exist (or is already gone) should succeed idempotently.
     // https://agentclientprotocol.com/protocol/v2/session-delete#semantics
-    if (!stored && !piSession) {
+    if (!stored && !piSession && !registered && !recovery) {
+      ;(this.sessions as SessionManager & { forget?: (id: string) => void }).forget?.(params.sessionId)
+      this.retireDeletedSessionCleanupState(params.sessionId)
       return {}
     }
 
-    const sessionFile = stored?.sessionFile ?? piSession?.sessionFile
+    // Unique Pi discovery is exact header evidence and takes precedence over
+    // a potentially stale/corrupt cache entry.
+    const sessionFile = piSession?.sessionFile ?? stored?.sessionFile
 
-    if (sessionFile) {
+    // Ensure the process has released its session file before unlinking it.
+    if (recovery) {
+      recovery.cancelled = true
+      await Promise.allSettled([recovery.promise])
+      try {
+        if (recovery.candidateSession) {
+          const candidate = recovery.candidate
+          await recovery.candidateSession.dispose()
+          if (candidate) this.releaseRecoveryCandidate(candidate)
+          recovery.candidateSession = null
+          recovery.candidate = null
+          recovery.blockedCleanup = false
+        } else if (recovery.candidate) {
+          await recovery.candidate.stop()
+          this.releaseRecoveryCandidate(recovery.candidate)
+          recovery.candidate = null
+          recovery.blockedCleanup = false
+        }
+      } catch (error) {
+        recovery.blockedCleanup = true
+        if (recovery.candidate) {
+          this.retainRecoveryCandidate(recovery.candidate, recovery.candidateSession ?? undefined)
+        }
+        throw error
+      }
+      if (this.restoringSessions.get(params.sessionId) === recovery) {
+        this.restoringSessions.delete(params.sessionId)
+      }
+    }
+    await this.sessions.close(params.sessionId)
+
+    if (
+      sessionFile &&
+      this.validDurableMapping(params.sessionId, {
+        cwd: stored?.cwd ?? piSession?.cwd ?? process.cwd(),
+        sessionFile
+      })
+    ) {
       try {
         if (existsSync(sessionFile)) unlinkSync(sessionFile)
-      } catch {
-        // best-effort cleanup
+      } catch (error) {
+        throw RequestError.internalError(
+          { code: 'PI_ACP_SESSION_DELETE_FAILED' },
+          `Could not delete the Pi session file: ${String((error as Error)?.message ?? error)}`
+        )
       }
     }
 
     this.store.delete(params.sessionId)
+    ;(this.sessions as SessionManager & { forget?: (id: string) => void }).forget?.(params.sessionId)
+    this.retireDeletedSessionCleanupState(params.sessionId)
 
     return {}
   }
 
   async unstable_setSessionModel(params: { sessionId: string; modelId: string }): Promise<void> {
     const session = await this.restoreSession(params.sessionId)
-    await setSessionModel(session.proc, params.modelId)
-    await emitConfigOptionsUpdate(this.conn, session.sessionId, session.proc)
+    await runSessionRpc(session, proc => setSessionModel(proc, params.modelId))
+    await runSessionRpc(session, proc => emitConfigOptionsUpdate(this.conn, session.sessionId, proc))
   }
 
   async setSessionMode(params: SetSessionModeRequest): Promise<SetSessionModeResponse> {
@@ -1150,7 +1826,7 @@ export class PiAcpAgent implements ACPAgent {
       throw RequestError.invalidParams(`Unknown modeId: ${mode}`)
     }
 
-    await session.proc.setThinkingLevel(mode)
+    await runSessionRpc(session, proc => proc.setThinkingLevel(mode))
 
     // Let the client know the current mode changed (keeps the dropdown in sync).
     void this.conn.sessionUpdate({
@@ -1161,7 +1837,7 @@ export class PiAcpAgent implements ACPAgent {
       }
     })
 
-    await emitConfigOptionsUpdate(this.conn, session.sessionId, session.proc)
+    await runSessionRpc(session, proc => emitConfigOptionsUpdate(this.conn, session.sessionId, proc))
 
     return {}
   }
@@ -1175,13 +1851,14 @@ export class PiAcpAgent implements ACPAgent {
     }
 
     if (configId === MODEL_CONFIG_ID) {
-      await setSessionModel(session.proc, params.value)
+      await runSessionRpc(session, proc => setSessionModel(proc, params.value))
     } else if (configId === THOUGHT_LEVEL_CONFIG_ID) {
       if (!isThinkingLevel(params.value)) {
         throw RequestError.invalidParams(`Unknown thinking level: ${params.value}`)
       }
 
-      await session.proc.setThinkingLevel(params.value)
+      const thinkingLevel = params.value
+      await runSessionRpc(session, proc => proc.setThinkingLevel(thinkingLevel))
 
       void this.conn.sessionUpdate({
         sessionId: session.sessionId,
@@ -1194,7 +1871,9 @@ export class PiAcpAgent implements ACPAgent {
       throw RequestError.invalidParams(`Unknown config option: ${configId}`)
     }
 
-    const configOptions = await emitConfigOptionsUpdate(this.conn, session.sessionId, session.proc)
+    const configOptions = await runSessionRpc(session, proc =>
+      emitConfigOptionsUpdate(this.conn, session.sessionId, proc)
+    )
     return { configOptions }
   }
 }
@@ -1222,7 +1901,8 @@ async function getThinkingState(
     (await (async () => {
       try {
         return (await proc.getState()) as any
-      } catch {
+      } catch (error) {
+        if (error instanceof PiRpcProcessTerminatedError) throw error
         return null
       }
     })())
@@ -1333,7 +2013,8 @@ async function getModelState(
     (await (async () => {
       try {
         return (await proc.getAvailableModels()) as any
-      } catch {
+      } catch (error) {
+        if (error instanceof PiRpcProcessTerminatedError) throw error
         return null
       }
     })())
@@ -1362,7 +2043,8 @@ async function getModelState(
     (await (async () => {
       try {
         return (await proc.getState()) as any
-      } catch {
+      } catch (error) {
+        if (error instanceof PiRpcProcessTerminatedError) throw error
         return null
       }
     })())

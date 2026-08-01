@@ -858,7 +858,7 @@ test('early child exit reports code and bounded stderr diagnostics', { timeout: 
   const fixture = await startFixture({
     mode: 'exit-on-prompt',
     client: {
-      requestTimeoutMs: 1_000,
+      requestTimeoutMs: 3_000,
       shutdownTimeoutMs: 100,
       stderrLimitBytes: 1_024
     }
@@ -866,7 +866,7 @@ test('early child exit reports code and bounded stderr diagnostics', { timeout: 
   t.after(fixture.cleanup)
 
   const sessionId = await initializeSession(fixture.client, fixture.cwd)
-  const strict = new StrictCatalogClient(fixture.client, 800)
+  const strict = new StrictCatalogClient(fixture.client, 2_000)
   t.after(() => strict.dispose())
   const strictTransportExit = assert.rejects(strict.waitForCatalog('future-session'), (error: unknown) => {
     assert.ok(error instanceof CatalogTransportClosedError)
@@ -878,7 +878,7 @@ test('early child exit reports code and bounded stderr diagnostics', { timeout: 
   const updateExit = assert.rejects(
     fixture.client.waitForSessionUpdate(() => false, {
       afterIndex: fixture.client.retainedSessionUpdateCount,
-      timeoutMs: 800
+      timeoutMs: 2_000
     }),
     (error: unknown) => {
       assert.ok(error instanceof AcpTransportClosedError)

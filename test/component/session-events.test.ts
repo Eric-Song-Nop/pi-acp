@@ -310,6 +310,7 @@ test('PiAcpSession: drains a reentrant runtime extension error before end_turn',
     2
   )
 
+  proc.emit({ type: 'agent_start' })
   proc.emit({ type: 'agent_settled' })
   assert.equal(await second, 'end_turn')
   assert.equal(firstResolutionCount, 1)

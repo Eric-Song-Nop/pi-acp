@@ -29,7 +29,7 @@ case "${gate}" in
     node node_modules/eslint/bin/eslint.js .
     ;;
   test)
-    node --import tsx --test test/unit/*.test.ts test/component/*.test.ts
+    node --import tsx --test --test-concurrency=2 test/unit/*.test.ts test/component/*.test.ts
     ;;
   build)
     build_root="${TMPDIR}/pi-acp-build-workspace"
@@ -50,7 +50,8 @@ case "${gate}" in
       test/component/c0.7-fixture-boundaries.test.ts \
       test/component/real-pi-agent-turn.test.ts \
       test/component/real-pi-extension-load-diagnostics.test.ts \
-      test/component/real-pi-extension-error.test.ts
+      test/component/real-pi-extension-error.test.ts \
+      test/component/real-pi-child-recovery.test.ts
     ;;
   immutable-failures)
     node --import tsx scripts/check-command-transcripts.ts

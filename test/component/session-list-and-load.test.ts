@@ -60,6 +60,18 @@ test('PiAcpAgent: listSessions lists pi sessions and loadSession replays history
   try {
     const conn = new FakeAgentSideConnection()
     const agent = new PiAcpAgent(asAgentConn(conn))
+    let storedMapping: any = null
+    ;(agent as any).store = {
+      get() {
+        return storedMapping
+      },
+      upsert(entry: any) {
+        storedMapping = { ...entry, updatedAt: new Date(0).toISOString() }
+      },
+      delete() {
+        storedMapping = null
+      }
+    }
 
     // 1) list sessions
     const listed = await agent.listSessions({ cwd: null, cursor: null, _meta: null } as any)
@@ -78,10 +90,13 @@ test('PiAcpAgent: listSessions lists pi sessions and loadSession replays history
       assert.ok(typeof params.sessionPath === 'string')
       assert.ok(params.sessionPath.endsWith('/0000_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.jsonl'))
 
+      const state = { sessionId: 'sess-1', sessionFile, thinkingLevel: 'medium' }
       return {
         onEvent: () => () => {
           // noop unsubscribe
         },
+        isAlive: () => true,
+        stop: async () => {},
         getMessages: async () => ({
           messages: [
             { role: 'user', content: 'Hello' },
@@ -89,7 +104,8 @@ test('PiAcpAgent: listSessions lists pi sessions and loadSession replays history
           ]
         }),
         getAvailableModels: async () => ({ models: [] }),
-        getState: async () => ({ thinkingLevel: 'medium' })
+        getStartupHandshakeState: () => state,
+        getState: async () => state
       } as any
     }
 
