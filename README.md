@@ -32,6 +32,7 @@ compatibility is maintained in the
 - Skills are loaded by pi directly and are available in ACP sessions
 - (Zed) `pi-acp` emits “startup info” block into the session (pi version, context, skills, prompts, extensions - similar to `pi` in the terminal). You can disable it by setting `quietStartup: true` in pi settings (`~/.pi/agent/settings.json` or `<project>/.pi/settings.json`). When `quietStartup` is enabled, `pi-acp` will still emit a 'New version available' message if the installed pi version is outdated.
 - Extension factory/load failures remain visible when `quietStartup` is enabled. Nested Pi stderr is bounded and privacy-filtered before ACP display: the adapter returns only a structured, path-normalized and credential-redacted startup diagnostic with a 16 KiB pre-decode retention cap and a 4 KiB client-summary cap; it never forwards the raw stderr tail.
+- Runtime extension-handler errors emitted after an ACP session is ready remain nonterminal: `pi-acp` surfaces one ordered, bounded and privacy-filtered diagnostic update, then waits for Pi's normal `agent_settled` completion. Errors emitted before the session installs its runtime handler are not buffered yet.
 - (Zed) Session history is supported in Zed starting with [`v0.225.0`](https://zed.dev/releases/preview/0.225.0). Session loading / history maps to pi's session files. Sessions can be resumed both in `pi` and in the ACP client.
 
 ## Prerequisites

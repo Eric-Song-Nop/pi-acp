@@ -82,6 +82,8 @@ test(
 
     const fixture = await startRealPiFixture()
     t.after(fixture.cleanup)
+    assert.equal(Object.hasOwn(fixture, 'expectedRuntimeErrorExtensionRealpath'), false)
+    assert.equal(Object.hasOwn(fixture, 'expectedRuntimeErrorExtensionSha256'), false)
 
     const initialized = await fixture.client.initialize()
     assert.equal(initialized.protocolVersion, PROTOCOL_VERSION)

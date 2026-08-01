@@ -12,6 +12,7 @@ export const REAL_PI_VERSION = '0.83.0'
 export const REAL_PI_FIXTURE_PROVIDER_ID = 'pi-acp-fixture'
 export const REAL_PI_FIXTURE_MODEL_ID = 'fixture-model-v1'
 export const REAL_PI_FIXTURE_COMMAND_ID = 'fixture-state'
+export const C1_2_RUNTIME_EXTENSION_RESPONSE_TEXT = 'C1.2 deterministic agent response'
 const LOOPBACK_CLOSE_TIMEOUT_MS = 1_000
 const LOOPBACK_BODY_TIMEOUT_MS = 2_000
 export const MAX_LOOPBACK_BODY_BYTES = 64 * 1024
@@ -152,8 +153,9 @@ type ReceiptBoundary = {
 export type RealPiFixtureOptions = {
   clientBehavior?: 'raw' | 'strict'
   extensionLoadFailure?: true
+  runtimeExtensionError?: true
   hardDeadlineMs?: number
-  transcriptCheckpoint?: 'C0.6' | 'C0.7' | 'C1.1'
+  transcriptCheckpoint?: 'C0.6' | 'C0.7' | 'C1.1' | 'C1.2'
   transcriptCaseId?: string
   transcriptMetadata?: AcpTranscriptMetadata
   projectPrompts?: readonly {
@@ -180,6 +182,9 @@ const piCliPath = join(piPackageRootPath, 'dist', 'cli.js')
 const globalExtensionSourcePath = fileURLToPath(new URL('../fixtures/pi-extension-pack/index.ts', import.meta.url))
 const failingGlobalExtensionSourcePath = fileURLToPath(
   new URL('../fixtures/pi-extension-pack/failing-load/index.ts', import.meta.url)
+)
+const runtimeErrorExtensionSourcePath = fileURLToPath(
+  new URL('../fixtures/pi-extension-pack/runtime-error/index.ts', import.meta.url)
 )
 const projectCanarySourcePath = fileURLToPath(
   new URL('../fixtures/pi-extension-pack/project-canary.js', import.meta.url)
@@ -442,6 +447,10 @@ function validateProjectPrompts(
 export async function startRealPiFixture(options: RealPiFixtureOptions = {}) {
   const projectPrompts = validateProjectPrompts(options.projectPrompts)
   const extensionLoadFailure = options.extensionLoadFailure === true
+  const runtimeExtensionError = options.runtimeExtensionError === true
+  if (extensionLoadFailure && runtimeExtensionError) {
+    throw new TypeError('real Pi fixture load failure and runtime extension error modes are mutually exclusive')
+  }
   const hardDeadlineMs = options.hardDeadlineMs
   if (
     hardDeadlineMs !== undefined &&
@@ -479,6 +488,53 @@ export async function startRealPiFixture(options: RealPiFixtureOptions = {}) {
     }
     const finish = (): void => {
       if (!settle('end')) return
+      if (runtimeExtensionError && !bodyExceededLimit) {
+        const chunkBase = {
+          id: 'c1.2-runtime-extension-turn',
+          object: 'chat.completion.chunk',
+          created: 0,
+          model: REAL_PI_FIXTURE_MODEL_ID
+        }
+        response.writeHead(200, {
+          'content-type': 'text/event-stream',
+          'cache-control': 'no-cache',
+          connection: 'close'
+        })
+        response.write(
+          `data: ${JSON.stringify({
+            ...chunkBase,
+            choices: [
+              {
+                index: 0,
+                delta: {
+                  role: 'assistant',
+                  content: C1_2_RUNTIME_EXTENSION_RESPONSE_TEXT
+                },
+                finish_reason: null
+              }
+            ]
+          })}\n\n`
+        )
+        response.write(
+          `data: ${JSON.stringify({
+            ...chunkBase,
+            choices: [
+              {
+                index: 0,
+                delta: {},
+                finish_reason: 'stop'
+              }
+            ],
+            usage: {
+              prompt_tokens: 1,
+              completion_tokens: 4,
+              total_tokens: 5
+            }
+          })}\n\n`
+        )
+        response.end('data: [DONE]\n\n')
+        return
+      }
       response.statusCode = bodyExceededLimit ? 413 : 503
       response.end('C0.7 fixture refuses model requests\n')
     }
@@ -587,10 +643,12 @@ export async function startRealPiFixture(options: RealPiFixtureOptions = {}) {
     const receiptDir = join(rootDir, 'artifacts')
     const extensionDir = join(agentDir, 'extensions', 'pi-acp-fixture')
     const failingExtensionDir = join(agentDir, 'extensions', 'pi-acp-failing-load')
+    const runtimeErrorExtensionDir = join(agentDir, 'extensions', 'pi-acp-runtime-error')
     const projectExtensionDir = join(cwd, '.pi', 'extensions')
     const projectPromptDir = join(cwd, '.pi', 'prompts')
     const extensionPath = join(extensionDir, 'index.ts')
     const failingExtensionPath = join(failingExtensionDir, 'index.ts')
+    const runtimeErrorExtensionPath = join(runtimeErrorExtensionDir, 'index.ts')
     const projectExtensionPath = join(projectExtensionDir, 'project-canary.js')
     const nonce = randomBytes(16).toString('hex')
     const registrationReceiptPath = join(receiptDir, `pi-acp-c0.6-registration-${nonce}.json`)
@@ -617,6 +675,7 @@ export async function startRealPiFixture(options: RealPiFixtureOptions = {}) {
         receiptDir,
         extensionDir,
         ...(extensionLoadFailure ? [failingExtensionDir] : []),
+        ...(runtimeExtensionError ? [runtimeErrorExtensionDir] : []),
         projectExtensionDir,
         ...(projectPrompts.length > 0 ? [projectPromptDir] : [])
       ].map(path => mkdir(path, { recursive: true }))
@@ -665,6 +724,7 @@ export async function startRealPiFixture(options: RealPiFixtureOptions = {}) {
     await Promise.all([
       copyFile(globalExtensionSourcePath, extensionPath),
       ...(extensionLoadFailure ? [copyFile(failingGlobalExtensionSourcePath, failingExtensionPath)] : []),
+      ...(runtimeExtensionError ? [copyFile(runtimeErrorExtensionSourcePath, runtimeErrorExtensionPath)] : []),
       copyFile(projectCanarySourcePath, projectExtensionPath),
       writeFile(piCommand, piWrapperSource(), {
         encoding: 'utf8',
@@ -696,9 +756,18 @@ export async function startRealPiFixture(options: RealPiFixtureOptions = {}) {
     const expectedFailingExtensionSha256 = failingExtensionSource
       ? createHash('sha256').update(failingExtensionSource).digest('hex')
       : undefined
+    const runtimeErrorExtensionSource = runtimeExtensionError
+      ? await readFile(runtimeErrorExtensionSourcePath)
+      : undefined
+    const expectedRuntimeErrorExtensionSha256 = runtimeErrorExtensionSource
+      ? createHash('sha256').update(runtimeErrorExtensionSource).digest('hex')
+      : undefined
     const projectCanarySource = await readFile(projectCanarySourcePath)
     const expectedProjectCanarySha256 = createHash('sha256').update(projectCanarySource).digest('hex')
     const expectedExtensionRealpath = await realpath(extensionPath)
+    const expectedRuntimeErrorExtensionRealpath = runtimeExtensionError
+      ? await realpath(runtimeErrorExtensionPath)
+      : undefined
     const receiptBoundary: ReceiptBoundary = {
       rootDir: await realpath(rootDir),
       receiptDir: await realpath(receiptDir),
@@ -753,6 +822,14 @@ export async function startRealPiFixture(options: RealPiFixtureOptions = {}) {
                 }
               ]
             : []),
+          ...(expectedRuntimeErrorExtensionSha256
+            ? [
+                {
+                  path: 'test/fixtures/pi-extension-pack/runtime-error/index.ts',
+                  sha256: expectedRuntimeErrorExtensionSha256
+                }
+              ]
+            : []),
           {
             path: 'test/fixtures/pi-extension-pack/project-canary.js',
             sha256: expectedProjectCanarySha256
@@ -786,6 +863,12 @@ export async function startRealPiFixture(options: RealPiFixtureOptions = {}) {
       expectedCliRealpath,
       expectedExtensionRealpath,
       expectedExtensionSha256,
+      ...(runtimeExtensionError
+        ? {
+            expectedRuntimeErrorExtensionRealpath,
+            expectedRuntimeErrorExtensionSha256
+          }
+        : {}),
       expectedProjectCanarySha256,
       piPackageRoot,
       packageVersion: REAL_PI_VERSION,
