@@ -181,7 +181,7 @@ commands 宣称为稳定支持。
 | `C2.5` | reload/runtime registration 后刷新命令目录                                    | `proposed`  | `C2.3`                    | `G2`      |
 | `C2.6` | argument hints/completions 进入 Pi RPC/ACP metadata                           | `proposed`  | `C3.1`                    | `G2`      |
 | `C2.7` | extension flags 进入明确的 CLI/ACP config 通路                                | `proposed`  | `DEC-002`                 | `G2`      |
-| `C3.1` | 审核并冻结 Pi RPC command catalog/execute spec                                | `proposed`  | `DEC-002`, `C0.6`         | `G3`      |
+| `C3.1` | 审核并冻结 Pi RPC command catalog/execute spec                                | `active`    | `DEC-002`, `C0.6`         | `G3`      |
 | `C3.2` | Pi 实现 `execute_command` + request/disposition identity                      | `proposed`  | `C3.1`                    | `G3`      |
 | `C3.3` | pi-acp bridge 结构化 command results                                          | `proposed`  | `C3.2`                    | `G3`      |
 | `C3.4` | state-only/no-LLM/handled-input commands 正确完成                             | `proposed`  | `C3.3`                    | `G3`      |
@@ -1019,6 +1019,125 @@ upgrade，也不 recapture C0.7。人类 owner 于 2026-08-02 将第一条 comma
 选择委托给实现团队；团队已选择可拔除的 patched/pinned Pi，但该 C3.1–C3.4 工作不扩大
 C2.2。rollback 是 revert 完整 C2.2 implementation/publication stack 到上述 C1.6
 publication，无需 session 或 transcript migration。
+
+#### `C3.1` Patched Pi `execute_command` v1 contract
+
+人类 owner 于 2026-08-02 将实现路线委托给团队，并重申唯一产品目标是让 pi-acp
+支持 Pi extension commands。团队选择不等待 upstream tagged release，先交付一个可拔除的
+patched/pinned preview：Pi patch 保持 generic extension-command execution；adapter 只在
+`PI_ACP_EXPERIMENTAL_FIXTURE_STATE=1` 时 allowlist exact `/fixture-state`，环境变量缺失或
+其它值均为 off。其它 extension/prompt/skill、agent-triggering、dialog、external UI、
+collision/reload/argument hints 仍隐藏并延后。
+
+patch repository 为 `Eric-Song-Nop/pi-mono`，branch
+`pi-acp/execute-command-v0.83.0` 精确起于 upstream
+`earendil-works/pi@v0.83.0` commit
+`845d6ff1f6643aba440341cce877ce1c43ebbc39`；不得 merge/rebase current main。stock npm
+artifact SRI 为
+`sha512-uYhF+FsZxogoSX/AxBcUdiY+ZklubwaXyAoEGA2eQwsHcyEAhUYIKh/WLXe/a8+k8eTCmxb+ZN2Zo9mzQtzbWw==`。
+2026-08-02 audited upstream main `aa0ec808b970db31822e07835a46647cb51d9d66`
+仍无等价 capability/RPC。production pi-acp 启动外部 `pi`，因此 preview 必须构建并
+记录 immutable patched CLI artifact/tag，再通过 absolute `PI_ACP_PI_COMMAND` 启动；只改
+pi-acp dev dependency 不构成 patched runtime proof。
+
+每个 physical patched child 的 `get_state` 增加：
+
+```json
+{
+  "rpcCapabilities": {
+    "executeCommand": 1
+  }
+}
+```
+
+request schema 精确为：
+
+```json
+{
+  "id": "required-unique-id",
+  "type": "execute_command",
+  "name": "fixture-state",
+  "args": ""
+}
+```
+
+`id` 同时是 request/execution identity；`name` 是 `get_commands` 中 case-sensitive
+extension `invocationName`，不含 `/`；`args` byte-exact 传给 handler，不 trim、parse、
+substitute。只允许 exact resolution source 为 `extension` 的 command；绝不调用 generic
+`prompt`。成功 response 使用既有 RPC envelope：
+
+```json
+{
+  "id": "required-unique-id",
+  "type": "response",
+  "command": "execute_command",
+  "success": true,
+  "data": {
+    "requestId": "required-unique-id",
+    "name": "fixture-state",
+    "source": "extension",
+    "sourceInfo": {},
+    "disposition": "handled"
+  }
+}
+```
+
+state-only handler 只产生一次 notify、一次 `handled` response、零 agent run 与零 provider
+request。agent-triggering handler 才可返回 `agent_run`，且实现必须在 invocation 前订阅
+事件，并在属于该 invocation 的 run 已 `agent_settled` 且 session 再次 idle 后响应；不能
+用 handler return 后的一次 `isIdle` snapshot 推断未触发 agent。
+
+structured rejection 保留相同 envelope/request/name identity，精确为：
+
+```json
+{
+  "id": "required-unique-id",
+  "type": "response",
+  "command": "execute_command",
+  "success": false,
+  "error": "safe actionable summary",
+  "data": {
+    "requestId": "required-unique-id",
+    "name": "fixture-state",
+    "disposition": "rejected",
+    "code": "COMMAND_BUSY"
+  }
+}
+```
+
+`code` 只能是 `COMMAND_INVALID_REQUEST`、`COMMAND_NOT_FOUND`、`COMMAND_BUSY`、
+`COMMAND_REQUEST_CONFLICT`、`COMMAND_HANDLER_FAILED`。direct handler failure 不再额外产生
+uncorrelated `extension_error`。RPC input handler 当前并发 dispatch，因此 active-command
+fence 必须在任何 `await` 前同步 reserve：同一 active ID 拒绝为
+`COMMAND_REQUEST_CONFLICT`，其它 ID 拒绝为 `COMMAND_BUSY`，busy request 不 queue。
+
+Pi 以 public `extensionRunner.getCommand()`、`createCommandContext()` 与 session idle/event
+API direct invoke handler exactly once；无需修改 `AgentSession` 或 `ExtensionRunner`
+production code。lost response/transport failure 后绝不 replay，结果按 indeterminate 处理。
+v1 不增加 native per-command cancel；若 ACP cancel/timeout 在 execute write 后获胜，adapter
+必须 stop exact child、确认 cleanup、返回 cancelled，只有下一条 fresh request 可恢复。
+request-bound response 是唯一 completion authority。
+
+- [ ] tracker/issue 与 Pi docs/types 对 capability、wire schema、identity、disposition、failure
+      codes、ordering、busy、cancel/no-replay 语义完全一致。
+- [ ] fork branch 精确基于 `845d6ff1…`，minimal production diff 仅触及 RPC
+      types/mode/client/docs 与新 RPC tests，不混入 mainline drift。
+- [ ] Pi tests 证明 capability、byte-exact args、exact source/name、handler once、notify-before-
+      response、provider zero、busy/conflict/not-found/throw、agent-run-after-settled 与 unchanged
+      generic prompt behavior。
+- [ ] patch 为一个 reviewable commit，并记录 source-leaf hashes、toolchain、tree digest、
+      immutable artifact/tag 与删除条件。
+- [ ] pi-acp acquisition 使用独立 patched preview identity 和 absolute
+      `PI_ACP_PI_COMMAND`；stock Pi `0.83.0` evidence 与 frozen C0.7 保持不变。
+- [ ] exact-head independent review 无 blocking finding。
+
+fork [issue #25](https://github.com/Eric-Song-Nop/pi-acp/issues/25) 是 canonical contract。
+最小 Pi patch surface 为 `packages/coding-agent/src/modes/rpc/rpc-types.ts`、
+`rpc-mode.ts`、`rpc-client.ts`、`packages/coding-agent/docs/rpc.md` 与新
+`packages/coding-agent/test/rpc-execute-command.test.ts`。只有 upstream tagged release
+提供等价 wire/terminal semantics、通过同一 fixture matrix 且 pi-acp pin 该 release 后，
+才能删除 patch；upstream merge 本身不够。rollback 是关闭 preview flag、恢复 stock Pi
+acquisition，且不 recapture C0.7。
 
 ### M2 — Command Catalog
 
