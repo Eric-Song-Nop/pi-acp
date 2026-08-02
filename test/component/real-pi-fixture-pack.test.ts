@@ -81,12 +81,18 @@ async function readProjectCanaryPids(path: string): Promise<number[]> {
     pids.every(pid => Number.isInteger(pid) && pid > 0),
     true
   )
-  assert.equal(new Set(pids).size, pids.length)
   return pids
 }
 
-function sortedPids(pids: number[]): number[] {
-  return [...pids].sort((left, right) => left - right)
+function assertProjectCanaryInvokedOncePerChild(actualPids: number[], expectedPids: number[]): void {
+  assert.equal(new Set(expectedPids).size, expectedPids.length)
+
+  const invocationCounts = new Map<number, number>()
+  for (const pid of actualPids) invocationCounts.set(pid, (invocationCounts.get(pid) ?? 0) + 1)
+
+  assert.equal(invocationCounts.size, expectedPids.length)
+  for (const pid of expectedPids)
+    assert.equal(invocationCounts.get(pid), 1, `project canary invocation count for ${pid}`)
 }
 
 async function materializeMappedSession(
@@ -250,7 +256,7 @@ test(
     assert.equal(isProcessRunning(receipt.piPid), true)
     assert.equal(fixture.packageVersion, REAL_PI_VERSION)
     assert.deepEqual(fixture.requests, [])
-    assert.deepEqual(await readProjectCanaryPids(fixture.projectCanaryPath), [receipt.piPid])
+    assertProjectCanaryInvokedOncePerChild(await readProjectCanaryPids(fixture.projectCanaryPath), [receipt.piPid])
     await assertPathMissing(fixture.trustPath)
     assert.equal(await readFile(fixture.authPath, 'utf8'), '{}\n')
 
@@ -346,7 +352,7 @@ test(
       const { receipt } = await fixture.readRegistrationReceipt()
       assert.equal(receipt.approveArgPresent, true)
       assert.equal(receipt.projectTrusted, true)
-      assert.deepEqual(await readProjectCanaryPids(fixture.projectCanaryPath), [receipt.piPid])
+      assertProjectCanaryInvokedOncePerChild(await readProjectCanaryPids(fixture.projectCanaryPath), [receipt.piPid])
       await assertPathMissing(fixture.trustPath)
 
       await materializeMappedSession(fixture, session.sessionId)
@@ -369,7 +375,7 @@ test(
 
       const sessionStarts = (await fixture.readC1_3SessionStartReceipts()).map(item => item.receipt.piPid)
       assert.equal(sessionStarts.length, 2)
-      assert.deepEqual(sortedPids(await readProjectCanaryPids(fixture.projectCanaryPath)), sortedPids(sessionStarts))
+      assertProjectCanaryInvokedOncePerChild(await readProjectCanaryPids(fixture.projectCanaryPath), sessionStarts)
       assert.equal(projectTrustWarningCount(fixture.client.transcript()), 2)
       await assertPathMissing(fixture.trustPath)
 
@@ -395,7 +401,7 @@ test(
       const { receipt } = await fixture.readRegistrationReceipt()
       assert.equal(receipt.approveArgPresent, true)
       assert.equal(receipt.projectTrusted, true)
-      assert.deepEqual(await readProjectCanaryPids(fixture.projectCanaryPath), [receipt.piPid])
+      assertProjectCanaryInvokedOncePerChild(await readProjectCanaryPids(fixture.projectCanaryPath), [receipt.piPid])
       await fixture.client.waitForSessionUpdate(
         notification =>
           notification.sessionId === session.sessionId &&
@@ -430,7 +436,7 @@ test(
 
       const sessionStarts = (await fixture.readC1_3SessionStartReceipts()).map(item => item.receipt.piPid)
       assert.equal(sessionStarts.length, 2)
-      assert.deepEqual(sortedPids(await readProjectCanaryPids(fixture.projectCanaryPath)), sortedPids(sessionStarts))
+      assertProjectCanaryInvokedOncePerChild(await readProjectCanaryPids(fixture.projectCanaryPath), sessionStarts)
       assert.equal(projectTrustWarningCount(fixture.client.transcript()), 1)
       await assertPathMissing(fixture.trustPath)
 
