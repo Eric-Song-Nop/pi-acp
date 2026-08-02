@@ -199,6 +199,97 @@ test('PiAcpAgent: concurrent post-terminal requests coalesce one validated gener
   }
 })
 
+test('PiAcpAgent: transparent recovery reuses frozen fixture catalog and rechecks replacement capability', async () => {
+  const previousPreview = process.env.PI_ACP_EXPERIMENTAL_FIXTURE_STATE
+  process.env.PI_ACP_EXPERIMENTAL_FIXTURE_STATE = '1'
+  const sessionId = 'fixture-catalog-recovery-session'
+  const stored = makeDurableSession(sessionId)
+  const conn = new FakeAgentSideConnection()
+  const agent = new PiAcpAgent(asAgentConn(conn), {} as any)
+  installStore(agent, sessionId, stored)
+
+  const oldProc = new FakePiRpcProcess()
+  let oldCatalogCalls = 0
+  ;(oldProc as any).getCommands = async () => {
+    oldCatalogCalls += 1
+    return {
+      commands: [
+        {
+          name: 'fixture-state',
+          source: 'extension',
+          sourceInfo: {
+            path: '/private/old-extension.ts',
+            source: 'project-settings',
+            scope: 'project',
+            origin: 'top-level'
+          }
+        }
+      ]
+    }
+  }
+  const oldSession = (agent as any).sessions.getOrCreate(sessionId, {
+    cwd: stored.cwd,
+    mcpServers: [],
+    conn: asAgentConn(conn),
+    proc: oldProc,
+    initialState: { rpcCapabilities: { executeCommand: 1 } }
+  })
+  const frozen = await oldSession.discoverCommandCatalogOnce({ enableFixtureStateCommand: true })
+  oldSession.commandCatalogState.publishedSnapshot = frozen
+  oldProc.terminate(
+    new PiRpcProcessTerminatedError('The catalog-owning Pi process exited.', undefined, { kind: 'exit', code: 9 })
+  )
+
+  const candidate = new FakePiRpcProcess()
+  const candidateState = Object.freeze({
+    sessionId,
+    sessionFile: stored.sessionFile,
+    rpcCapabilities: { executeCommand: 1 }
+  })
+  ;(candidate as any).getStartupHandshakeState = () => candidateState
+  let candidateCatalogCalls = 0
+  ;(candidate as any).getCommands = async () => {
+    candidateCatalogCalls += 1
+    throw new Error('transparent recovery must not rediscover the catalog')
+  }
+  let executeCalls = 0
+  ;(candidate as any).executeCommand = async (requestId: string, name: string) => {
+    executeCalls += 1
+    return {
+      success: true,
+      data: { requestId, name, source: 'extension', sourceInfo: {}, disposition: 'handled' }
+    }
+  }
+
+  const originalSpawn = PiRpcProcess.spawn
+  ;(PiRpcProcess as any).spawn = async () => candidate as any
+  try {
+    const result = await agent.prompt({
+      sessionId,
+      prompt: [{ type: 'text', text: '/fixture-state' }]
+    } as any)
+    const replacement = (agent as any).sessions.maybeGet(sessionId)
+
+    assert.equal(result.stopReason, 'end_turn')
+    assert.equal(oldCatalogCalls, 1)
+    assert.equal(candidateCatalogCalls, 0)
+    assert.equal(executeCalls, 1)
+    assert.equal(replacement.commandCatalogState, oldSession.commandCatalogState)
+    assert.equal(replacement.commandCatalogState.snapshot, frozen)
+    assert.equal(replacement.supportsExecuteCommand(), true)
+    assert.equal(
+      conn.updates.some(update => update.update.sessionUpdate === 'available_commands_update'),
+      false,
+      'transparent recovery must not republish the frozen logical catalog'
+    )
+  } finally {
+    PiRpcProcess.spawn = originalSpawn
+    if (previousPreview === undefined) delete process.env.PI_ACP_EXPERIMENTAL_FIXTURE_STATE
+    else process.env.PI_ACP_EXPERIMENTAL_FIXTURE_STATE = previousPreview
+    await agent.dispose()
+  }
+})
+
 test('PiAcpAgent: automatic dead-session recovery leaves a healthy sibling registered and untouched', async () => {
   const deadId = 'dead-session-with-healthy-sibling'
   const healthyId = 'healthy-sibling-session'

@@ -14,14 +14,23 @@ import { homedir } from 'node:os'
 import { isAbsolute, join, resolve as resolvePath } from 'node:path'
 import { formatPiRuntimeExtensionError } from '../pi-rpc/diagnostics.js'
 import {
+  PI_RPC_PROCESS_CLEANUP_UNCONFIRMED_CODE,
   PI_RPC_PROCESS_TERMINATED_CODE,
   PiRpcProcess,
   PiRpcProcessTerminatedError,
   PiRpcSpawnError,
   piRpcSpawnErrorData,
-  type PiRpcEvent
+  type PiRpcEvent,
+  type PiRpcExecuteCommandResult
 } from '../pi-rpc/process.js'
 import { maybeAuthRequiredError } from './auth-required.js'
+import {
+  createPiCommandCatalogState,
+  freezePiCommandCatalog,
+  type FrozenPiCommandCatalog,
+  type PiCommandCatalogOptions,
+  type PiCommandCatalogState
+} from './pi-commands.js'
 import { SessionStore } from './session-store.js'
 import {
   bashCommand,
@@ -43,6 +52,8 @@ type SessionCreateParams = {
   /** @deprecated Retained as an inert construction shim for downstream tests. */
   fileCommands?: unknown[]
   piCommand?: string
+  initialState?: unknown
+  commandCatalogState?: PiCommandCatalogState
 }
 
 export type StopReason = 'end_turn' | 'cancelled'
@@ -64,6 +75,40 @@ type PromptTurn = {
   agentStarted: boolean
 }
 
+type ActiveCommandClaim = 'response' | 'cancelled' | 'failed'
+
+export type SessionCommandReservation = Readonly<{
+  readonly requestId: string
+  readonly name: string
+}>
+
+type ActiveCommand = SessionCommandReservation & {
+  readonly kind: 'command'
+  claim: ActiveCommandClaim | null
+  failure: unknown
+  writeStarted: boolean
+  cancelStop: Promise<void> | null
+  cleanupFailure: RequestError | null
+}
+
+export type SessionMutationReservation = Readonly<{
+  readonly kind: 'mutation'
+  readonly operation: string
+}>
+
+export type SessionExecuteCommandOutcome =
+  | Readonly<{ kind: 'response'; requestId: string; response: PiRpcExecuteCommandResult }>
+  | Readonly<{ kind: 'cancelled'; requestId: string }>
+
+export class PiAcpCommandBusyError extends Error {
+  readonly code = 'COMMAND_BUSY' as const
+
+  constructor() {
+    super('The Pi session is busy; the command was not queued or sent.')
+    this.name = 'PiAcpCommandBusyError'
+  }
+}
+
 type PermissionResponse = Awaited<ReturnType<AgentSideConnection['requestPermission']>>
 
 const CONFIRM_PERMISSION_OPTIONS: PermissionOption[] = [
@@ -81,6 +126,13 @@ export function piRpcProcessRequestError(error: PiRpcProcessTerminatedError): Re
     (error as PiRpcProcessTerminatedError & { data?: unknown }).data ??
     Object.freeze({ code: PI_RPC_PROCESS_TERMINATED_CODE })
   return new RequestError(-32603, error.message, data)
+}
+
+function activeCommandCleanupRequestError(): RequestError {
+  return RequestError.internalError(
+    Object.freeze({ code: PI_RPC_PROCESS_CLEANUP_UNCONFIRMED_CODE }),
+    'The active command could not be cancelled with confirmed Pi cleanup; it was not replayed.'
+  )
 }
 
 function promptRequestError(error: unknown): RequestError {
@@ -457,10 +509,12 @@ export class SessionManager {
   createDetached(sessionId: string, params: SessionCreateParams & { proc: PiRpcProcess }): PiAcpSession {
     return new PiAcpSession({
       sessionId,
+      initialState: params.initialState,
       cwd: params.cwd,
       mcpServers: params.mcpServers,
       proc: params.proc,
-      conn: params.conn
+      conn: params.conn,
+      commandCatalogState: params.commandCatalogState
     })
   }
 
@@ -550,7 +604,8 @@ export class SessionManager {
         cwd: params.cwd,
         mcpServers: params.mcpServers,
         proc,
-        conn: params.conn
+        conn: params.conn,
+        commandCatalogState: params.commandCatalogState
       })
       this.failedCandidateSessions.set(proc, session)
 
@@ -619,6 +674,7 @@ export class PiAcpSession {
   readonly initialState: unknown | null
   readonly cwd: string
   readonly mcpServers: McpServer[]
+  readonly commandCatalogState: PiCommandCatalogState
 
   private startupInfo: string | null = null
   private startupInfoSent = false
@@ -635,7 +691,13 @@ export class PiAcpSession {
   private nextTurnId = 1
   private pendingTurn: PromptTurn | null = null
   private readonly turnQueue: PromptTurn[] = []
+  private activeMutation: ActiveCommand | SessionMutationReservation | null = null
+  private activeCommand: ActiveCommand | null = null
   private terminalError: RequestError | null = null
+  private resolveTerminalCut!: () => void
+  private readonly terminalCutCompleted = new Promise<void>(resolve => {
+    this.resolveTerminalCut = resolve
+  })
   private readonly unsubscribeEvent: () => void
   private readonly unsubscribeTerminal: () => void
   private disposePromise: Promise<void> | null = null
@@ -672,6 +734,7 @@ export class PiAcpSession {
     mcpServers: McpServer[]
     proc: PiRpcProcess
     conn: AgentSideConnection
+    commandCatalogState?: PiCommandCatalogState
     /** @deprecated Retained as an inert construction shim for downstream tests. */
     fileCommands?: unknown[]
   }) {
@@ -680,6 +743,7 @@ export class PiAcpSession {
     this.initialState = opts.initialState ?? null
     this.cwd = opts.cwd
     this.mcpServers = opts.mcpServers
+    this.commandCatalogState = opts.commandCatalogState ?? createPiCommandCatalogState()
     this.proc = opts.proc
     this.conn = opts.conn
     const env = { ...process.env }
@@ -709,6 +773,201 @@ export class PiAcpSession {
       this.handleTerminal(error)
       if (this.terminalBarrier) await this.terminalBarrier
       throw this.terminalError ?? piRpcProcessRequestError(error)
+    }
+  }
+
+  supportsExecuteCommand(): boolean {
+    if (this.initialState !== null && typeof this.initialState === 'object') {
+      const state = this.initialState as { rpcCapabilities?: { executeCommand?: unknown } }
+      return state.rpcCapabilities?.executeCommand === 1
+    }
+
+    const supports = (this.proc as PiRpcProcess & { supportsExecuteCommand?: () => boolean }).supportsExecuteCommand
+    return typeof supports === 'function' && supports.call(this.proc)
+  }
+
+  private assertMutationAdmission(): void {
+    if (this.terminalError) throw this.terminalError
+    if (!this.isAlive()) {
+      if (this.terminalError) throw this.terminalError
+      const terminal = new PiRpcProcessTerminatedError(
+        'Pi process terminated before command admission. The command was not sent or replayed.',
+        undefined,
+        { kind: 'stopped' }
+      )
+      this.handleTerminal(terminal)
+      throw this.terminalError ?? piRpcProcessRequestError(terminal)
+    }
+    if (this.activeMutation || this.pendingTurn || this.turnQueue.length > 0) throw new PiAcpCommandBusyError()
+  }
+
+  reserveMutation(operation: string): SessionMutationReservation {
+    this.assertMutationAdmission()
+
+    const reservation = Object.freeze({ kind: 'mutation' as const, operation })
+    this.activeMutation = reservation
+    return reservation
+  }
+
+  releaseMutation(reservation: SessionMutationReservation): void {
+    if (this.activeMutation === reservation) this.activeMutation = null
+  }
+
+  reserveCommand(name: string): SessionCommandReservation {
+    this.assertMutationAdmission()
+
+    const active: ActiveCommand = {
+      kind: 'command',
+      requestId: crypto.randomUUID(),
+      name,
+      claim: null,
+      failure: null,
+      writeStarted: false,
+      cancelStop: null,
+      cleanupFailure: null
+    }
+    this.activeMutation = active
+    this.activeCommand = active
+    return active
+  }
+
+  commandReservationOutcome(reservation: SessionCommandReservation): SessionExecuteCommandOutcome | null {
+    const active = this.activeCommand
+    if (active !== reservation) {
+      throw RequestError.internalError(
+        { code: 'COMMAND_REQUEST_CONFLICT' },
+        'The command reservation is no longer active.'
+      )
+    }
+    if (active.claim === 'cancelled') {
+      return Object.freeze({ kind: 'cancelled', requestId: active.requestId })
+    }
+    if (active.claim === 'failed') throw active.failure
+    if (this.terminalError) throw this.terminalError
+    return null
+  }
+
+  private async awaitCommandCancelStop(active: ActiveCommand): Promise<void> {
+    const cancelStop = active.cancelStop
+    if (!cancelStop) {
+      const failure = active.cleanupFailure ?? activeCommandCleanupRequestError()
+      active.claim = 'failed'
+      active.failure = failure
+      active.cleanupFailure = failure
+      if (this.terminalBarrier) await this.terminalBarrier.catch(() => undefined)
+      throw failure
+    }
+
+    try {
+      await cancelStop
+    } catch (error) {
+      // A terminal transition is the fixed client-update cut even when direct
+      // child cleanup remains unconfirmed. Never let that auxiliary barrier
+      // replace the one request-causal cleanup failure shared by cancel and
+      // the owning command.
+      if (this.terminalBarrier) await this.terminalBarrier.catch(() => undefined)
+      throw error
+    }
+
+    if (this.terminalBarrier) await this.terminalBarrier
+  }
+
+  releaseCommand(reservation: SessionCommandReservation): void {
+    if (this.activeCommand !== reservation) return
+    this.activeCommand = null
+    if (this.activeMutation === reservation) this.activeMutation = null
+  }
+
+  discoverCommandCatalogOnce(options: PiCommandCatalogOptions): Promise<FrozenPiCommandCatalog> {
+    const state = this.commandCatalogState
+    if (state.snapshot) return Promise.resolve(state.snapshot)
+    if (state.discovery) return state.discovery
+
+    const discovery = this.runRpc(proc => proc.getCommands())
+      .then(data => freezePiCommandCatalog(data, options))
+      .then(snapshot => {
+        state.snapshot = snapshot
+        return snapshot
+      })
+    state.discovery = discovery
+    void discovery.catch(() => {
+      // Only a successful catalog belongs to the logical session snapshot.
+      // A terminal/error during discovery remains request-causal and a fresh
+      // physical recovery may make the first successful discovery attempt.
+      if (state.discovery === discovery) state.discovery = null
+    })
+    return discovery
+  }
+
+  async executeReservedCommand(
+    reservation: SessionCommandReservation,
+    args: string
+  ): Promise<SessionExecuteCommandOutcome> {
+    const active = this.activeCommand
+    if (active !== reservation) {
+      throw RequestError.internalError(
+        { code: 'COMMAND_REQUEST_CONFLICT' },
+        'The command reservation is no longer active.'
+      )
+    }
+    const execute = (
+      this.proc as PiRpcProcess & {
+        executeCommand?: (
+          requestId: string,
+          commandName: string,
+          commandArgs: string
+        ) => Promise<PiRpcExecuteCommandResult>
+      }
+    ).executeCommand
+
+    if (typeof execute !== 'function') {
+      throw RequestError.internalError(
+        { code: 'PI_RPC_EXECUTE_COMMAND_UNAVAILABLE' },
+        'This Pi process does not implement execute_command.'
+      )
+    }
+
+    const interrupted = this.commandReservationOutcome(active)
+    if (interrupted) return interrupted
+    active.writeStarted = true
+
+    let response: PiRpcExecuteCommandResult
+    try {
+      response = await execute.call(this.proc, active.requestId, active.name, args)
+    } catch (error) {
+      if (error instanceof PiRpcProcessTerminatedError) this.handleTerminal(error)
+      if (!active.claim) {
+        active.claim = 'failed'
+        active.failure =
+          error instanceof PiRpcProcessTerminatedError ? (this.terminalError ?? piRpcProcessRequestError(error)) : error
+      }
+      if (active.claim === 'cancelled') {
+        await this.awaitCommandCancelStop(active)
+        return Object.freeze({ kind: 'cancelled', requestId: active.requestId })
+      }
+      await this.flushCommandEmits()
+      throw active.failure ?? error
+    }
+
+    if (!active.claim) active.claim = 'response'
+    if (active.claim === 'cancelled') {
+      await this.awaitCommandCancelStop(active)
+      return Object.freeze({ kind: 'cancelled', requestId: active.requestId })
+    }
+    if (active.claim === 'failed') throw active.failure
+
+    // Extension notify events are serialized onto the same emit tail before
+    // the request-bound execute response is allowed to complete ACP.
+    await this.flushCommandEmits()
+    return Object.freeze({ kind: 'response', requestId: active.requestId, response })
+  }
+
+  async executeCommand(name: string, args: string): Promise<SessionExecuteCommandOutcome> {
+    const reservation = this.reserveCommand(name)
+    try {
+      return await this.executeReservedCommand(reservation, args)
+    } finally {
+      this.releaseCommand(reservation)
     }
   }
 
@@ -768,6 +1027,12 @@ export class PiAcpSession {
 
   async prompt(message: string, images: unknown[] = []): Promise<StopReason> {
     if (this.terminalError) throw this.terminalError
+    if (this.activeMutation) {
+      throw RequestError.internalError(
+        { code: 'COMMAND_BUSY' },
+        'The Pi session is executing a mutation; the prompt was not queued or sent.'
+      )
+    }
 
     const turnPromise = new Promise<StopReason>((resolve, reject) => {
       const queued: PromptTurn = {
@@ -818,6 +1083,42 @@ export class PiAcpSession {
   }
 
   async cancel(): Promise<void> {
+    const command = this.activeCommand
+    if (command) {
+      if (!command.claim) {
+        command.claim = 'cancelled'
+        if (command.writeStarted) {
+          // v1 has no native per-command abort. Once the write starts,
+          // cancellation stops this exact child and waits for cleanup proof;
+          // the command is never replayed on recovery.
+          const stop = (this.proc as PiRpcProcess & { stop?: () => Promise<void> }).stop
+          let stopAttempt: Promise<void>
+          try {
+            stopAttempt =
+              typeof stop === 'function'
+                ? Promise.resolve(stop.call(this.proc))
+                : Promise.reject(new Error('Pi process stop is unavailable.'))
+          } catch (error) {
+            stopAttempt = Promise.reject(error)
+          }
+          command.cancelStop = stopAttempt.catch(() => {
+            const failure = activeCommandCleanupRequestError()
+            command.claim = 'failed'
+            command.failure = failure
+            command.cleanupFailure = failure
+            throw failure
+          })
+        }
+      }
+      if (command.claim === 'cancelled' && command.cancelStop) {
+        await this.awaitCommandCancelStop(command)
+      } else if (command.claim === 'failed' && command.cleanupFailure) {
+        if (this.terminalBarrier) await this.terminalBarrier.catch(() => undefined)
+        throw command.cleanupFailure
+      }
+      return
+    }
+
     const active = this.pendingTurn
 
     // An idle cancel, or one that lost the completion claim, must not write an
@@ -889,6 +1190,17 @@ export class PiAcpSession {
       tail = this.lastEmit
       await tail
     } while (tail !== this.lastEmit)
+  }
+
+  private async flushCommandEmits(): Promise<void> {
+    // Commands normally wait for the stable notification tail. If a terminal
+    // transition starts before that tail settles, its bounded fixed cut
+    // supersedes the unbounded client sink in either observation order.
+    if (this.terminalBarrier) {
+      await this.terminalBarrier
+      return
+    }
+    await Promise.race([this.flushEmits(), this.terminalCutCompleted])
   }
 
   private async flushTerminalCut(cut: Promise<void>): Promise<void> {
@@ -1068,6 +1380,12 @@ export class PiAcpSession {
     const requestError = piRpcProcessRequestError(error)
     this.terminalError = requestError
 
+    const command = this.activeCommand
+    if (command && !command.claim) {
+      command.claim = 'failed'
+      command.failure = requestError
+    }
+
     const terminalTurns: PromptTurn[] = []
     const active = this.pendingTurn
     if (active) {
@@ -1102,6 +1420,7 @@ export class PiAcpSession {
       }
       this.inAgentLoop = false
     })
+    void this.terminalBarrier.then(this.resolveTerminalCut, this.resolveTerminalCut)
     this.trackCompletionBarrier(this.terminalBarrier)
   }
 
@@ -1522,6 +1841,9 @@ export class PiAcpSession {
         content: { type: 'text', text: stringProp(ev, 'message') ?? 'Pi notification' } satisfies ContentBlock,
         _meta: { piAcp: { notify: { level: stringProp(ev, 'notifyType') ?? 'info' } } }
       })
+      // Retain the existing ACP bridge acknowledgement for compatibility. Pi's
+      // notify is fire-and-forget, so this does not gate command completion;
+      // the serialized ACP emit tail above is the ordering authority.
       await this.proc.sendExtensionUiResponse({ id, cancelled: true })
       return
     }
