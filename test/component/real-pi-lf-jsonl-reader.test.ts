@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 import { spawn } from 'node:child_process'
 import test from 'node:test'
+import { PROJECT_TRUST_WARNING } from '../../src/acp/agent.js'
 import {
   C1_4_LF_JSONL_LIVENESS_RESPONSE_TEXT,
   C1_4_LF_JSONL_LIVENESS_USER_TEXT,
@@ -206,7 +207,10 @@ test(
     await fixture.assertWithinHardDeadline()
 
     assert.equal(first.stopReason, 'end_turn')
-    assert.deepEqual(visibleTextChunks(fixture.client.transcript()), [C1_4_LF_JSONL_RESPONSE_TEXT])
+    assert.deepEqual(visibleTextChunks(fixture.client.transcript()), [
+      `${PROJECT_TRUST_WARNING}\n`,
+      C1_4_LF_JSONL_RESPONSE_TEXT
+    ])
     assert.deepEqual(
       Array.from(C1_4_LF_JSONL_RESPONSE_TEXT)
         .map(character => character.codePointAt(0))
@@ -228,6 +232,7 @@ test(
 
     assert.equal(second.stopReason, 'end_turn')
     assert.deepEqual(visibleTextChunks(fixture.client.transcript()), [
+      `${PROJECT_TRUST_WARNING}\n`,
       C1_4_LF_JSONL_RESPONSE_TEXT,
       C1_4_LF_JSONL_LIVENESS_RESPONSE_TEXT
     ])

@@ -30,7 +30,8 @@ compatibility is maintained in the
   - Adds a small set of built-in commands for headless/editor usage
   - Supports skill commands (if enabled in pi settings, they appear as `/skill:skill-name` in the ACP client)
 - Skills are loaded by pi directly and are available in ACP sessions
-- (Zed) `pi-acp` emits “startup info” block into the session (pi version, context, skills, prompts, extensions - similar to `pi` in the terminal). You can disable it by setting `quietStartup: true` in pi settings (`~/.pi/agent/settings.json` or `<project>/.pi/settings.json`). When `quietStartup` is enabled, `pi-acp` will still emit a 'New version available' message if the installed pi version is outdated.
+- (Zed) `pi-acp` emits a “startup info” block into the session (pi version, context, skills, prompts, extensions - similar to `pi` in the terminal). You can suppress that ordinary prelude by setting `quietStartup: true` in pi settings (`~/.pi/agent/settings.json` or `<project>/.pi/settings.json`). When `quietStartup` is enabled, `pi-acp` will still emit a 'New version available' message if the installed pi version is outdated, and it never suppresses the project-trust warning below.
+- **Project trust boundary:** `pi-acp` intentionally starts every Pi RPC child with exactly one `--approve`. After the child has started, each successful `session/new` and explicit `session/load` includes this fixed disclosure once in `_meta.piAcp.startupInfo` and the corresponding visible startup delivery, including when `quietStartup: true`: “pi-acp automatically trusts this project. Project resources and extensions may load or execute with this process's local permissions; ACP permissions are not a sandbox.” The child is already approved when this warning appears; it is disclosure, not a consent or permission prompt. Transparent recovery applies the same flag to the replacement child without repeating the warning for the same logical ACP session.
 - Extension factory/load failures remain visible when `quietStartup` is enabled. Nested Pi stderr is bounded and privacy-filtered before ACP display: the adapter returns only a structured, path-normalized and credential-redacted startup diagnostic with a 16 KiB pre-decode retention cap and a 4 KiB client-summary cap; it never forwards the raw stderr tail.
 - Runtime extension-handler errors emitted after an ACP session is ready remain nonterminal: `pi-acp` surfaces one ordered, bounded and privacy-filtered diagnostic update, then waits for Pi's normal `agent_settled` completion. Errors emitted before the session installs its runtime handler are not buffered yet.
 - If the nested Pi process terminates or its RPC pipes close, outstanding prompts that have not already claimed completion fail with an explicit structured JSON-RPC error instead of hanging or returning an empty successful turn. An acceptance-ambiguous prompt is never replayed automatically; the next fresh request attempts safe restoration in a new child. Restoration proceeds only after the old child is proven gone and the exact durable session identity is confirmed; otherwise the request fails with an explicit recovery-unavailable error.
@@ -174,7 +175,7 @@ routing behavior.
 
 - Skill commands can be enabled in pi settings and will appear in the slash command list in ACP client as `/skill:skill-name`.
 
-**Note**: Slash commands provided by pi extensions are not currently supported.
+**Note**: Slash commands provided by pi extensions are not currently supported. `pi-acp` also does not currently expose authoritative runtime loaded-extension inventory or command-source metadata; extension source/compatibility publication and stable IDs remain deferred to the command-catalog checkpoints.
 
 ## Authentication (ACP Registry support)
 

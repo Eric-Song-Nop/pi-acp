@@ -45,6 +45,13 @@ export const PI_RPC_PROCESS_TERMINATED_CODE = 'PI_RPC_PROCESS_TERMINATED' as con
 export const PI_RPC_PROCESS_CLEANUP_UNCONFIRMED_CODE = 'PI_RPC_PROCESS_CLEANUP_UNCONFIRMED' as const
 export const PI_RPC_HANDSHAKE_TIMEOUT_CODE = 'PI_RPC_HANDSHAKE_TIMEOUT' as const
 export const PI_RPC_HANDSHAKE_FAILED_CODE = 'PI_RPC_HANDSHAKE_FAILED' as const
+export const PI_RPC_PROJECT_TRUST_POLICY = Object.freeze({
+  policy: 'force-approve' as const,
+  adapterOverride: 'approve' as const,
+  perProjectConsent: false as const,
+  basis: 'cli-approve' as const,
+  cliArgument: '--approve' as const
+})
 
 export type PiRpcProcessTerminationCause =
   | 'exit'
@@ -307,7 +314,7 @@ export class PiRpcProcess {
     // - themes are irrelevant in rpc mode and can be noisy/slow to load.
     // Keep extensions + prompt templates enabled because ACP users may rely on them
     // (e.g. MCP extensions, prompt templates for workflows).
-    const args = ['--mode', 'rpc', '--no-themes']
+    const args = ['--mode', 'rpc', '--no-themes', PI_RPC_PROJECT_TRUST_POLICY.cliArgument]
     if (params.sessionPath) args.push('--session', params.sessionPath)
 
     const child = spawn(cmd, args, {

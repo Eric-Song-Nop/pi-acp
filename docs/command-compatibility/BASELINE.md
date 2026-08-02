@@ -163,6 +163,20 @@ digests, and both fixture sources (`index.ts`
 | `C0.7-XF02` | untrusted project prompt expanded/persisted; one configured provider request    | `C1.6`, `C2.2`, `C5.8` | [fork issue #6](https://github.com/Eric-Song-Nop/pi-acp/issues/6) |
 | `C0.7-XF03` | state-only notify arrives; ACP prompt times out at `1500ms`, zero model request | `C3.4`                 | [upstream issue #84](https://github.com/svkozak/pi-acp/issues/84) |
 
+`C0.7-XF02` remains immutable historical evidence. The original 2026-07-31
+`DEC-004` never-implicit-approval decision remains in the tracker as superseded
+history. On 2026-08-02, `DEC-008` intentionally selected forced `--approve` for
+every ACP project, so the live checkpoint is superseded by a positive trust-all
+policy assertion in `C1.6`; the frozen artifact is not recaptured or rewritten.
+
+The C1.6 client surface is limited to a fixed post-child-start warning in
+`session/new` and explicit `session/load` `_meta.piAcp.startupInfo`, including
+when `quietStartup=true`. The warning discloses an approval that has already
+occurred; it is not consent. Transparent recovery applies `--approve` to the
+replacement child without repeating the same logical session's warning. C1.6
+does not add runtime inventory or command-source metadata; those remain deferred
+to the catalog/source checkpoints and future upstream capability work.
+
 These are executable `xfail(issue)` contracts, not skips. An unexpected fix is
 an error until the case is converted to a positive assertion. Checked-in
 artifacts contain canonical ACP wire records and exact allowlisted metadata;

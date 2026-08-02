@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { PiAcpAgent } from '../../src/acp/agent.js'
+import { PiAcpAgent, PROJECT_TRUST_WARNING } from '../../src/acp/agent.js'
 import { FakeAgentSideConnection, asAgentConn } from '../helpers/fakes.js'
 import { PiRpcProcess, PiRpcSpawnError } from '../../src/pi-rpc/process.js'
 
@@ -18,7 +18,7 @@ class FakeStore {
   }
 }
 
-test('PiAcpAgent: does not emit startup info on loadSession', async () => {
+test('PiAcpAgent: loadSession emits the mandatory trust disclosure', async () => {
   const root = mkdtempSync(join(tmpdir(), 'pi-acp-startup-load-'))
   const sessionFile = join(root, 's1.jsonl')
   writeFileSync(
@@ -57,10 +57,10 @@ test('PiAcpAgent: does not emit startup info on loadSession', async () => {
 
     const res = await agent.loadSession({ sessionId: 's1', cwd: '/tmp/project', mcpServers: [] } as any)
 
-    assert.equal((res as any)?._meta?.piAcp?.startupInfo, null)
+    assert.equal((res as any)?._meta?.piAcp?.startupInfo, `${PROJECT_TRUST_WARNING}\n`)
 
-    // Only available_commands_update should be scheduled.
-    assert.equal(timeouts.length, 1)
+    // Trust disclosure and available_commands_update are both scheduled after the response.
+    assert.equal(timeouts.length, 2)
   } finally {
     ;(globalThis as any).setTimeout = realSetTimeout
     PiRpcProcess.spawn = originalSpawn

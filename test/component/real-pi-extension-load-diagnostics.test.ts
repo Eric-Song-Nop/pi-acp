@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 import { access, readFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import test from 'node:test'
+import { PROJECT_TRUST_WARNING } from '../../src/acp/agent.js'
 import { startRealPiFixture } from '../helpers/real-pi-fixture.js'
 
 const TEST_TIMEOUT_MS = 30_000
@@ -165,7 +166,13 @@ test(
       })
       assertPrivacySafe(serializedError, fixture.rootDir, parentMarker)
       assert.deepEqual(fixture.requests, [])
-      await assertPathMissing(fixture.projectCanaryPath)
+      const canaryPids = (await readFile(fixture.projectCanaryPath, 'utf8'))
+        .trim()
+        .split('\n')
+        .map(value => Number(value))
+      assert.equal(canaryPids.length, 1)
+      assert.equal(Number.isInteger(canaryPids[0]) && canaryPids[0]! > 0, true)
+      await assertPathMissing(fixture.trustPath)
       assert.equal(fixture.client.isRunning, true)
 
       const exit = await fixture.client.close()
@@ -180,6 +187,7 @@ test(
           entry.kind === 'message' && entry.direction === 'agent_to_client' ? [JSON.stringify(entry.message)] : []
         )
         .join('\n')
+      assert.equal(agentToClientEvidence.includes(PROJECT_TRUST_WARNING), false)
       assertPrivacySafe(agentToClientEvidence, fixture.rootDir, parentMarker, { allowLineBreaks: true })
       assertPrivacySafe(exit.stderrTail, undefined, parentMarker, { allowLineBreaks: true })
       assert.equal(exit.stderrTail.includes(fixture.agentDir), false)

@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { PiAcpAgent } from '../../src/acp/agent.js'
+import { PiAcpAgent, PROJECT_TRUST_WARNING } from '../../src/acp/agent.js'
 import { FakeAgentSideConnection, asAgentConn } from '../helpers/fakes.js'
 
 class FakeSessions {
@@ -61,6 +61,7 @@ test('PiAcpAgent: startup info includes project-level packages from .pi/settings
     const res = await agent.newSession({ cwd: projectDir, mcpServers: [] } as any)
     const startupInfo: string = res?._meta?.piAcp?.startupInfo ?? ''
 
+    assert.ok(startupInfo.includes(PROJECT_TRUST_WARNING), 'should include mandatory trust disclosure')
     assert.ok(startupInfo.includes('npm:global-ext'), 'should include global package')
     assert.ok(startupInfo.includes('/path/to/local-extension'), 'should include project package')
   } finally {
