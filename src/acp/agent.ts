@@ -23,9 +23,24 @@ import {
   type DeleteSessionResponse
 } from '@agentclientprotocol/sdk'
 import { getAuthMethods } from './auth.js'
-import { SessionCreateRollbackError, SessionManager, piRpcProcessRequestError, type PiAcpSession } from './session.js'
+import {
+  PiAcpCommandBusyError,
+  SessionCreateRollbackError,
+  SessionManager,
+  piRpcProcessRequestError,
+  type PiAcpSession,
+  type SessionCommandReservation,
+  type SessionMutationReservation,
+  type SessionExecuteCommandOutcome
+} from './session.js'
 import { SessionStore } from './session-store.js'
-import { PiRpcProcess, PiRpcProcessTerminatedError, PiRpcSpawnError, piRpcSpawnErrorData } from '../pi-rpc/process.js'
+import {
+  PI_RPC_PROCESS_TERMINATED_CODE,
+  PiRpcProcess,
+  PiRpcProcessTerminatedError,
+  PiRpcSpawnError,
+  piRpcSpawnErrorData
+} from '../pi-rpc/process.js'
 import { listPiSessions } from './pi-sessions.js'
 import { normalizePiAssistantText, normalizePiMessageText } from './translate/pi-messages.js'
 import { toolResultToText } from './translate/pi-tools.js'
@@ -42,7 +57,13 @@ import {
 import { promptToPiMessage } from './translate/prompt.js'
 import { parseCommandArgs } from './slash-commands.js'
 import { getAgentDir, getEnableSkillCommands, getQuietStartup } from './pi-settings.js'
-import { toAvailableCommandsFromPiGetCommands } from './pi-commands.js'
+import {
+  FIXTURE_STATE_COMMAND_NAME,
+  freezePiCommandCatalog,
+  type FrozenPiCommandCatalog,
+  type PiCommandCatalogOptions,
+  type PiCommandCatalogState
+} from './pi-commands.js'
 import {
   findUnsupportedPiBuiltinCommand,
   isUnsupportedPiBuiltinCommand,
@@ -77,8 +98,124 @@ const THOUGHT_LEVEL_CONFIG_ID = 'thought_level'
 export const PROJECT_TRUST_WARNING =
   "pi-acp automatically trusts this project. Project resources and extensions may load or execute with this process's local permissions; ACP permissions are not a sandbox."
 const SESSION_RECOVERY_UNAVAILABLE_CODE = 'PI_ACP_SESSION_RECOVERY_UNAVAILABLE'
+const FIXTURE_STATE_PREVIEW_ENV = 'PI_ACP_EXPERIMENTAL_FIXTURE_STATE'
+const FIXTURE_STATE_CATALOG_DISCOVERY_FAILED_CODE = 'PI_COMMAND_CATALOG_DISCOVERY_FAILED'
 /** Distinct from the sealed 500ms terminal-update cut in session.ts. */
 export const SESSION_RECOVERY_HANDSHAKE_TIMEOUT_MS = 2_000
+
+type FixtureStateRejectionCode =
+  | 'COMMAND_INVALID_REQUEST'
+  | 'COMMAND_NOT_FOUND'
+  | 'COMMAND_BUSY'
+  | 'COMMAND_REQUEST_CONFLICT'
+  | 'COMMAND_HANDLER_FAILED'
+
+type FixtureStateInvocation = Readonly<{ args: string }>
+type FixtureStateRefusalReason = 'disabled' | 'capability' | 'collision' | 'attachments'
+
+function parseFixtureStateInvocation(message: string): FixtureStateInvocation | null {
+  const invocation = `/${FIXTURE_STATE_COMMAND_NAME}`
+  if (!message.startsWith(invocation)) return null
+  const delimiter = message.charAt(invocation.length)
+  if (delimiter === '') return Object.freeze({ args: '' })
+  if (!/\s/u.test(delimiter)) return null
+  return Object.freeze({ args: message.slice(invocation.length + 1) })
+}
+
+function promptHasAttachments(prompt: PromptRequest['prompt']): boolean {
+  return prompt.some(block => block.type !== 'text')
+}
+
+function fixtureStateSummary(code: FixtureStateRejectionCode, reason?: FixtureStateRefusalReason): string {
+  if (reason === 'disabled') return 'The experimental /fixture-state preview is disabled; nothing was sent to Pi.'
+  if (reason === 'capability') return 'This Pi process does not support execute_command; nothing was sent to Pi.'
+  if (reason === 'collision') return 'The /fixture-state command did not resolve to one exact extension command.'
+  if (reason === 'attachments') return '/fixture-state accepts text arguments only; attachments were not sent to Pi.'
+
+  switch (code) {
+    case 'COMMAND_INVALID_REQUEST':
+      return 'Pi rejected the /fixture-state command request as invalid.'
+    case 'COMMAND_BUSY':
+      return 'The Pi session is busy; /fixture-state was not queued or sent.'
+    case 'COMMAND_REQUEST_CONFLICT':
+      return 'Pi rejected a conflicting command request identity.'
+    case 'COMMAND_HANDLER_FAILED':
+      return 'The /fixture-state extension handler failed.'
+    case 'COMMAND_NOT_FOUND':
+      return 'The /fixture-state extension command is not available.'
+  }
+}
+
+function fixtureStateRefusal(
+  requestId: string,
+  code: FixtureStateRejectionCode,
+  reason?: FixtureStateRefusalReason
+): PromptResponse {
+  const summary = fixtureStateSummary(code, reason)
+  return {
+    stopReason: 'refusal',
+    _meta: {
+      piAcp: {
+        executeCommand: {
+          requestId,
+          name: FIXTURE_STATE_COMMAND_NAME,
+          disposition: 'rejected',
+          code
+        },
+        diagnostic: {
+          schemaVersion: 1,
+          code,
+          phase: 'execution',
+          source: 'extension',
+          command: FIXTURE_STATE_COMMAND_NAME,
+          summary,
+          truncated: false,
+          redacted: false
+        },
+        routing: {
+          promptForwardedToPi: false,
+          sentToModel: false
+        }
+      }
+    }
+  }
+}
+
+function fixtureStateHandled(requestId: string): PromptResponse {
+  return {
+    stopReason: 'end_turn',
+    _meta: {
+      piAcp: {
+        executeCommand: {
+          requestId,
+          name: FIXTURE_STATE_COMMAND_NAME,
+          source: 'extension',
+          disposition: 'handled'
+        },
+        routing: {
+          promptForwardedToPi: false,
+          sentToModel: false
+        }
+      }
+    }
+  }
+}
+
+function fixtureStateCancelled(requestId: string): PromptResponse {
+  return {
+    stopReason: 'cancelled',
+    _meta: {
+      piAcp: {
+        executeCommand: {
+          requestId,
+          name: FIXTURE_STATE_COMMAND_NAME,
+          disposition: 'cancelled'
+        },
+        routing: { promptForwardedToPi: false, sentToModel: false }
+      }
+    }
+  }
+}
 
 function sessionRecoveryUnavailableError(): RequestError {
   return RequestError.internalError(
@@ -105,6 +242,43 @@ async function runSessionRpc<T>(session: PiAcpSession, operation: (proc: PiRpcPr
   }
 }
 
+async function runSessionMutation<T>(
+  session: PiAcpSession,
+  operationName: string,
+  operation: () => Promise<T>
+): Promise<T> {
+  const reserve = (
+    session as PiAcpSession & {
+      reserveMutation?: (operation: string) => SessionMutationReservation
+    }
+  ).reserveMutation
+  const release = (
+    session as PiAcpSession & {
+      releaseMutation?: (reservation: SessionMutationReservation) => void
+    }
+  ).releaseMutation
+
+  // Compatibility for narrow unit-test sessions. Production sessions always
+  // provide the synchronous shared mutation fence.
+  if (typeof reserve !== 'function' || typeof release !== 'function') return await operation()
+
+  let reservation: SessionMutationReservation
+  try {
+    reservation = reserve.call(session, operationName)
+  } catch (error) {
+    if (error instanceof PiAcpCommandBusyError) {
+      throw RequestError.internalError({ code: error.code }, error.message)
+    }
+    throw error
+  }
+
+  try {
+    return await operation()
+  } finally {
+    release.call(session, reservation)
+  }
+}
+
 type SessionRecovery = {
   readonly identity: symbol
   readonly generation: number
@@ -114,6 +288,7 @@ type SessionRecovery = {
   cancelled: boolean
   blockedCleanup: boolean
   cleanupRetry: Promise<void> | null
+  commandCatalogState: PiCommandCatalogState | null
 }
 
 type FailedNewSessionCleanupResult = 'complete' | 'superseded' | 'process_unconfirmed' | 'artifact_quarantined'
@@ -187,9 +362,11 @@ export class PiAcpAgent implements ACPAgent {
   private readonly deleteAttempts = new Map<string, Promise<DeleteSessionResponse>>()
   private readonly pendingFailedNewSessionCleanups = new Set<PiAcpSession>()
   private readonly quarantinedSessionIds = new Set<string>()
+  private readonly compatibilityCatalogDiscoveries = new WeakMap<object, Promise<FrozenPiCommandCatalog>>()
   private explicitSessionTail: Promise<void> = Promise.resolve()
   private disposePromise: Promise<void> | null = null
   private disposed = false
+  private readonly fixtureStatePreviewEnabled: boolean
 
   async dispose(): Promise<void> {
     if (!this.disposePromise) {
@@ -221,7 +398,223 @@ export class PiAcpAgent implements ACPAgent {
 
   constructor(conn: AgentSideConnection, _config?: unknown) {
     this.conn = conn
+    this.fixtureStatePreviewEnabled = process.env[FIXTURE_STATE_PREVIEW_ENV] === '1'
     void _config
+  }
+
+  private discoverCommandCatalog(
+    session: PiAcpSession,
+    options: PiCommandCatalogOptions
+  ): Promise<FrozenPiCommandCatalog> {
+    const discover = (
+      session as PiAcpSession & {
+        discoverCommandCatalogOnce?: (options: PiCommandCatalogOptions) => Promise<FrozenPiCommandCatalog>
+      }
+    ).discoverCommandCatalogOnce
+    if (typeof discover === 'function') return discover.call(session, options)
+
+    const existing = this.compatibilityCatalogDiscoveries.get(session as object)
+    if (existing) return existing
+    const discovery = runSessionRpc(session, proc => {
+      const getCommands = (proc as PiRpcProcess & { getCommands?: () => Promise<unknown> }).getCommands
+      // Narrow construction shim for downstream fake sessions that predate
+      // C2.2 catalog RPC support. Real PiRpcProcess always has getCommands().
+      if (typeof getCommands !== 'function') return Promise.resolve(undefined)
+      return getCommands.call(proc)
+    }).then(data => freezePiCommandCatalog(data, options))
+    this.compatibilityCatalogDiscoveries.set(session as object, discovery)
+    void discovery.catch(() => {
+      if (this.compatibilityCatalogDiscoveries.get(session as object) === discovery) {
+        this.compatibilityCatalogDiscoveries.delete(session as object)
+      }
+    })
+    return discovery
+  }
+
+  private scheduleCommandCatalogPublication(session: PiAcpSession, enableSkillCommands: boolean): void {
+    // Clients may ignore updates for an unknown sessionId, so publication is
+    // intentionally scheduled after the session/new or session/load response.
+    setTimeout(() => {
+      void (async () => {
+        const supports = (session as PiAcpSession & { supportsExecuteCommand?: () => boolean }).supportsExecuteCommand
+        const options = {
+          enableSkillCommands,
+          reserveFixtureStateName: this.fixtureStatePreviewEnabled,
+          enableFixtureStateCommand:
+            this.fixtureStatePreviewEnabled && typeof supports === 'function' && supports.call(session)
+        }
+        let catalog: FrozenPiCommandCatalog
+        try {
+          catalog = await this.discoverCommandCatalog(session, options)
+        } catch {
+          // Preserve C2.2's builtins-only publication fallback without
+          // freezing a failed discovery into the logical session snapshot.
+          catalog = freezePiCommandCatalog(undefined, options)
+        }
+        await this.publishCommandCatalog(session, catalog)
+      })().catch(() => undefined)
+    }, 0)
+  }
+
+  private publishCommandCatalog(session: PiAcpSession, catalog: FrozenPiCommandCatalog): Promise<void> {
+    const state = (session as PiAcpSession & { commandCatalogState?: PiCommandCatalogState }).commandCatalogState
+    if (!state) {
+      return this.conn.sessionUpdate({
+        sessionId: session.sessionId,
+        update: {
+          sessionUpdate: 'available_commands_update',
+          availableCommands: mergeCommands([...catalog.commands], builtinAvailableCommands())
+        }
+      })
+    }
+    if (state.publishedSnapshot === catalog) return Promise.resolve()
+
+    const current = state.publication
+    if (current) {
+      if (state.publicationSnapshot === catalog) return current
+      return current.catch(() => undefined).then(() => this.publishCommandCatalog(session, catalog))
+    }
+
+    const publication = this.conn
+      .sessionUpdate({
+        sessionId: session.sessionId,
+        update: {
+          sessionUpdate: 'available_commands_update',
+          availableCommands: mergeCommands([...catalog.commands], builtinAvailableCommands())
+        }
+      })
+      .then(() => {
+        state.publishedSnapshot = catalog
+      })
+    state.publicationSnapshot = catalog
+    state.publication = publication
+    const clear = (): void => {
+      if (state.publication !== publication) return
+      state.publication = null
+      state.publicationSnapshot = null
+    }
+    void publication.then(clear, clear)
+    return publication
+  }
+
+  private commandReservationOutcome(
+    session: PiAcpSession,
+    reservation: SessionCommandReservation
+  ): SessionExecuteCommandOutcome | null {
+    const checkpoint = (
+      session as PiAcpSession & {
+        commandReservationOutcome?: (reservation: SessionCommandReservation) => SessionExecuteCommandOutcome | null
+      }
+    ).commandReservationOutcome
+    return typeof checkpoint === 'function' ? checkpoint.call(session, reservation) : null
+  }
+
+  private async executeFixtureStatePreview(
+    session: PiAcpSession,
+    invocation: FixtureStateInvocation,
+    hasAttachments: boolean
+  ): Promise<PromptResponse | null> {
+    const reserve = (
+      session as PiAcpSession & {
+        reserveCommand?: (name: string) => SessionCommandReservation
+      }
+    ).reserveCommand
+    let reservation: SessionCommandReservation
+    try {
+      reservation =
+        typeof reserve === 'function'
+          ? reserve.call(session, FIXTURE_STATE_COMMAND_NAME)
+          : Object.freeze({ requestId: crypto.randomUUID(), name: FIXTURE_STATE_COMMAND_NAME })
+    } catch (error) {
+      if (error instanceof PiAcpCommandBusyError) {
+        return fixtureStateRefusal(crypto.randomUUID(), 'COMMAND_BUSY')
+      }
+      throw error
+    }
+
+    const release = (
+      session as PiAcpSession & {
+        releaseCommand?: (reservation: SessionCommandReservation) => void
+      }
+    ).releaseCommand
+    try {
+      const supports = (session as PiAcpSession & { supportsExecuteCommand?: () => boolean }).supportsExecuteCommand
+      const sessionCwd = (session as PiAcpSession & { cwd?: unknown }).cwd
+      const options = {
+        enableSkillCommands: typeof sessionCwd === 'string' ? getEnableSkillCommands(sessionCwd) : true,
+        reserveFixtureStateName: this.fixtureStatePreviewEnabled,
+        enableFixtureStateCommand:
+          this.fixtureStatePreviewEnabled && typeof supports === 'function' && supports.call(session)
+      }
+
+      let catalog: FrozenPiCommandCatalog
+      try {
+        catalog = await this.discoverCommandCatalog(session, options)
+      } catch (error) {
+        const interrupted = this.commandReservationOutcome(session, reservation)
+        if (interrupted?.kind === 'cancelled') return fixtureStateCancelled(interrupted.requestId)
+        if (
+          error instanceof RequestError &&
+          (error.data as { code?: unknown } | undefined)?.code === PI_RPC_PROCESS_TERMINATED_CODE
+        ) {
+          throw error
+        }
+        throw RequestError.internalError(
+          { code: FIXTURE_STATE_CATALOG_DISCOVERY_FAILED_CODE },
+          'Pi command catalog discovery failed; /fixture-state was not sent.'
+        )
+      }
+      const afterDiscovery = this.commandReservationOutcome(session, reservation)
+      if (afterDiscovery?.kind === 'cancelled') return fixtureStateCancelled(afterDiscovery.requestId)
+
+      if (!this.fixtureStatePreviewEnabled && catalog.fixtureStateExtensionCount === 0) return null
+      if (hasAttachments) {
+        return fixtureStateRefusal(reservation.requestId, 'COMMAND_INVALID_REQUEST', 'attachments')
+      }
+      if (!this.fixtureStatePreviewEnabled) {
+        return fixtureStateRefusal(reservation.requestId, 'COMMAND_NOT_FOUND', 'disabled')
+      }
+      if (!catalog.hasFixtureStateExtension) {
+        return fixtureStateRefusal(reservation.requestId, 'COMMAND_NOT_FOUND', 'collision')
+      }
+      if (typeof supports !== 'function' || !supports.call(session)) {
+        return fixtureStateRefusal(reservation.requestId, 'COMMAND_NOT_FOUND', 'capability')
+      }
+
+      const fixtureWasExposed = catalog.commands.some(command => command.name === FIXTURE_STATE_COMMAND_NAME)
+      if (!fixtureWasExposed) {
+        return fixtureStateRefusal(reservation.requestId, 'COMMAND_NOT_FOUND', 'collision')
+      }
+
+      try {
+        await this.publishCommandCatalog(session, catalog)
+      } catch (error) {
+        const interrupted = this.commandReservationOutcome(session, reservation)
+        if (interrupted?.kind === 'cancelled') return fixtureStateCancelled(interrupted.requestId)
+        throw error
+      }
+      const afterPublication = this.commandReservationOutcome(session, reservation)
+      if (afterPublication?.kind === 'cancelled') return fixtureStateCancelled(afterPublication.requestId)
+
+      const executeReserved = (
+        session as PiAcpSession & {
+          executeReservedCommand?: (
+            reservation: SessionCommandReservation,
+            args: string
+          ) => Promise<SessionExecuteCommandOutcome>
+        }
+      ).executeReservedCommand
+      const outcome =
+        typeof executeReserved === 'function'
+          ? await executeReserved.call(session, reservation, invocation.args)
+          : await session.executeCommand(FIXTURE_STATE_COMMAND_NAME, invocation.args)
+
+      if (outcome.kind === 'cancelled') return fixtureStateCancelled(outcome.requestId)
+      if (outcome.response.success) return fixtureStateHandled(outcome.requestId)
+      return fixtureStateRefusal(outcome.requestId, outcome.response.data.code)
+    } finally {
+      if (typeof release === 'function') release.call(session, reservation)
+    }
   }
 
   private runExplicitSessionTransaction<T>(operation: () => Promise<T>): Promise<T> {
@@ -405,7 +798,8 @@ export class PiAcpAgent implements ACPAgent {
       candidateSession: null,
       cancelled: false,
       blockedCleanup: false,
-      cleanupRetry: null
+      cleanupRetry: null,
+      commandCatalogState: snapshot?.session.commandCatalogState ?? null
     }
 
     // This synchronous publication is the active(g) -> recovering(g, identity,
@@ -545,7 +939,9 @@ export class PiAcpAgent implements ACPAgent {
         cwd,
         mcpServers: opts?.mcpServers ?? [],
         conn: this.conn,
-        proc: recovery.candidate
+        proc: recovery.candidate,
+        initialState: state,
+        ...(recovery.commandCatalogState ? { commandCatalogState: recovery.commandCatalogState } : {})
       })
       recovery.candidateSession = candidateSession
       this.trackRecoveryCandidate(recovery.candidate, candidateSession)
@@ -961,40 +1357,7 @@ export class PiAcpAgent implements ACPAgent {
       // it will still be emitted as the first chunk of the first prompt.
       if (preludeText) setTimeout(() => session.sendStartupInfoIfPending(), 0)
 
-      // Advertise slash commands (ACP: available_commands_update)
-      // Important: some clients (e.g. Zed) will ignore notifications for an unknown sessionId.
-      // So we must send this *after* the session/new response has been delivered.
-      setTimeout(() => {
-        void (async () => {
-          try {
-            const pi = (await runSessionRpc(session, proc => proc.getCommands())) as any
-            const { commands } = toAvailableCommandsFromPiGetCommands(pi, {
-              enableSkillCommands,
-              includeExtensionCommands: false
-            })
-
-            await this.conn.sessionUpdate({
-              sessionId: session.sessionId,
-              update: {
-                sessionUpdate: 'available_commands_update',
-                availableCommands: mergeCommands(commands, builtinAvailableCommands())
-              }
-            })
-            return
-          } catch {
-            // Pi is the sole non-adapter command catalog authority. A failed
-            // discovery must not be reconstructed from prompt files.
-          }
-
-          await this.conn.sessionUpdate({
-            sessionId: session.sessionId,
-            update: {
-              sessionUpdate: 'available_commands_update',
-              availableCommands: builtinAvailableCommands()
-            }
-          })
-        })()
-      }, 0)
+      this.scheduleCommandCatalogPublication(session, enableSkillCommands)
 
       return response
     } catch (error) {
@@ -1034,7 +1397,9 @@ export class PiAcpAgent implements ACPAgent {
 
       if (cmd === 'compact') {
         const customInstructions = args.join(' ').trim() || undefined
-        const res = await runSessionRpc(session, proc => proc.compact(customInstructions))
+        const res = await runSessionMutation(session, 'compact', () =>
+          runSessionRpc(session, proc => proc.compact(customInstructions))
+        )
 
         const r: any = res && typeof res === 'object' ? (res as any) : null
         const tokensBefore = typeof r?.tokensBefore === 'number' ? r.tokensBefore : null
@@ -1107,7 +1472,9 @@ export class PiAcpAgent implements ACPAgent {
         }
 
         try {
-          await runSessionRpc(session, proc => proc.setSessionName(name))
+          await runSessionMutation(session, 'set_session_name', () =>
+            runSessionRpc(session, proc => proc.setSessionName(name))
+          )
         } catch (e: any) {
           if (e instanceof RequestError) throw e
           const msg = String(e?.message ?? e)
@@ -1147,11 +1514,11 @@ export class PiAcpAgent implements ACPAgent {
 
       if (cmd === 'steering') {
         const modeRaw = String(args[0] ?? '').toLowerCase()
-        const state = (await runSessionRpc(session, proc => proc.getState())) as any
-        const current = String(state?.steeringMode ?? '')
 
         // If no arg, just report current.
         if (!modeRaw) {
+          const state = (await runSessionRpc(session, proc => proc.getState())) as any
+          const current = String(state?.steeringMode ?? '')
           await this.conn.sessionUpdate({
             sessionId: session.sessionId,
             update: {
@@ -1179,7 +1546,9 @@ export class PiAcpAgent implements ACPAgent {
           return { stopReason: 'end_turn' }
         }
 
-        await runSessionRpc(session, proc => proc.setSteeringMode(modeRaw as 'all' | 'one-at-a-time'))
+        await runSessionMutation(session, 'set_steering_mode', () =>
+          runSessionRpc(session, proc => proc.setSteeringMode(modeRaw as 'all' | 'one-at-a-time'))
+        )
 
         await this.conn.sessionUpdate({
           sessionId: session.sessionId,
@@ -1194,11 +1563,11 @@ export class PiAcpAgent implements ACPAgent {
 
       if (cmd === 'follow-up') {
         const modeRaw = String(args[0] ?? '').toLowerCase()
-        const state = (await runSessionRpc(session, proc => proc.getState())) as any
-        const current = String(state?.followUpMode ?? '')
 
         // If no arg, just report current.
         if (!modeRaw) {
+          const state = (await runSessionRpc(session, proc => proc.getState())) as any
+          const current = String(state?.followUpMode ?? '')
           await this.conn.sessionUpdate({
             sessionId: session.sessionId,
             update: {
@@ -1226,7 +1595,9 @@ export class PiAcpAgent implements ACPAgent {
           return { stopReason: 'end_turn' }
         }
 
-        await runSessionRpc(session, proc => proc.setFollowUpMode(modeRaw as 'all' | 'one-at-a-time'))
+        await runSessionMutation(session, 'set_follow_up_mode', () =>
+          runSessionRpc(session, proc => proc.setFollowUpMode(modeRaw as 'all' | 'one-at-a-time'))
+        )
 
         await this.conn.sessionUpdate({
           sessionId: session.sessionId,
@@ -1374,7 +1745,9 @@ export class PiAcpAgent implements ACPAgent {
 
         let resultPath = ''
         try {
-          const result = await runSessionRpc(session, proc => proc.exportHtml(outputPath))
+          const result = await runSessionMutation(session, 'export_html', () =>
+            runSessionRpc(session, proc => proc.exportHtml(outputPath))
+          )
           resultPath = result.path
         } catch (e: any) {
           if (e instanceof RequestError) throw e
@@ -1439,18 +1812,22 @@ export class PiAcpAgent implements ACPAgent {
 
       if (cmd === 'autocompact') {
         const mode = (args[0] ?? 'toggle').toLowerCase()
-        let enabled: boolean | null = null
-        if (mode === 'on' || mode === 'true' || mode === 'enable' || mode === 'enabled') enabled = true
-        else if (mode === 'off' || mode === 'false' || mode === 'disable' || mode === 'disabled') enabled = false
+        const enabled = await runSessionMutation(session, 'set_auto_compaction', async () => {
+          let next: boolean | null = null
+          if (mode === 'on' || mode === 'true' || mode === 'enable' || mode === 'enabled') next = true
+          else if (mode === 'off' || mode === 'false' || mode === 'disable' || mode === 'disabled') next = false
 
-        if (enabled === null) {
-          // toggle: read current state and invert.
-          const state = (await runSessionRpc(session, proc => proc.getState())) as any
-          const current = Boolean(state?.autoCompactionEnabled)
-          enabled = !current
-        }
+          if (next === null) {
+            // The read and write form one mutation transaction; another
+            // command cannot interleave between the toggle snapshot and set.
+            const state = (await runSessionRpc(session, proc => proc.getState())) as any
+            const current = Boolean(state?.autoCompactionEnabled)
+            next = !current
+          }
 
-        await runSessionRpc(session, proc => proc.setAutoCompaction(enabled))
+          await runSessionRpc(session, proc => proc.setAutoCompaction(next))
+          return next
+        })
 
         await this.conn.sessionUpdate({
           sessionId: session.sessionId,
@@ -1465,6 +1842,16 @@ export class PiAcpAgent implements ACPAgent {
 
         return { stopReason: 'end_turn' }
       }
+    }
+
+    const fixtureStateInvocation = parseFixtureStateInvocation(message)
+    if (fixtureStateInvocation) {
+      const preview = await this.executeFixtureStatePreview(
+        session,
+        fixtureStateInvocation,
+        promptHasAttachments(params.prompt)
+      )
+      if (preview) return preview
     }
 
     const stopReason = await session.prompt(message, images)
@@ -1683,38 +2070,7 @@ export class PiAcpAgent implements ACPAgent {
       // ACP session, so it does not re-arm this pending disclosure.
       setTimeout(() => session.sendStartupInfoIfPending(), 0)
 
-      // Advertise slash commands after the response so the client knows the session exists.
-      setTimeout(() => {
-        void (async () => {
-          try {
-            const pi = (await runSessionRpc(session, proc => proc.getCommands())) as any
-            const { commands } = toAvailableCommandsFromPiGetCommands(pi, {
-              enableSkillCommands,
-              includeExtensionCommands: false
-            })
-
-            await this.conn.sessionUpdate({
-              sessionId: session.sessionId,
-              update: {
-                sessionUpdate: 'available_commands_update',
-                availableCommands: mergeCommands(commands, builtinAvailableCommands())
-              }
-            })
-            return
-          } catch {
-            // Pi is the sole non-adapter command catalog authority. A failed
-            // discovery must not be reconstructed from prompt files.
-          }
-
-          await this.conn.sessionUpdate({
-            sessionId: session.sessionId,
-            update: {
-              sessionUpdate: 'available_commands_update',
-              availableCommands: builtinAvailableCommands()
-            }
-          })
-        })()
-      }, 0)
+      this.scheduleCommandCatalogPublication(session, enableSkillCommands)
 
       return response
     } catch (error) {
@@ -1822,8 +2178,10 @@ export class PiAcpAgent implements ACPAgent {
 
   async unstable_setSessionModel(params: { sessionId: string; modelId: string }): Promise<void> {
     const session = await this.restoreSession(params.sessionId)
-    await runSessionRpc(session, proc => setSessionModel(proc, params.modelId))
-    await runSessionRpc(session, proc => emitConfigOptionsUpdate(this.conn, session.sessionId, proc))
+    await runSessionMutation(session, 'set_model', async () => {
+      await runSessionRpc(session, proc => setSessionModel(proc, params.modelId))
+      await runSessionRpc(session, proc => emitConfigOptionsUpdate(this.conn, session.sessionId, proc))
+    })
   }
 
   async setSessionMode(params: SetSessionModeRequest): Promise<SetSessionModeResponse> {
@@ -1834,18 +2192,20 @@ export class PiAcpAgent implements ACPAgent {
       throw RequestError.invalidParams(`Unknown modeId: ${mode}`)
     }
 
-    await runSessionRpc(session, proc => proc.setThinkingLevel(mode))
+    await runSessionMutation(session, 'set_thinking_level', async () => {
+      await runSessionRpc(session, proc => proc.setThinkingLevel(mode))
 
-    // Let the client know the current mode changed (keeps the dropdown in sync).
-    void this.conn.sessionUpdate({
-      sessionId: session.sessionId,
-      update: {
-        sessionUpdate: 'current_mode_update',
-        currentModeId: mode
-      }
+      // Let the client know the current mode changed (keeps the dropdown in sync).
+      void this.conn.sessionUpdate({
+        sessionId: session.sessionId,
+        update: {
+          sessionUpdate: 'current_mode_update',
+          currentModeId: mode
+        }
+      })
+
+      await runSessionRpc(session, proc => emitConfigOptionsUpdate(this.conn, session.sessionId, proc))
     })
-
-    await runSessionRpc(session, proc => emitConfigOptionsUpdate(this.conn, session.sessionId, proc))
 
     return {}
   }
@@ -1858,30 +2218,36 @@ export class PiAcpAgent implements ACPAgent {
       throw RequestError.invalidParams(`Expected string value for config option: ${configId}`)
     }
 
+    let mutationName: 'set_model' | 'set_thinking_level'
     if (configId === MODEL_CONFIG_ID) {
-      await runSessionRpc(session, proc => setSessionModel(proc, params.value))
+      mutationName = 'set_model'
     } else if (configId === THOUGHT_LEVEL_CONFIG_ID) {
       if (!isThinkingLevel(params.value)) {
         throw RequestError.invalidParams(`Unknown thinking level: ${params.value}`)
       }
-
-      const thinkingLevel = params.value
-      await runSessionRpc(session, proc => proc.setThinkingLevel(thinkingLevel))
-
-      void this.conn.sessionUpdate({
-        sessionId: session.sessionId,
-        update: {
-          sessionUpdate: 'current_mode_update',
-          currentModeId: params.value
-        }
-      })
+      mutationName = 'set_thinking_level'
     } else {
       throw RequestError.invalidParams(`Unknown config option: ${configId}`)
     }
 
-    const configOptions = await runSessionRpc(session, proc =>
-      emitConfigOptionsUpdate(this.conn, session.sessionId, proc)
-    )
+    const configOptions = await runSessionMutation(session, mutationName, async () => {
+      if (configId === MODEL_CONFIG_ID) {
+        await runSessionRpc(session, proc => setSessionModel(proc, params.value))
+      } else {
+        const thinkingLevel = params.value as ThinkingLevel
+        await runSessionRpc(session, proc => proc.setThinkingLevel(thinkingLevel))
+
+        void this.conn.sessionUpdate({
+          sessionId: session.sessionId,
+          update: {
+            sessionUpdate: 'current_mode_update',
+            currentModeId: params.value
+          }
+        })
+      }
+
+      return await runSessionRpc(session, proc => emitConfigOptionsUpdate(this.conn, session.sessionId, proc))
+    })
     return { configOptions }
   }
 }

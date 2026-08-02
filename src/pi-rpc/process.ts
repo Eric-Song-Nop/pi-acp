@@ -45,6 +45,14 @@ export const PI_RPC_PROCESS_TERMINATED_CODE = 'PI_RPC_PROCESS_TERMINATED' as con
 export const PI_RPC_PROCESS_CLEANUP_UNCONFIRMED_CODE = 'PI_RPC_PROCESS_CLEANUP_UNCONFIRMED' as const
 export const PI_RPC_HANDSHAKE_TIMEOUT_CODE = 'PI_RPC_HANDSHAKE_TIMEOUT' as const
 export const PI_RPC_HANDSHAKE_FAILED_CODE = 'PI_RPC_HANDSHAKE_FAILED' as const
+export const PI_RPC_EXECUTE_COMMAND_PROTOCOL_ERROR_CODE = 'PI_RPC_EXECUTE_COMMAND_PROTOCOL_ERROR' as const
+export const PI_RPC_EXECUTE_COMMAND_FAILURE_CODES = [
+  'COMMAND_INVALID_REQUEST',
+  'COMMAND_NOT_FOUND',
+  'COMMAND_BUSY',
+  'COMMAND_REQUEST_CONFLICT',
+  'COMMAND_HANDLER_FAILED'
+] as const
 export const PI_RPC_PROJECT_TRUST_POLICY = Object.freeze({
   policy: 'force-approve' as const,
   adapterOverride: 'approve' as const,
@@ -136,6 +144,120 @@ export function piRpcSpawnErrorData(error: PiRpcSpawnError): Record<string, unkn
   }
 }
 
+export type PiRpcExecuteCommandFailureCode = (typeof PI_RPC_EXECUTE_COMMAND_FAILURE_CODES)[number]
+
+export type PiRpcExecuteCommandSuccess = Readonly<{
+  success: true
+  data: Readonly<{
+    requestId: string
+    name: string
+    source: 'extension'
+    sourceInfo: Readonly<Record<string, unknown>>
+    disposition: 'handled'
+  }>
+}>
+
+export type PiRpcExecuteCommandFailure = Readonly<{
+  success: false
+  error: string
+  data: Readonly<{
+    requestId: string
+    name: string
+    disposition: 'rejected'
+    code: PiRpcExecuteCommandFailureCode
+  }>
+}>
+
+export type PiRpcExecuteCommandResult = PiRpcExecuteCommandSuccess | PiRpcExecuteCommandFailure
+
+export class PiRpcExecuteCommandProtocolError extends Error {
+  readonly code = PI_RPC_EXECUTE_COMMAND_PROTOCOL_ERROR_CODE
+  readonly data = Object.freeze({ code: PI_RPC_EXECUTE_COMMAND_PROTOCOL_ERROR_CODE })
+
+  constructor(message = 'Pi returned an invalid execute_command response.') {
+    super(message)
+    this.name = 'PiRpcExecuteCommandProtocolError'
+  }
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === 'object' && !Array.isArray(value)
+}
+
+function invalidExecuteCommandResponse(): never {
+  throw new PiRpcExecuteCommandProtocolError()
+}
+
+function hasExactKeys(value: Record<string, unknown>, keys: readonly string[]): boolean {
+  const actual = Object.keys(value)
+  return actual.length === keys.length && keys.every(key => Object.hasOwn(value, key))
+}
+
+export function validatePiRpcExecuteCommandResponse(
+  response: unknown,
+  requestId: string,
+  name: string
+): PiRpcExecuteCommandResult {
+  if (!isRecord(response)) invalidExecuteCommandResponse()
+  if (
+    response.type !== 'response' ||
+    response.id !== requestId ||
+    response.command !== 'execute_command' ||
+    typeof response.success !== 'boolean' ||
+    !isRecord(response.data)
+  ) {
+    invalidExecuteCommandResponse()
+  }
+
+  const data = response.data
+  if (data.requestId !== requestId || data.name !== name) invalidExecuteCommandResponse()
+
+  if (response.success) {
+    if (
+      !hasExactKeys(data, ['requestId', 'name', 'source', 'sourceInfo', 'disposition']) ||
+      response.error !== undefined ||
+      data.source !== 'extension' ||
+      data.disposition !== 'handled' ||
+      !isRecord(data.sourceInfo) ||
+      Object.keys(data.sourceInfo).length !== 0
+    ) {
+      invalidExecuteCommandResponse()
+    }
+    return Object.freeze({
+      success: true,
+      data: Object.freeze({
+        requestId,
+        name,
+        source: 'extension',
+        sourceInfo: Object.freeze({}),
+        disposition: 'handled'
+      })
+    })
+  }
+
+  if (
+    !hasExactKeys(data, ['requestId', 'name', 'disposition', 'code']) ||
+    typeof response.error !== 'string' ||
+    response.error.trim().length === 0 ||
+    data.disposition !== 'rejected' ||
+    typeof data.code !== 'string' ||
+    !(PI_RPC_EXECUTE_COMMAND_FAILURE_CODES as readonly string[]).includes(data.code)
+  ) {
+    invalidExecuteCommandResponse()
+  }
+
+  return Object.freeze({
+    success: false,
+    error: response.error,
+    data: Object.freeze({
+      requestId,
+      name,
+      disposition: 'rejected',
+      code: data.code as PiRpcExecuteCommandFailureCode
+    })
+  })
+}
+
 const ESC = String.fromCharCode(0x1b)
 const CSI = String.fromCharCode(0x9b)
 
@@ -175,6 +297,7 @@ type PiRpcCommand =
   | { type: 'get_messages'; id?: string }
   // Commands
   | { type: 'get_commands'; id?: string }
+  | { type: 'execute_command'; id?: string; name: string; args: string }
 
 type PiRpcResponse = {
   type: 'response'
@@ -214,7 +337,14 @@ class PiRpcHandshakeMissingState extends Error {}
 
 export class PiRpcProcess {
   private readonly child: ChildProcessWithoutNullStreams
-  private readonly pending = new Map<string, { resolve: (v: PiRpcResponse) => void; reject: (e: unknown) => void }>()
+  private readonly pending = new Map<
+    string,
+    {
+      resolve: (v: PiRpcResponse) => void
+      reject: (e: unknown) => void
+      accepts: (response: unknown) => boolean
+    }
+  >()
   private eventHandlers: Array<(ev: PiRpcEvent) => void> = []
   private readonly preludeLines: string[] = []
   private readonly startupDiagnosticCapture: PiStartupDiagnosticCapture
@@ -556,7 +686,7 @@ export class PiRpcProcess {
       const id = typeof msg.id === 'string' ? msg.id : undefined
       if (id) {
         const pending = this.pending.get(id)
-        if (pending) {
+        if (pending?.accepts(msg)) {
           this.pending.delete(id)
           pending.resolve(msg as PiRpcResponse)
           return !this.terminalTriggered
@@ -597,6 +727,14 @@ export class PiRpcProcess {
   /** Exact successful get_state captured by spawn(); no caller can replace it. */
   getStartupHandshakeState(): unknown | undefined {
     return this.startupHandshakeSucceeded ? this.startupHandshakeState : undefined
+  }
+
+  supportsExecuteCommand(): boolean {
+    const state = this.getStartupHandshakeState() as
+      | { rpcCapabilities?: { executeCommand?: unknown } }
+      | null
+      | undefined
+    return state?.rpcCapabilities?.executeCommand === 1
   }
 
   async prompt(message: string, images: unknown[] = []): Promise<void> {
@@ -688,24 +826,46 @@ export class PiRpcProcess {
     return res.data
   }
 
+  async executeCommand(requestId: string, name: string, args: string): Promise<PiRpcExecuteCommandResult> {
+    if (!requestId || !name || typeof args !== 'string') {
+      throw new PiRpcExecuteCommandProtocolError('Invalid execute_command request identity or arguments.')
+    }
+    const response = await this.request({ type: 'execute_command', name, args }, requestId, candidate => {
+      try {
+        validatePiRpcExecuteCommandResponse(candidate, requestId, name)
+        return true
+      } catch {
+        return false
+      }
+    })
+    return validatePiRpcExecuteCommandResponse(response, requestId, name)
+  }
+
   async sendExtensionUiResponse(response: PiExtensionUiResponse): Promise<void> {
     await this.writeLine(`${JSON.stringify({ type: 'extension_ui_response', ...response })}\n`)
   }
 
-  private request(cmd: PiRpcCommand): Promise<PiRpcResponse> {
+  private request(
+    cmd: PiRpcCommand,
+    requestId?: string,
+    accepts: (response: unknown) => boolean = () => true
+  ): Promise<PiRpcResponse> {
     if (this.terminalTriggered) {
       return this.terminalPromise!.then(error => {
         throw error
       })
     }
 
-    const id = crypto.randomUUID()
+    const id = requestId ?? crypto.randomUUID()
+    if (this.pending.has(id)) {
+      return Promise.reject(new PiRpcExecuteCommandProtocolError('Duplicate Pi RPC request identity.'))
+    }
     const withId = { ...cmd, id }
 
     const line = `${JSON.stringify(withId)}\n`
 
     return new Promise<PiRpcResponse>((resolve, reject) => {
-      this.pending.set(id, { resolve, reject })
+      this.pending.set(id, { resolve, reject, accepts })
 
       void this.writeLine(line).catch(error => {
         // The terminal publisher normally rejects every entry together. The
