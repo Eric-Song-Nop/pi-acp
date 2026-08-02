@@ -1111,17 +1111,23 @@ uncorrelated `extension_error`。RPC input handler 当前并发 dispatch，因�
 fence 必须在任何 `await` 前同步 reserve：同一 active ID 拒绝为
 `COMMAND_REQUEST_CONFLICT`，其它 ID 拒绝为 `COMMAND_BUSY`，busy request 不 queue。
 
-Pi 以 public `extensionRunner.getCommand()`、`createCommandContext()` 与 session idle/event
-API direct invoke handler exactly once；无需修改 `AgentSession` 或 `ExtensionRunner`
-production code。lost response/transport failure 后绝不 replay，结果按 indeterminate 处理。
-v1 不增加 native per-command cancel；若 ACP cancel/timeout 在 execute write 后获胜，adapter
-必须 stop exact child、确认 cleanup、返回 cancelled，只有下一条 fresh request 可恢复。
-request-bound response 是唯一 completion authority。
+Pi 以 public `extensionRunner.getCommand()`、`createCommandContext()` direct invoke handler
+exactly once。top-level `pi.sendUserMessage()`/triggering `pi.sendMessage()` 是
+fire-and-forget；async `before_agent_start` 期间 `isIdle` 仍可能为 true，因此 patch 必须在
+`AgentSession` 增加最小 command-scoped pending extension-turn observation：在 action 发起时
+同步登记属于当前 command 的 promise，execute path 等 handler 与这些已登记 turn 全部
+settled 后才分类，不能使用 handler return 后的一次 `isIdle` snapshot。handler 已返回后
+由 timer 等另行发起的 action 不属于该 invocation。无需修改 `ExtensionRunner`。lost
+response/transport failure 后绝不 replay，结果按 indeterminate 处理。v1 不增加 native
+per-command cancel；若 ACP cancel/timeout 在 execute write 后获胜，adapter 必须 stop exact
+child、确认 cleanup、返回 cancelled，只有下一条 fresh request 可恢复。request-bound
+response 是唯一 completion authority。
 
 - [ ] tracker/issue 与 Pi docs/types 对 capability、wire schema、identity、disposition、failure
       codes、ordering、busy、cancel/no-replay 语义完全一致。
 - [ ] fork branch 精确基于 `845d6ff1…`，minimal production diff 仅触及 RPC
-      types/mode/client/docs 与新 RPC tests，不混入 mainline drift。
+      types/mode/client、`AgentSession` pending-turn observation、docs 与新 RPC tests，不混入
+      mainline drift。
 - [ ] Pi tests 证明 capability、byte-exact args、exact source/name、handler once、notify-before-
       response、provider zero、busy/conflict/not-found/throw、agent-run-after-settled 与 unchanged
       generic prompt behavior。
@@ -1133,11 +1139,11 @@ request-bound response 是唯一 completion authority。
 
 fork [issue #25](https://github.com/Eric-Song-Nop/pi-acp/issues/25) 是 canonical contract。
 最小 Pi patch surface 为 `packages/coding-agent/src/modes/rpc/rpc-types.ts`、
-`rpc-mode.ts`、`rpc-client.ts`、`packages/coding-agent/docs/rpc.md` 与新
-`packages/coding-agent/test/rpc-execute-command.test.ts`。只有 upstream tagged release
-提供等价 wire/terminal semantics、通过同一 fixture matrix 且 pi-acp pin 该 release 后，
-才能删除 patch；upstream merge 本身不够。rollback 是关闭 preview flag、恢复 stock Pi
-acquisition，且不 recapture C0.7。
+`rpc-mode.ts`、`rpc-client.ts`、`packages/coding-agent/src/core/agent-session.ts`、
+`packages/coding-agent/docs/rpc.md` 与 focused tests。只有 upstream tagged release 提供等价
+wire/terminal semantics、通过同一 fixture matrix 且 pi-acp pin 该 release 后，才能删除
+patch；upstream merge 本身不够。rollback 是关闭 preview flag、恢复 stock Pi acquisition，
+且不 recapture C0.7。
 
 ### M2 — Command Catalog
 
