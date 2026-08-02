@@ -418,7 +418,7 @@ TOCTOU hardening，不是 hostile-child executed-code attestation。
 - [x] `C0.7-XF01` / upstream `X-01`：真实 Pi receipt 证明 fixture extension command 已注册，但 ACP 目录只公布 8 个 adapter commands；strict client 在任何 `session/prompt` 写入前以 `CommandNotAdvertisedError` 拒绝。
 - [x] `C0.7-XF02` / fork [issue #6](https://github.com/Eric-Song-Nop/pi-acp/issues/6)：`projectTrusted=false` 且项目 prompt 未公布时，adapter 仍提前读取/展开 `/poison`，Pi session 保存 synthetic canary 并向 configured loopback provider 发出 1 次 request。
 - [x] `C0.7-XF03` / upstream `X-03`：raw `/fixture-state` 收到 `Pi ACP fixture loaded`，零 provider request，但 owning `session/prompt` 在 `1500ms` hard timeout 前无 response。
-- [x] 三个 case 都是独立正常运行的 `xfail(issue)` 契约，不使用 skip/todo；修复导致 unexpected pass，必须改成 positive assertion，不能刷新 snapshot 掩盖修复。
+- [x] `C0.7-XF01` 是唯一仍执行的 `xfail(issue)` 契约，不使用 skip/todo；修复导致 unexpected pass，必须改成 positive assertion，不能刷新 snapshot 掩盖修复。`C0.7-XF02` 与 `C0.7-XF03` 分别由 C1.6 trust-all positive assertion 与 C3.4 patched/pinned Pi state-only positive proof 取代 live replay，只保留 explicit historical artifact assertion。
 - [x] checked-in ACP transcript 使用 canonical LF NDJSON、只允许 `cwd`/`sessionId` 的 exact root/session substitution、递归 key order、完整 wire order 与最终 process exit；manifest 绑定 runtime/capture commit、Pi/ACP package-lock + source Git + clean-`npm ci` own-package tree、raw/strict client sources、两份 fixture sources、Node/platform/arch、owner、recheck trigger、capture bounds、configured loopback count 和 artifact SHA-256。
 - [x] loopback listener 在 HTTP handler 接受 request 时同步加入唯一 observation，再将同一记录 exactly-once terminalize 为 `end` / `timeout` / `aborted` / `error`；XF02 只接受 completed `end` body。completed POST 503 与 incomplete POST handler-owned 408 controls 在 Node `26.5.0` / exact `22.19.0` 都证明 partial accepted request 不会从零计数证据消失。
 - [x] normal tests 不改写 evidence；bounded lstat → `O_NOFOLLOW` open → fstat/path identity → digest/canonical parse 接受 fresh Git `0644`，但拒绝 group/world write。credential signatures、24/32-hex nonce、UUID、absolute path、loopback host/port、XF02 canary（含 ordered text-chunk reconstruction）、reserved-token placement、leaf/ancestor symlink、hardlink、非 canonical bytes、malicious historical orphan、CAS/active/stale lock、crash temp/link-before-unlink 与 live-reader retry 都有回归。
@@ -453,6 +453,10 @@ manifest SHA-256 为
 | `C0.7-XF01` | extension 已注册但 strict ACP 不可发现             | `C2.3`                 | `f6514a79c2e6d5ed83699bf7bd6cc10bb4624f9ddc72a18c355dff1c45562f84` |
 | `C0.7-XF02` | untrusted project prompt 被展开并提交模型          | `C1.6`, `C2.2`, `C5.8` | `8e8a53133dbf3d3d3eb2bcf65ff7da8744ef8939930dbf781f715282345edc3d` |
 | `C0.7-XF03` | state-only output 到达，prompt 持续 pending 1500ms | `C3.4`                 | `14fab059885e0df780ea6580848a1bbbc9730534aa29587a1269f94091b104d3` |
+
+从 C3.4 起，`C0.7-XF03` 的 current-runtime authority 是 patched/pinned Pi
+state-only positive completion proof；上表只记录 immutable historical failure，
+不再触发 live expected-failure replay，也不改写 manifest 或 artifact bytes。
 
 证据：
 [implementation issue #7](https://github.com/Eric-Song-Nop/pi-acp/issues/7)、

@@ -138,8 +138,10 @@ an immutable provenance pin and target-window endpoint, not a C0.3 executed
 compatibility case. The positive agent-turn fixture sends one fixed user message
 to one deterministic loopback provider response, asserts one bounded provider
 request, the exact ACP text chunk and `end_turn`, and clean process/socket
-teardown without a real model account. The load-only and C0.7 immutable-failure
-cases run in the same denied execution boundary.
+teardown without a real model account. The load-only case and sole live C0.7
+`C0.7-XF01` expected-failure replay run in the same denied execution boundary.
+The immutable `C0.7-XF02` and `C0.7-XF03` artifacts are historical-only and do
+not execute a current-runtime replay.
 
 ## C0.7 immutable failure baseline
 
@@ -169,6 +171,11 @@ history. On 2026-08-02, `DEC-008` intentionally selected forced `--approve` for
 every ACP project, so the live checkpoint is superseded by a positive trust-all
 policy assertion in `C1.6`; the frozen artifact is not recaptured or rewritten.
 
+`C0.7-XF03` likewise remains immutable historical evidence of the original
+state-only timeout. C3.4's patched/pinned Pi positive state-only completion
+proof supersedes its live expected-failure replay; the frozen manifest and
+artifact are not recaptured or rewritten.
+
 The C1.6 client surface is limited to a fixed post-child-start warning in
 `session/new` and explicit `session/load` `_meta.piAcp.startupInfo`, including
 when `quietStartup=true`. The warning discloses an approval that has already
@@ -177,9 +184,11 @@ replacement child without repeating the same logical session's warning. C1.6
 does not add runtime inventory or command-source metadata; those remain deferred
 to the catalog/source checkpoints and future upstream capability work.
 
-These are executable `xfail(issue)` contracts, not skips. An unexpected fix is
-an error until the case is converted to a positive assertion. Checked-in
-artifacts contain canonical ACP wire records and exact allowlisted metadata;
+`C0.7-XF01` remains the sole executable `xfail(issue)` contract, not a skip. An
+unexpected fix is an error until that case is converted to a positive
+assertion. `C0.7-XF02` and `C0.7-XF03` are explicit historical assertions whose
+current behavior is covered by positive C1.6 and C3.4 proofs respectively.
+Checked-in artifacts contain canonical ACP wire records and exact allowlisted metadata;
 raw Pi session JSONL, provider bodies, receipts, stderr, and environment dumps
 are not persisted. The verifier rejects the exact XF02 canary (including
 ordered text-chunk reconstruction), credential signatures, UUIDs, 24/32-hex

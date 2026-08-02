@@ -16,8 +16,9 @@ import {
 
 const TEST_TIMEOUT_MS = 45_000
 const CASE_IDS: readonly BaselineCaseId[] = ['C0.7-XF01', 'C0.7-XF02', 'C0.7-XF03']
-const LIVE_REPLAY_CASE_IDS: readonly BaselineCaseId[] = ['C0.7-XF01', 'C0.7-XF03']
+const LIVE_REPLAY_CASE_IDS: readonly BaselineCaseId[] = ['C0.7-XF01']
 const HISTORICAL_NO_APPROVE_CASE_ID: BaselineCaseId = 'C0.7-XF02'
+const HISTORICAL_STATE_ONLY_CASE_ID: BaselineCaseId = 'C0.7-XF03'
 
 test('C0.7 committed failure transcripts are canonical, content-addressed, and protected', async () => {
   const manifest = await verifyCommittedTranscripts()
@@ -37,6 +38,28 @@ test('C0.7-XF02 remains immutable historical no-approve evidence under the curre
   assert.equal(expected.expectedFailure.projectTrusted, false)
   assert.equal(expected.expectedFailure.catalogHasCommand, false)
   assert.equal(expected.expectedFailure.configuredLoopbackRequests, 1)
+  await readVerifiedArtifact(C0_7_TRANSCRIPT_ROOT, expected)
+})
+
+test('C0.7-XF03 remains immutable historical timeout evidence after C3.4 positive completion supersedes live replay', async () => {
+  const { manifest } = await readVerifiedManifest()
+  const expected = manifest.cases.find(item => item.id === HISTORICAL_STATE_ONLY_CASE_ID)
+  assert.ok(expected)
+  assert.equal(expected.expectedFailure.kind, 'operation_timeout')
+  assert.equal(expected.expectedFailure.operation, 'session/prompt')
+  assert.equal(expected.expectedFailure.timeoutMs, 1500)
+  assert.equal(expected.expectedFailure.remainedPendingThroughDeadline, true)
+  assert.equal(expected.expectedFailure.outboundPromptCount, 1)
+  assert.equal(expected.expectedFailure.acpResponseCount, 0)
+  assert.equal(expected.expectedFailure.configuredLoopbackRequests, 0)
+  assert.deepEqual(expected.expectedFailure.notification, {
+    afterPrompt: true,
+    contentType: 'text',
+    level: 'info',
+    sessionUpdate: 'agent_message_chunk',
+    text: 'Pi ACP fixture loaded'
+  })
+  assert.deepEqual(expected.expectedFailure.processExit, { code: 0, signal: null })
   await readVerifiedArtifact(C0_7_TRANSCRIPT_ROOT, expected)
 })
 

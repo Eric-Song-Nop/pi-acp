@@ -1,6 +1,7 @@
 import { createHash, randomBytes } from 'node:crypto'
 import { constants, type Stats } from 'node:fs'
 import {
+  access,
   chmod,
   copyFile,
   lstat,
@@ -30,6 +31,7 @@ export const C1_4_LF_JSONL_RESPONSE_TEXT = 'BEFORE\u2028MIDDLE\u2029AFTER'
 export const C1_4_LF_JSONL_LIVENESS_RESPONSE_TEXT = 'C1.4 post-turn liveness response'
 export const C1_4_LF_JSONL_USER_TEXT = 'Return the deterministic C1.4 LF JSONL response.'
 export const C1_4_LF_JSONL_LIVENESS_USER_TEXT = 'Return the deterministic C1.4 liveness response.'
+export const C3_4_FIXTURE_HANG_SENTINEL = 'hang-after-receipt'
 const LOOPBACK_CLOSE_TIMEOUT_MS = 1_000
 const LOOPBACK_BODY_TIMEOUT_MS = 2_000
 export const MAX_LOOPBACK_BODY_BYTES = 64 * 1024
@@ -166,6 +168,44 @@ export type RealPiC1_3SessionStartReceipt = {
   sessionFile: string | null
 }
 
+export type RealPiC3_4SessionStartReceipt = {
+  schemaVersion: 1
+  checkpoint: 'C3.4'
+  phase: 'session_start'
+  nonce: string
+  piVersion: '0.83.0'
+  piPid: number
+  sessionId: string
+  sessionFile: string | null
+}
+
+export type RealPiC3_4InvocationReceipt = {
+  schemaVersion: 1
+  checkpoint: 'C3.4'
+  phase: 'command_invocation'
+  nonce: string
+  piVersion: '0.83.0'
+  piPid: number
+  sessionId: string
+  sessionFile: string | null
+  invocationCount: number
+  name: 'fixture-state'
+  args: string
+  argsUtf8ByteLength: number
+  argsSha256: string
+  argsBase64: string
+}
+
+export type RealPiC3_4ShutdownReceipt = {
+  schemaVersion: 1
+  checkpoint: 'C3.4'
+  phase: 'session_shutdown'
+  reason: 'quit'
+  nonce: string
+  piVersion: '0.83.0'
+  piPid: number
+}
+
 export type VerifiedReceipt<T> = {
   receipt: T
   stat: Stats
@@ -186,9 +226,11 @@ export type RealPiFixtureOptions = {
   lfJsonlResponse?: true
   hardDeadlineMs?: number
   clientShutdownTimeoutMs?: number
-  transcriptCheckpoint?: 'C0.6' | 'C0.7' | 'C1.1' | 'C1.2' | 'C1.3' | 'C1.4' | 'C1.5' | 'C2.2'
+  transcriptCheckpoint?: 'C0.6' | 'C0.7' | 'C1.1' | 'C1.2' | 'C1.3' | 'C1.4' | 'C1.5' | 'C2.2' | 'C3.4'
   transcriptCaseId?: string
   transcriptMetadata?: AcpTranscriptMetadata
+  fixtureMode?: 'c3.4-execute-command'
+  patchedPiPackageRoot?: string
   projectPrompts?: readonly {
     name: string
     contents: string
@@ -209,8 +251,10 @@ const repositoryRoot = fileURLToPath(new URL('../../', import.meta.url))
 const agentEntryPath = join(repositoryRoot, 'src', 'index.ts')
 const tsxImportPath = fileURLToPath(import.meta.resolve('tsx'))
 const piPackageRootPath = join(repositoryRoot, 'node_modules', '@earendil-works', 'pi-coding-agent')
-const piCliPath = join(piPackageRootPath, 'dist', 'cli.js')
 const globalExtensionSourcePath = fileURLToPath(new URL('../fixtures/pi-extension-pack/index.ts', import.meta.url))
+const c3_4ExecuteCommandExtensionSourcePath = fileURLToPath(
+  new URL('../fixtures/pi-extension-pack/c3.4-execute-command/index.ts', import.meta.url)
+)
 const failingGlobalExtensionSourcePath = fileURLToPath(
   new URL('../fixtures/pi-extension-pack/failing-load/index.ts', import.meta.url)
 )
@@ -410,6 +454,8 @@ function isolatedEnvironment(paths: {
   baseUrl: string
   piPackageRoot: string
   piCommand: string
+  piNode: string
+  fixtureStatePreview: boolean
 }): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = Object.create(null)
   Object.assign(env, {
@@ -436,7 +482,7 @@ function isolatedEnvironment(paths: {
     PI_CODING_AGENT_DIR: paths.agentDir,
     PI_CODING_AGENT_SESSION_DIR: paths.sessionDir,
     PI_ACP_PI_COMMAND: paths.piCommand,
-    PI_ACP_FIXTURE_NODE: process.execPath,
+    PI_ACP_FIXTURE_NODE: paths.piNode,
     PI_ACP_FIXTURE_RECEIPT_DIR: paths.receiptDir,
     PI_ACP_FIXTURE_NONCE: paths.nonce,
     PI_ACP_FIXTURE_API_KEY: `pi-acp-fixture-${paths.nonce}`,
@@ -444,6 +490,7 @@ function isolatedEnvironment(paths: {
     PI_ACP_FIXTURE_FORBIDDEN_ENV_NAMES: JSON.stringify(FORBIDDEN_REAL_PI_ENV_NAMES),
     PI_ACP_PROJECT_CANARY_PATH: paths.projectCanaryPath
   })
+  if (paths.fixtureStatePreview) env.PI_ACP_EXPERIMENTAL_FIXTURE_STATE = '1'
 
   for (const name of ['SYSTEMROOT', 'WINDIR', 'ComSpec', 'PATHEXT']) {
     if (process.env[name] !== undefined) env[name] = process.env[name]
@@ -451,11 +498,19 @@ function isolatedEnvironment(paths: {
   return env
 }
 
-function piWrapperSource(): string {
+function posixShellQuote(value: string): string {
+  return `'${value.replaceAll("'", `'"'"'`)}'`
+}
+
+function windowsCommandQuote(value: string): string {
+  return `"${value.replaceAll('"', '""')}"`
+}
+
+function piWrapperSource(nodePath: string, cliPath: string): string {
   if (process.platform === 'win32') {
-    return '@"%PI_ACP_FIXTURE_NODE%" "%PI_PACKAGE_DIR%\\dist\\cli.js" %*\r\n'
+    return `@${windowsCommandQuote(nodePath)} ${windowsCommandQuote(cliPath)} %*\r\n`
   }
-  return '#!/bin/sh\nexec "$PI_ACP_FIXTURE_NODE" "$PI_PACKAGE_DIR/dist/cli.js" "$@"\n'
+  return `#!/bin/sh\nexec ${posixShellQuote(nodePath)} ${posixShellQuote(cliPath)} "$@"\n`
 }
 
 function validateProjectPrompts(
@@ -480,13 +535,26 @@ function validateProjectPrompts(
 
 export async function startRealPiFixture(options: RealPiFixtureOptions = {}) {
   const projectPrompts = validateProjectPrompts(options.projectPrompts)
+  const c3_4ExecuteCommand = options.fixtureMode === 'c3.4-execute-command'
+  if (options.patchedPiPackageRoot !== undefined && !c3_4ExecuteCommand) {
+    throw new TypeError('patched Pi package root is accepted only by the C3.4 execute-command fixture')
+  }
+  if (c3_4ExecuteCommand && !options.patchedPiPackageRoot) {
+    throw new TypeError('C3.4 execute-command fixture requires a patched Pi package root')
+  }
+  if (options.patchedPiPackageRoot !== undefined && !isAbsolute(options.patchedPiPackageRoot)) {
+    throw new TypeError('patched Pi package root must be absolute')
+  }
   const extensionLoadFailure = options.extensionLoadFailure === true
   const runtimeExtensionError = options.runtimeExtensionError === true
   const childTermination = options.childTermination === true
   const lfJsonlResponse = options.lfJsonlResponse === true
-  if ([extensionLoadFailure, runtimeExtensionError, childTermination, lfJsonlResponse].filter(Boolean).length > 1) {
+  if (
+    [extensionLoadFailure, runtimeExtensionError, childTermination, lfJsonlResponse, c3_4ExecuteCommand].filter(Boolean)
+      .length > 1
+  ) {
     throw new TypeError(
-      'real Pi fixture load failure, runtime error, child termination, and LF JSONL response modes are mutually exclusive'
+      'real Pi fixture load failure, runtime error, child termination, LF JSONL response, and C3.4 modes are mutually exclusive'
     )
   }
   const hardDeadlineMs = options.hardDeadlineMs
@@ -719,6 +787,9 @@ export async function startRealPiFixture(options: RealPiFixtureOptions = {}) {
     const sessionMapPath = join(homeDir, '.pi', 'pi-acp', 'session-map.json')
     const piCommand = join(rootDir, process.platform === 'win32' ? 'pi-fixture.cmd' : 'pi-fixture')
     const baseUrl = `http://127.0.0.1:${String(address.port)}/v1`
+    const selectedExtensionSourcePath = c3_4ExecuteCommand
+      ? c3_4ExecuteCommandExtensionSourcePath
+      : globalExtensionSourcePath
 
     await Promise.all(
       [
@@ -744,11 +815,15 @@ export async function startRealPiFixture(options: RealPiFixtureOptions = {}) {
 
     const repositoryRealpath = await realpath(repositoryRoot)
     const nodeModulesRoot = await realpath(join(repositoryRoot, 'node_modules'))
-    const piPackageRoot = await realpath(piPackageRootPath)
-    const expectedCliRealpath = await realpath(piCliPath)
+    const selectedPiPackageRootPath = c3_4ExecuteCommand ? options.patchedPiPackageRoot! : piPackageRootPath
+    const piPackageRoot = await realpath(selectedPiPackageRootPath)
+    const expectedCliRealpath = await realpath(join(piPackageRoot, 'dist', 'cli.js'))
+    const expectedNodeRealpath = await realpath(process.execPath)
     assertContainedPath(repositoryRealpath, nodeModulesRoot, 'C0.6 node_modules')
-    assertContainedPath(nodeModulesRoot, piPackageRoot, 'C0.6 Pi package')
+    if (!c3_4ExecuteCommand) assertContainedPath(nodeModulesRoot, piPackageRoot, 'C0.6 Pi package')
     assertContainedPath(piPackageRoot, expectedCliRealpath, 'C0.6 Pi CLI')
+    await access(expectedNodeRealpath, constants.X_OK)
+    await access(expectedCliRealpath, constants.X_OK)
     const packageMetadata = JSON.parse(await readFile(join(piPackageRoot, 'package.json'), 'utf8')) as {
       name?: unknown
       version?: unknown
@@ -783,12 +858,12 @@ export async function startRealPiFixture(options: RealPiFixtureOptions = {}) {
     }
 
     await Promise.all([
-      copyFile(globalExtensionSourcePath, extensionPath),
+      copyFile(selectedExtensionSourcePath, extensionPath),
       ...(extensionLoadFailure ? [copyFile(failingGlobalExtensionSourcePath, failingExtensionPath)] : []),
       ...(runtimeExtensionError ? [copyFile(runtimeErrorExtensionSourcePath, runtimeErrorExtensionPath)] : []),
       ...(childTermination ? [copyFile(childTerminationExtensionSourcePath, childTerminationExtensionPath)] : []),
       copyFile(projectCanarySourcePath, projectExtensionPath),
-      writeFile(piCommand, piWrapperSource(), {
+      writeFile(piCommand, piWrapperSource(expectedNodeRealpath, expectedCliRealpath), {
         encoding: 'utf8',
         flag: 'wx',
         mode: 0o700
@@ -812,7 +887,7 @@ export async function startRealPiFixture(options: RealPiFixtureOptions = {}) {
       )
     ])
 
-    const extensionSource = await readFile(globalExtensionSourcePath)
+    const extensionSource = await readFile(selectedExtensionSourcePath)
     const expectedExtensionSha256 = createHash('sha256').update(extensionSource).digest('hex')
     const failingExtensionSource = extensionLoadFailure ? await readFile(failingGlobalExtensionSourcePath) : undefined
     const expectedFailingExtensionSha256 = failingExtensionSource
@@ -848,6 +923,7 @@ export async function startRealPiFixture(options: RealPiFixtureOptions = {}) {
     assertReceiptDirectoryStat(receiptBoundary.rootDir, receiptBoundary.rootStat)
     assertReceiptDirectoryStat(receiptBoundary.receiptDir, receiptBoundary.receiptDirStat)
     assertContainedPath(receiptBoundary.rootDir, receiptBoundary.receiptDir, 'C0.6 receipt directory')
+    const fixtureId = c3_4ExecuteCommand ? 'pi-extension-pack-c3.4-execute-command' : 'pi-extension-pack-v1'
 
     const environment = isolatedEnvironment({
       homeDir,
@@ -864,7 +940,9 @@ export async function startRealPiFixture(options: RealPiFixtureOptions = {}) {
       nonce,
       baseUrl,
       piPackageRoot,
-      piCommand
+      piCommand,
+      piNode: expectedNodeRealpath,
+      fixtureStatePreview: c3_4ExecuteCommand
     })
     client = new AcpProcessClient({
       command: process.execPath,
@@ -879,11 +957,13 @@ export async function startRealPiFixture(options: RealPiFixtureOptions = {}) {
       transcriptMetadata: {
         ...(options.transcriptMetadata ?? {}),
         planId: 'PACP-CMD-2026-01',
-        checkpoint: options.transcriptCheckpoint ?? 'C0.6',
-        fixtureId: 'pi-extension-pack-v1',
+        checkpoint: options.transcriptCheckpoint ?? (c3_4ExecuteCommand ? 'C3.4' : 'C0.6'),
+        fixtureId,
         fixtureSources: [
           {
-            path: 'test/fixtures/pi-extension-pack/index.ts',
+            path: c3_4ExecuteCommand
+              ? 'test/fixtures/pi-extension-pack/c3.4-execute-command/index.ts'
+              : 'test/fixtures/pi-extension-pack/index.ts',
             sha256: expectedExtensionSha256
           },
           ...(expectedFailingExtensionSha256
@@ -939,8 +1019,10 @@ export async function startRealPiFixture(options: RealPiFixtureOptions = {}) {
       trustPath,
       authPath,
       sessionMapPath,
+      piCommandPath: piCommand,
       nonce,
       expectedCliRealpath,
+      expectedNodeRealpath,
       expectedExtensionRealpath,
       expectedExtensionSha256,
       ...(runtimeExtensionError
@@ -988,6 +1070,30 @@ export async function startRealPiFixture(options: RealPiFixtureOptions = {}) {
         names.sort()
         return await Promise.all(
           names.map(name => readVerifiedReceipt<RealPiC1_3SessionStartReceipt>(join(receiptDir, name), receiptBoundary))
+        )
+      },
+      async readC3_4SessionStartReceipts(): Promise<VerifiedReceipt<RealPiC3_4SessionStartReceipt>[]> {
+        const prefix = `pi-acp-c3.4-session-start-${nonce}-`
+        const names = (await readdir(receiptDir)).filter(name => name.startsWith(prefix) && name.endsWith('.json'))
+        names.sort()
+        return await Promise.all(
+          names.map(name => readVerifiedReceipt<RealPiC3_4SessionStartReceipt>(join(receiptDir, name), receiptBoundary))
+        )
+      },
+      async readC3_4InvocationReceipts(): Promise<VerifiedReceipt<RealPiC3_4InvocationReceipt>[]> {
+        const prefix = `pi-acp-c3.4-invocation-${nonce}-`
+        const names = (await readdir(receiptDir)).filter(name => name.startsWith(prefix) && name.endsWith('.json'))
+        names.sort()
+        return await Promise.all(
+          names.map(name => readVerifiedReceipt<RealPiC3_4InvocationReceipt>(join(receiptDir, name), receiptBoundary))
+        )
+      },
+      async readC3_4ShutdownReceipts(): Promise<VerifiedReceipt<RealPiC3_4ShutdownReceipt>[]> {
+        const prefix = `pi-acp-c3.4-shutdown-${nonce}-`
+        const names = (await readdir(receiptDir)).filter(name => name.startsWith(prefix) && name.endsWith('.json'))
+        names.sort()
+        return await Promise.all(
+          names.map(name => readVerifiedReceipt<RealPiC3_4ShutdownReceipt>(join(receiptDir, name), receiptBoundary))
         )
       },
       async readRegistrationReceipt(): Promise<VerifiedReceipt<RealPiFixtureReceipt>> {

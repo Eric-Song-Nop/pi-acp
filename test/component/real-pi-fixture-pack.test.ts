@@ -448,14 +448,14 @@ test(
 )
 
 test(
-  'C1.3 adapter shutdown fences abandoned prompt output while real Pi cleanup completes',
+  'C3.4 default-off /fixture-state refuses before extension execution and real Pi cleanup completes',
   { timeout: TEST_TIMEOUT_MS },
   async t => {
     const fixture = await startRealPiFixture({
       hardDeadlineMs: 20_000,
       clientShutdownTimeoutMs: 5_000,
-      transcriptCheckpoint: 'C1.3',
-      transcriptCaseId: 'C1.3-shutdown-egress-fence'
+      transcriptCheckpoint: 'C3.4',
+      transcriptCaseId: 'C3.4-default-off-fixture-state'
     })
     t.after(fixture.cleanup)
 
@@ -473,47 +473,45 @@ test(
     assert.ok(adapterPid)
     assert.equal(isProcessRunning(receipt.piPid), true)
 
-    const afterIndex = fixture.client.retainedSessionUpdateCount
-    const notified = fixture.client.waitForSessionUpdate(
-      notification =>
-        notification.sessionId === session.sessionId &&
-        notification.update.sessionUpdate === 'agent_message_chunk' &&
-        notification.update.content.type === 'text' &&
-        notification.update.content.text === 'Pi ACP fixture loaded',
-      { afterIndex, timeoutMs: 10_000 }
+    // C3.3 deliberately owns the exact preview command and refuses it while
+    // default-off. Patched positive plus post-write cancel/no-replay authority
+    // now lives in real-pi-fixture-state-preview.test.ts; this stock-Pi case
+    // retains the default-off/no-handler and real shutdown proof.
+    const response = await fixture.client.prompt(
+      {
+        sessionId: session.sessionId,
+        prompt: [{ type: 'text', text: `/${REAL_PI_FIXTURE_COMMAND_ID}` }]
+      },
+      { timeoutMs: 10_000 }
     )
-    let promptSettled = false
-    const promptOutcome = fixture.client
-      .prompt(
-        {
-          sessionId: session.sessionId,
-          prompt: [{ type: 'text', text: `/${REAL_PI_FIXTURE_COMMAND_ID}` }]
-        },
-        { timeoutMs: 15_000 }
-      )
-      .then(
-        value => {
-          promptSettled = true
-          return { status: 'resolved' as const, value }
-        },
-        error => {
-          promptSettled = true
-          return { status: 'rejected' as const, error }
-        }
-      )
-
-    const notification = await notified
-    assert.deepEqual(record(record(notification.update._meta).piAcp), {
-      notify: { level: 'info' }
+    assert.equal(response.stopReason, 'refusal')
+    const piAcp = record(record(response._meta).piAcp)
+    const execution = record(piAcp.executeCommand)
+    assert.equal(typeof execution.requestId, 'string')
+    assert.deepEqual(execution, {
+      requestId: execution.requestId,
+      name: REAL_PI_FIXTURE_COMMAND_ID,
+      disposition: 'rejected',
+      code: 'COMMAND_NOT_FOUND'
     })
-    await Promise.resolve()
-    assert.equal(promptSettled, false)
+    assert.deepEqual(record(piAcp.diagnostic), {
+      schemaVersion: 1,
+      code: 'COMMAND_NOT_FOUND',
+      phase: 'execution',
+      source: 'extension',
+      command: REAL_PI_FIXTURE_COMMAND_ID,
+      summary: 'The experimental /fixture-state preview is disabled; nothing was sent to Pi.',
+      truncated: false,
+      redacted: false
+    })
+    assert.deepEqual(record(piAcp.routing), {
+      promptForwardedToPi: false,
+      sentToModel: false
+    })
 
     const firstClose = fixture.client.close()
     assert.strictEqual(fixture.client.close(), firstClose)
-    const [exit, outcome] = await Promise.all([firstClose, promptOutcome])
-    assert.equal(outcome.status, 'rejected')
-    if (outcome.status === 'rejected') assert.ok(outcome.error instanceof Error)
+    const exit = await firstClose
     assert.equal(exit.code, 0)
     assert.equal(exit.signal, null)
     await fixture.assertWithinHardDeadline()
@@ -530,6 +528,28 @@ test(
     if (promptEntry.kind !== 'message') throw new Error('prompt transcript entry was not a message')
     const promptId = record(promptEntry.message).id
     assert.ok(typeof promptId === 'string' || typeof promptId === 'number' || promptId === null)
+    const catalogEntries = transcript.filter(entry => {
+      if (
+        entry.kind !== 'message' ||
+        entry.direction !== 'agent_to_client' ||
+        record(entry.message).method !== 'session/update'
+      ) {
+        return false
+      }
+      const update = record(record(record(entry.message).params).update)
+      return update.sessionUpdate === 'available_commands_update'
+    })
+    assert.equal(catalogEntries.length, 1)
+    const catalogEntry = catalogEntries[0]!
+    if (catalogEntry.kind !== 'message') throw new Error('catalog transcript entry was not a message')
+    const availableCommands = record(record(record(catalogEntry.message).params).update).availableCommands
+    assert.equal(Array.isArray(availableCommands), true)
+    if (!Array.isArray(availableCommands)) throw new Error('available commands were not an array')
+    assert.equal(
+      availableCommands.some(command => record(command).name === REAL_PI_FIXTURE_COMMAND_ID),
+      false
+    )
+
     const notificationEntries = transcript.filter(entry => {
       if (
         entry.kind !== 'message' ||
@@ -542,26 +562,17 @@ test(
       const content = record(update.content)
       return update.sessionUpdate === 'agent_message_chunk' && content.text === 'Pi ACP fixture loaded'
     })
-    assert.equal(notificationEntries.length, 1)
-    const notificationEntry = notificationEntries[0]!
-    assert.equal(notificationEntry.kind, 'message')
-    if (notificationEntry.kind === 'message') assert.ok(notificationEntry.seq > promptEntry.seq)
-
-    const postFenceMessages = transcript.filter(
-      entry =>
-        notificationEntry.kind === 'message' &&
-        entry.kind === 'message' &&
-        entry.direction === 'agent_to_client' &&
-        entry.seq > notificationEntry.seq
-    )
-    assert.deepEqual(postFenceMessages, [])
+    assert.equal(notificationEntries.length, 0)
 
     const promptResponses = transcript.filter(entry => {
       if (entry.kind !== 'message' || entry.direction !== 'agent_to_client') return false
       const message = record(entry.message)
       return message.id === promptId && (Object.hasOwn(message, 'result') || Object.hasOwn(message, 'error'))
     })
-    assert.equal(promptResponses.length, 0)
+    assert.equal(promptResponses.length, 1)
+    const promptResponse = promptResponses[0]!
+    if (promptResponse.kind !== 'message') throw new Error('prompt response transcript entry was not a message')
+    assert.deepEqual(record(promptResponse.message).result, response)
     assert.equal(fixture.requests.length, 0)
 
     const processExit = transcript.at(-1)
