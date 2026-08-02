@@ -1,9 +1,10 @@
 import { PROTOCOL_VERSION } from '@agentclientprotocol/sdk'
 import assert from 'node:assert/strict'
-import { lstat, mkdtemp, readFile, realpath, rename, rm, symlink, unlink } from 'node:fs/promises'
+import { lstat, mkdtemp, readFile, realpath, rename, rm, symlink, unlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, isAbsolute, join, relative, sep } from 'node:path'
 import test from 'node:test'
+import { PROJECT_TRUST_WARNING } from '../../src/acp/agent.js'
 import {
   FORBIDDEN_REAL_PI_ENV_NAMES,
   REAL_PI_FIXTURE_COMMAND_ID,
@@ -56,8 +57,68 @@ function record(value: unknown): Record<string, unknown> {
   return typeof value === 'object' && value !== null ? (value as Record<string, unknown>) : {}
 }
 
+function projectTrustWarningCount(
+  transcript: ReturnType<Awaited<ReturnType<typeof startRealPiFixture>>['client']['transcript']>
+): number {
+  return transcript.filter(entry => {
+    if (entry.kind !== 'message' || entry.direction !== 'agent_to_client') return false
+    const message = record(entry.message)
+    if (message.method !== 'session/update') return false
+    const update = record(record(message.params).update)
+    const content = record(update.content)
+    return (
+      update.sessionUpdate === 'agent_message_chunk' &&
+      content.type === 'text' &&
+      content.text === `${PROJECT_TRUST_WARNING}\n`
+    )
+  }).length
+}
+
+async function readProjectCanaryPids(path: string): Promise<number[]> {
+  const lines = (await readFile(path, 'utf8')).trim().split('\n')
+  const pids = lines.map(line => Number(line))
+  assert.equal(
+    pids.every(pid => Number.isInteger(pid) && pid > 0),
+    true
+  )
+  return pids
+}
+
+function assertProjectCanaryInvokedOncePerChild(actualPids: number[], expectedPids: number[]): void {
+  assert.equal(new Set(expectedPids).size, expectedPids.length)
+
+  const invocationCounts = new Map<number, number>()
+  for (const pid of actualPids) invocationCounts.set(pid, (invocationCounts.get(pid) ?? 0) + 1)
+
+  assert.equal(invocationCounts.size, expectedPids.length)
+  for (const pid of expectedPids)
+    assert.equal(invocationCounts.get(pid), 1, `project canary invocation count for ${pid}`)
+}
+
+async function materializeMappedSession(
+  fixture: Awaited<ReturnType<typeof startRealPiFixture>>,
+  sessionId: string
+): Promise<void> {
+  const sessionMap = JSON.parse(await readFile(fixture.sessionMapPath, 'utf8')) as {
+    sessions?: Record<string, { sessionFile?: unknown }>
+  }
+  const sessionFile = sessionMap.sessions?.[sessionId]?.sessionFile
+  assert.equal(typeof sessionFile, 'string')
+  await writeFile(
+    sessionFile as string,
+    `${JSON.stringify({
+      type: 'session',
+      version: 3,
+      id: sessionId,
+      timestamp: '2026-08-02T00:00:00.000Z',
+      cwd: fixture.cwd
+    })}\n`,
+    { encoding: 'utf8', flag: 'wx', mode: 0o600 }
+  )
+}
+
 test(
-  'C0.6 loads the pinned real Pi fixture pack without ambient trust, credentials, or model calls',
+  'C0.6 fixture pack records C1.6 forced project approval without ambient credentials or model calls',
   {
     timeout: TEST_TIMEOUT_MS
   },
@@ -155,7 +216,7 @@ test(
     assert.equal(receipt.offline, true)
     assert.equal(receipt.versionCheckDisabled, true)
     assert.equal(receipt.telemetryDisabled, true)
-    assert.equal(receipt.approveArgPresent, false)
+    assert.equal(receipt.approveArgPresent, true)
     assert.equal(receipt.extensionArgPresent, false)
     assert.deepEqual(receipt.forbiddenEnvPresent, [])
     const requiredEnvironmentKeys = [
@@ -177,7 +238,7 @@ test(
       receipt.environmentKeys.filter(name => !allowedEnvironmentKeys.has(name)),
       []
     )
-    assert.equal(receipt.projectTrusted, false)
+    assert.equal(receipt.projectTrusted, true)
     assert.deepEqual(receipt.registrations, {
       providers: [REAL_PI_FIXTURE_PROVIDER_ID],
       commands: [REAL_PI_FIXTURE_COMMAND_ID]
@@ -195,7 +256,7 @@ test(
     assert.equal(isProcessRunning(receipt.piPid), true)
     assert.equal(fixture.packageVersion, REAL_PI_VERSION)
     assert.deepEqual(fixture.requests, [])
-    await assertPathMissing(fixture.projectCanaryPath)
+    assertProjectCanaryInvokedOncePerChild(await readProjectCanaryPids(fixture.projectCanaryPath), [receipt.piPid])
     await assertPathMissing(fixture.trustPath)
     assert.equal(await readFile(fixture.authPath, 'utf8'), '{}\n')
 
@@ -275,6 +336,114 @@ test(
     assert.equal(serializedEvidence.includes(parentMarker), false)
     assert.equal(serializedEvidence.includes(`pi-acp-fixture-${fixture.nonce}`), false)
     assert.equal(serializedEvidence.includes('session/prompt'), false)
+  }
+)
+
+test(
+  'C1.6 reload and automatic recovery rerun the approved project canary once per Pi child without persisting trust',
+  { timeout: TEST_TIMEOUT_MS },
+  async t => {
+    await t.test('session/load', async st => {
+      const fixture = await startRealPiFixture({ childTermination: true })
+      st.after(fixture.cleanup)
+
+      await fixture.client.initialize()
+      const session = await fixture.client.newSession({ cwd: fixture.cwd, mcpServers: [] })
+      const { receipt } = await fixture.readRegistrationReceipt()
+      assert.equal(receipt.approveArgPresent, true)
+      assert.equal(receipt.projectTrusted, true)
+      assertProjectCanaryInvokedOncePerChild(await readProjectCanaryPids(fixture.projectCanaryPath), [receipt.piPid])
+      await assertPathMissing(fixture.trustPath)
+
+      await materializeMappedSession(fixture, session.sessionId)
+      await rm(fixture.registrationReceiptPath, { force: true })
+      const afterLoadIndex = fixture.client.retainedSessionUpdateCount
+      await fixture.client.extMethod('session/load', {
+        sessionId: session.sessionId,
+        cwd: fixture.cwd,
+        mcpServers: []
+      })
+
+      await fixture.client.waitForSessionUpdate(
+        notification =>
+          notification.sessionId === session.sessionId &&
+          notification.update.sessionUpdate === 'agent_message_chunk' &&
+          notification.update.content.type === 'text' &&
+          notification.update.content.text === `${PROJECT_TRUST_WARNING}\n`,
+        { afterIndex: afterLoadIndex, timeoutMs: 10_000 }
+      )
+
+      const sessionStarts = (await fixture.readC1_3SessionStartReceipts()).map(item => item.receipt.piPid)
+      assert.equal(sessionStarts.length, 2)
+      assertProjectCanaryInvokedOncePerChild(await readProjectCanaryPids(fixture.projectCanaryPath), sessionStarts)
+      assert.equal(projectTrustWarningCount(fixture.client.transcript()), 2)
+      await assertPathMissing(fixture.trustPath)
+
+      // Loading stops the first child, whose canonical shutdown receipt must
+      // be removed before the replacement owns the same single-child marker.
+      await rm(fixture.shutdownReceiptPath, { force: true })
+      const exit = await fixture.client.close()
+      assert.deepEqual({ code: exit.code, signal: exit.signal }, { code: 0, signal: null })
+      await assertPathMissing(fixture.trustPath)
+    })
+
+    await t.test('automatic recovery', async st => {
+      const fixture = await startRealPiFixture({
+        childTermination: true,
+        hardDeadlineMs: 20_000,
+        transcriptCheckpoint: 'C1.3',
+        transcriptCaseId: 'C1.6-forced-approval-recovery'
+      })
+      st.after(fixture.cleanup)
+
+      await fixture.client.initialize()
+      const session = await fixture.client.newSession({ cwd: fixture.cwd, mcpServers: [] })
+      const { receipt } = await fixture.readRegistrationReceipt()
+      assert.equal(receipt.approveArgPresent, true)
+      assert.equal(receipt.projectTrusted, true)
+      assertProjectCanaryInvokedOncePerChild(await readProjectCanaryPids(fixture.projectCanaryPath), [receipt.piPid])
+      await fixture.client.waitForSessionUpdate(
+        notification =>
+          notification.sessionId === session.sessionId &&
+          notification.update.sessionUpdate === 'agent_message_chunk' &&
+          notification.update.content.type === 'text' &&
+          notification.update.content.text === `${PROJECT_TRUST_WARNING}\n`,
+        { timeoutMs: 10_000 }
+      )
+
+      await materializeMappedSession(fixture, session.sessionId)
+      await rm(fixture.registrationReceiptPath, { force: true })
+      await assert.rejects(
+        fixture.client.prompt(
+          {
+            sessionId: session.sessionId,
+            prompt: [{ type: 'text', text: '/c1-3-terminate-child' }]
+          },
+          { timeoutMs: 10_000 }
+        )
+      )
+      await fixture.readShutdownReceipt()
+      await rm(fixture.shutdownReceiptPath, { force: true })
+
+      const recovered = await fixture.client.prompt(
+        {
+          sessionId: session.sessionId,
+          prompt: [{ type: 'text', text: 'Return the deterministic C1.3 recovery response.' }]
+        },
+        { timeoutMs: 10_000 }
+      )
+      assert.equal(recovered.stopReason, 'end_turn')
+
+      const sessionStarts = (await fixture.readC1_3SessionStartReceipts()).map(item => item.receipt.piPid)
+      assert.equal(sessionStarts.length, 2)
+      assertProjectCanaryInvokedOncePerChild(await readProjectCanaryPids(fixture.projectCanaryPath), sessionStarts)
+      assert.equal(projectTrustWarningCount(fixture.client.transcript()), 1)
+      await assertPathMissing(fixture.trustPath)
+
+      const exit = await fixture.client.close()
+      assert.deepEqual({ code: exit.code, signal: exit.signal }, { code: 0, signal: null })
+      await assertPathMissing(fixture.trustPath)
+    })
   }
 )
 

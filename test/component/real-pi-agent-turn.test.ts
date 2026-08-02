@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 import { createServer, type Server } from 'node:http'
 import type { Socket } from 'node:net'
 import test from 'node:test'
+import { PROJECT_TRUST_WARNING } from '../../src/acp/agent.js'
 import { MAX_LOOPBACK_BODY_BYTES, startRealPiFixture } from '../helpers/real-pi-fixture.js'
 
 const TEST_TIMEOUT_MS = 40_000
@@ -224,7 +225,10 @@ test(
     await fixture.assertWithinHardDeadline()
 
     assert.equal(response.stopReason, 'end_turn')
-    assert.deepEqual(sessionTextChunks(fixture.client.transcript()), [FIXED_RESPONSE_TEXT])
+    assert.deepEqual(sessionTextChunks(fixture.client.transcript()), [
+      `${PROJECT_TRUST_WARNING}\n`,
+      FIXED_RESPONSE_TEXT
+    ])
     assert.equal(requests.length, 1)
 
     const observed = requests[0]

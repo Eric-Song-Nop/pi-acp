@@ -74,6 +74,8 @@ type AdvertisedModel = {
 
 const MODEL_CONFIG_ID = 'model'
 const THOUGHT_LEVEL_CONFIG_ID = 'thought_level'
+export const PROJECT_TRUST_WARNING =
+  "pi-acp automatically trusts this project. Project resources and extensions may load or execute with this process's local permissions; ACP permissions are not a sandbox."
 const SESSION_RECOVERY_UNAVAILABLE_CODE = 'PI_ACP_SESSION_RECOVERY_UNAVAILABLE'
 /** Distinct from the sealed 500ms terminal-update cut in session.ts. */
 export const SESSION_RECOVERY_HANDSHAKE_TIMEOUT_MS = 2_000
@@ -918,12 +920,9 @@ export class PiAcpAgent implements ACPAgent {
       const quietStartup = getQuietStartup(params.cwd)
       const updateNotice = buildUpdateNotice()
 
-      // If quietStartup is enabled, suppress the full "startup info" prelude, but still surface
-      // the "New version available" notice (if any) since it's high-signal and actionable.
+      // quietStartup suppresses discovery details, but never the forced-trust disclosure.
       const preludeText = quietStartup
-        ? updateNotice
-          ? updateNotice + '\n'
-          : ''
+        ? [PROJECT_TRUST_WARNING, updateNotice].filter(Boolean).join('\n\n') + '\n'
         : buildStartupInfo({
             cwd: params.cwd,
             fileCommands,
@@ -1665,13 +1664,16 @@ export class PiAcpAgent implements ACPAgent {
 
       const { configOptions, models, modes } = await runSessionRpc(session, proc => getSessionConfiguration(proc))
 
+      const preludeText = `${PROJECT_TRUST_WARNING}\n`
+      session.setStartupInfo(preludeText)
+
       const response = {
         configOptions,
         models,
         modes,
         _meta: {
           piAcp: {
-            startupInfo: null
+            startupInfo: preludeText
           }
         }
       }
@@ -1683,6 +1685,10 @@ export class PiAcpAgent implements ACPAgent {
       if (this.disposed || !this.sessionIsAlive(session) || !exactSessionStillPublished) {
         throw sessionRecoveryUnavailableError()
       }
+
+      // Mirror session/new. Transparent child recovery does not create a new
+      // ACP session, so it does not re-arm this pending disclosure.
+      setTimeout(() => session.sendStartupInfoIfPending(), 0)
 
       // Advertise slash commands after the response so the client knows the session exists.
       setTimeout(() => {
@@ -2201,6 +2207,9 @@ function buildStartupInfo(opts: {
   } catch {
     // ignore
   }
+
+  md.push(PROJECT_TRUST_WARNING)
+  md.push('')
 
   const addSection = (title: string, items: string[]) => {
     const cleaned = items.map(s => s.trim()).filter(Boolean)

@@ -16,6 +16,8 @@ import {
 
 const TEST_TIMEOUT_MS = 45_000
 const CASE_IDS: readonly BaselineCaseId[] = ['C0.7-XF01', 'C0.7-XF02', 'C0.7-XF03']
+const LIVE_REPLAY_CASE_IDS: readonly BaselineCaseId[] = ['C0.7-XF01', 'C0.7-XF03']
+const HISTORICAL_NO_APPROVE_CASE_ID: BaselineCaseId = 'C0.7-XF02'
 
 test('C0.7 committed failure transcripts are canonical, content-addressed, and protected', async () => {
   const manifest = await verifyCommittedTranscripts()
@@ -27,7 +29,18 @@ test('C0.7 committed failure transcripts are canonical, content-addressed, and p
   )
 })
 
-for (const caseId of CASE_IDS) {
+test('C0.7-XF02 remains immutable historical no-approve evidence under the current forced-approve policy', async () => {
+  const { manifest } = await readVerifiedManifest()
+  const expected = manifest.cases.find(item => item.id === HISTORICAL_NO_APPROVE_CASE_ID)
+  assert.ok(expected)
+  assert.equal(expected.expectedFailure.kind, 'untrusted_project_prompt_expanded')
+  assert.equal(expected.expectedFailure.projectTrusted, false)
+  assert.equal(expected.expectedFailure.catalogHasCommand, false)
+  assert.equal(expected.expectedFailure.configuredLoopbackRequests, 1)
+  await readVerifiedArtifact(C0_7_TRANSCRIPT_ROOT, expected)
+})
+
+for (const caseId of LIVE_REPLAY_CASE_IDS) {
   test(
     `C0.7 [xfail(issue)] ${caseId} matches its real-Pi failure signature`,
     { timeout: TEST_TIMEOUT_MS },
