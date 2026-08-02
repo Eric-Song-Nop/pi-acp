@@ -172,7 +172,7 @@ commands 宣称为稳定支持。
 | `C1.3` | Pi child 退出时 fail pending command，并提供确定恢复路径                      | `verified`  | `C0.5`                    | `G1`      |
 | `C1.4` | 使用严格 LF JSONL reader                                                      | `verified`  | `C0.3`                    | `G1`      |
 | `C1.5` | 已知但未实现的 Pi built-in 被明确拒绝，不进入 LLM                             | `verified`  | `C0.4`                    | `G1`      |
-| `C1.6` | 所有项目强制批准，并在 child start 后固定披露 trust/local-permission boundary | `active`    | `DEC-008`, `C1.1`         | `G1`      |
+| `C1.6` | 所有项目强制批准，并在 child start 后固定披露 trust/local-permission boundary | `verified`  | `DEC-008`, `C1.1`         | `G1`      |
 | `C1.7` | startup readiness 与 early-event buffering                                    | `proposed`  | `C0.6`                    | `G1`      |
 | `C2.1` | 保存 ACP client capabilities                                                  | `proposed`  | `C0.4`                    | `G2`      |
 | `C2.2` | Pi 成为唯一 slash command/router；删除 adapter 提前展开                       | `proposed`  | `C0.7`                    | `G2`      |
@@ -887,30 +887,30 @@ provenance fixture、tests 与 publication docs，精确回到 verified C1.4 pub
 
 #### `C1.6` Forced project approval and post-start disclosure
 
-- [ ] central `PiRpcProcess.spawn` 对每个 new/load/transparent-recovery child 精确传一次
+- [x] central `PiRpcProcess.spawn` 对每个 new/load/transparent-recovery child 精确传一次
       long-form `--approve`；不传 `-a`、`--no-approve`、`-na`、`--approve=...`
       或第二个冲突 flag，并保持 `--mode rpc`、`--no-themes`、cwd/env 与 optional
       `--session <path>` 语义。pi-acp 不写 `trust.json`。
-- [ ] 固定 warning 文本为：
+- [x] 固定 warning 文本为：
 
       > pi-acp automatically trusts this project. Project resources and extensions may load or execute with this process's local permissions; ACP permissions are not a sandbox.
 
       warning 不含 cwd/path/session ID/env，也不能被 project/extension 内容修改。
 
-- [ ] successful `session/new` 与 explicit `session/load` 在 child start 后通过现有
+- [x] successful `session/new` 与 explicit `session/load` 在 child start 后通过现有
       `_meta.piAcp.startupInfo`/pending visible-startup path 披露 warning；`quietStartup=true`
       仍隐藏普通 discovery prelude，但不能隐藏 warning。它是 post-start disclosure，不是
       consent/permission gate。transparent recovery 对 replacement child 仍传 `--approve`，
       但不为同一 logical ACP session 重新 arm warning。
-- [ ] isolated real Pi `0.83.0` 覆盖 new/load/recovery，证明
+- [x] isolated real Pi `0.83.0` 覆盖 new/load/recovery，证明
       `approveArgPresent=true`、`projectTrusted=true`、project canary 每 child 加载一次、
       process 保持 live/clean teardown，且始终不产生 `trust.json`。
-- [ ] C0.7-XF02 保留为 historical no-approve evidence，不在 current forced-approve runtime
+- [x] C0.7-XF02 保留为 historical no-approve evidence，不在 current forced-approve runtime
       重放；frozen manifest/artifact 不 recapture。manifest SHA-256 仍为
       `edfbbf2807e84f409e826a853e514debb30bd51a964a711cccd0577dea469ce3`，完整
       transcript-tree SHA-256 仍为
       `fd8d85afe172a848e45017f2fd59411aaf903f8159e1db2e3e63b2fa82e3781f`。
-- [ ] current Node `26.5.0` 与 exact `22.19.0` focused/full/network-denied、
+- [x] current Node `26.5.0` 与 exact `22.19.0` focused/full/network-denied、
       typecheck/lint/build/whole-tree Prettier/transcript/diff gates 在同一 immutable pushed
       head 全绿，并通过 exact-head independent review。
 
@@ -921,10 +921,33 @@ canonical contract；base 是 verified C1.5 publication
 `cwd` 即信任 project settings/packages/prompts/skills/extensions，且项目代码在 warning
 披露前就可能已加载或执行；rollback 无法撤销这些 arbitrary side effects。
 
-tested tuple 为 pi-acp `0.0.33@<accepted-C1.6-SHA>` × Pi `0.83.0` execution /
-`0.80.5` provenance endpoint × ACP protocol `1` / SDK `0.26.0` × Node
-`26.5.0`/exact `22.19.0` × raw/strict ACP harness `@<same SHA>`；Zed 与
-CodeCompanion axes 仍 manually unverified。
+tested tuple 为 pi-acp `0.0.33@cda0a09fb9ec3080a695ac88dd4f19a6ea689447` × Pi
+`0.83.0` execution / `0.80.5` provenance endpoint × ACP protocol `1` / SDK
+`0.26.0` × Node `26.5.0`/exact `22.19.0` × raw/strict ACP harness
+`@cda0a09fb9ec3080a695ac88dd4f19a6ea689447`；Zed 与 CodeCompanion axes 仍
+manually unverified。
+
+run-scoped accepted implementation identity 为 PR #22 replacement head
+[`cda0a09fb9ec3080a695ac88dd4f19a6ea689447`](https://github.com/Eric-Song-Nop/pi-acp/commit/cda0a09fb9ec3080a695ac88dd4f19a6ea689447)，
+stacked base 为 verified C1.5 publication
+`2c5e4710c22f449c3e0f333fcaaf3e959355aa2c`。initial head `0ddd4404…`
+因 project-canary 自去重只能证明 at-least-once 而未被独立接受；replacement 记录每次
+invocation，并对 new/load/recovery 的每个预期 child PID 断言 count 精确为 `1`，同时拒绝
+missing、duplicate 与 unexpected PID。
+[CI run `30729060815`](https://github.com/Eric-Song-Nop/pi-acp/actions/runs/30729060815)
+在该 exact head 的 provenance、typecheck、lint、test、build、两个 kernel-network-denied
+real-Pi rows 与 stable `required` job 全绿。Node `26.5.0` 与 exact Node `22.19.0`
+本地 full suites 均为 `355/355`，replacement real-Pi fixture focused 均为 `5/5`；
+typecheck、lint、build、whole-tree Prettier、diff-check 与 transcript verifier `3/3` 全绿。
+C0.7 manifest SHA-256 仍为
+`edfbbf2807e84f409e826a853e514debb30bd51a964a711cccd0577dea469ce3`，
+complete transcript-tree SHA-256 仍为
+`fd8d85afe172a848e45017f2fd59411aaf903f8159e1db2e3e63b2fa82e3781f`，
+manifest/transcripts/artifacts 未 recapture。independent exact-head
+[review `4836698702`](https://github.com/Eric-Song-Nop/pi-acp/pull/22#pullrequestreview-4836698702)
+接受该 replacement implementation head，无 remaining P1/P2/P3；earlier P2 review
+`4836663924` 已由 replacement 修复并 resolved。后续 documentation-only publication
+commit 不替换这个 implementation/run identity。
 
 边界：C1.6 不发出 runtime inventory/source metadata，不增加 pre-response
 `get_commands` probe，不声明 complete loaded-extension inventory/source ID/authenticity，
