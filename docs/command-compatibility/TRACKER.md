@@ -183,7 +183,7 @@ commands 宣称为稳定支持。
 | `C2.7` | extension flags 进入明确的 CLI/ACP config 通路                                | `proposed`  | `DEC-002`                 | `G2`      |
 | `C3.1` | 审核并冻结 Pi RPC command catalog/execute spec                                | `active`    | `DEC-002`, `C0.6`         | `G3`      |
 | `C3.2` | Pi 实现 `execute_command` + request/disposition identity                      | `proposed`  | `C3.1`                    | `G3`      |
-| `C3.3` | pi-acp bridge 结构化 command results                                          | `proposed`  | `C3.2`                    | `G3`      |
+| `C3.3` | pi-acp bridge 结构化 command results                                          | `proposed`  | `C2.2`, `C3.2`            | `G3`      |
 | `C3.4` | state-only/no-LLM/handled-input commands 正确完成                             | `proposed`  | `C3.3`                    | `G3`      |
 | `C3.5` | agent-triggering commands 等待正确 run 后只完成一次                           | `proposed`  | `C3.3`                    | `G3`      |
 | `C3.6` | throw/cancel/timeout 无泄漏、无重复完成                                       | `proposed`  | `C3.3`                    | `G3`      |
@@ -1027,7 +1027,9 @@ publication，无需 session 或 transcript migration。
 patched/pinned preview：Pi patch 保持 generic extension-command execution；adapter 只在
 `PI_ACP_EXPERIMENTAL_FIXTURE_STATE=1` 时 allowlist exact `/fixture-state`，环境变量缺失或
 其它值均为 off。其它 extension/prompt/skill、agent-triggering、dialog、external UI、
-collision/reload/argument hints 仍隐藏并延后。
+general C2.4 collision policy、C2.5 dynamic catalog refresh/reload exposure 与 argument hints
+仍隐藏并延后；exact `fixture-state` 跨 source ambiguity fence 与 handler-causal
+session replacement tracking 是本 preview 必要范围。
 
 patch repository 为 `Eric-Song-Nop/pi-mono`，branch
 `pi-acp/execute-command-v0.83.0` 精确起于 upstream
@@ -1054,26 +1056,28 @@ request schema 精确为：
 
 ```json
 {
-  "id": "required-unique-id",
+  "id": "non-empty-outstanding-unique-id",
   "type": "execute_command",
   "name": "fixture-state",
   "args": ""
 }
 ```
 
-`id` 同时是 request/execution identity；`name` 是 `get_commands` 中 case-sensitive
+`id` 同时是 request/execution identity，必须 non-empty 且在 outstanding requests 中
+unique；settlement 后协议不禁止重用，但 raw callers 应保持全局新 identity 以避免
+late duplicate ambiguity。`name` 是 `get_commands` 中 case-sensitive
 extension `invocationName`，不含 `/`；`args` byte-exact 传给 handler，不 trim、parse、
 substitute。只允许 exact resolution source 为 `extension` 的 command；绝不调用 generic
 `prompt`。成功 response 使用既有 RPC envelope：
 
 ```json
 {
-  "id": "required-unique-id",
+  "id": "non-empty-outstanding-unique-id",
   "type": "response",
   "command": "execute_command",
   "success": true,
   "data": {
-    "requestId": "required-unique-id",
+    "requestId": "non-empty-outstanding-unique-id",
     "name": "fixture-state",
     "source": "extension",
     "sourceInfo": {},
@@ -1087,17 +1091,18 @@ request。agent-triggering handler 才可返回 `agent_run`，且实现必须在
 事件，并在属于该 invocation 的 run 已 `agent_settled` 且 session 再次 idle 后响应；不能
 用 handler return 后的一次 `isIdle` snapshot 推断未触发 agent。
 
-structured rejection 保留相同 envelope/request/name identity，精确为：
+structured rejection 在 request `id`/`name` 本身为 valid strings 时保留相同
+envelope/request/name identity，精确为：
 
 ```json
 {
-  "id": "required-unique-id",
+  "id": "non-empty-outstanding-unique-id",
   "type": "response",
   "command": "execute_command",
   "success": false,
   "error": "safe actionable summary",
   "data": {
-    "requestId": "required-unique-id",
+    "requestId": "non-empty-outstanding-unique-id",
     "name": "fixture-state",
     "disposition": "rejected",
     "code": "COMMAND_BUSY"
@@ -1110,27 +1115,51 @@ structured rejection 保留相同 envelope/request/name identity，精确为：
 uncorrelated `extension_error`。RPC input handler 当前并发 dispatch，因此 active-command
 fence 必须在任何 `await` 前同步 reserve：同一 active ID 拒绝为
 `COMMAND_REQUEST_CONFLICT`，其它 ID 拒绝为 `COMMAND_BUSY`，busy request 不 queue。
+对 malformed `execute_command` object，non-string/missing `id` 的 response envelope 省略 `id` 且
+`data.requestId` 固定为 `""`；non-string `name` 的 `data.name` 固定为 `""`。empty
+string identity 按其原值保留，但仍以 `COMMAND_INVALID_REQUEST` 拒绝。
+
+admission 与 attribution 必须 RPC-lineage-wide，不绑定于当前 published
+`AgentSession`。任何在 A 上开始的 turn-capable action 或 session-mutating
+command-context operation，必须在 A→B rebind 后继续持有共享 lease，直到自身
+promise settled。session-mutating RPCs 与上述 tracked extension operations 与
+`execute_command` 必须从 synchronous admission 起互斥，read-only RPCs 仍可用。
+rebind 加入同一 observation；disposed A 在 async preflight 后与 provider entry 前都必须
+失败；unrelated turn-starting callbacks 在 observation 期间以一个 ordinary runtime error
+拒绝，不得改变 request-bound result。
 
 Pi 以 public `extensionRunner.getCommand()`、`createCommandContext()` direct invoke handler
 exactly once。top-level `pi.sendUserMessage()`/triggering `pi.sendMessage()` 是
 fire-and-forget；async `before_agent_start` 期间 `isIdle` 仍可能为 true，因此 patch 必须在
-`AgentSession` 增加最小 command-scoped pending extension-turn observation：在 action 发起时
-同步登记属于当前 command 的 promise，execute path 等 handler 与这些已登记 turn 全部
-settled 后才分类，不能使用 handler return 后的一次 `isIdle` snapshot。handler 已返回后
-由 timer 等另行发起的 action 不属于该 invocation。无需修改 `ExtensionRunner`。lost
-response/transport failure 后绝不 replay，结果按 indeterminate 处理。v1 不增加 native
+action 发起时将 promise 同步登记到上述 lineage-wide observation，execute path 串行 drain
+A→B→C replacement observations，等 handler 与所有已登记 turn settled 后才分类，不能使用
+handler return 后的一次 `isIdle` snapshot。handler 已返回后由 timer 等另行发起的
+action 不属于该 invocation。无需修改 `ExtensionRunner`。
+
+Pi typed client 与 pi-acp `PiRpcProcess` 都必须在 pending admission 时保存
+request-specific ingress validator；同 ID `type:"response"` frame 只有在 exact
+`id`/`command` 与完整 execute identity/schema 全部验证后才能 retire/resolve pending
+request。malformed 或 wrong-command same-ID response frames 只 quarantine，不 settle；后续
+valid response 唯一完成，完成后 duplicate 继续 quarantine。`RpcClient.executeCommand()`
+默认 timeoutless，只有显式
+`{ timeoutMs }` 才启用 client deadline；`stop()` 必须先建立一个稳定 stop error 并拒绝
+所有 stored pending rejectors，再进入 process null/TERM/KILL，process exit 也立即拒绝，不得孤立
+timeoutless execute。
+
+lost response/transport failure 后绝不 replay，结果按 indeterminate 处理。v1 不增加 native
 per-command cancel；若 ACP cancel/timeout 在 execute write 后获胜，adapter 必须 stop exact
 child、确认 cleanup、返回 cancelled，只有下一条 fresh request 可恢复。request-bound
 response 是唯一 completion authority。
 
 - [ ] tracker/issue 与 Pi docs/types 对 capability、wire schema、identity、disposition、failure
       codes、ordering、busy、cancel/no-replay 语义完全一致。
-- [ ] fork branch 精确基于 `845d6ff1…`，minimal production diff 仅触及 RPC
-      types/mode/client、`AgentSession` pending-turn observation、docs 与新 RPC tests，不混入
-      mainline drift。
+- [ ] fork branch 精确基于 `845d6ff1…`，controlled nine-file diff 仅触及 RPC
+      types/mode/client、`AgentSession` lineage-wide pending-turn observation、root/modes public
+      typed exports、docs 与两份 focused RPC tests，不混入 mainline drift。
 - [ ] Pi tests 证明 capability、byte-exact args、exact source/name、handler once、notify-before-
-      response、provider zero、busy/conflict/not-found/throw、agent-run-after-settled 与 unchanged
-      generic prompt behavior。
+      response、provider zero、busy/conflict/not-found/throw、agent-run-after-settled、A→B→C
+      lineage/provider fence、malformed `execute_command` fallback identity、accept-before-retire、
+      timeoutless stop settlement 与 unchanged generic prompt behavior。
 - [ ] patch 为一个 reviewable commit，并记录 source-leaf hashes、toolchain、tree digest、
       immutable artifact/tag 与删除条件。
 - [ ] pi-acp acquisition 使用独立 patched preview identity 和 absolute
@@ -1138,12 +1167,22 @@ response 是唯一 completion authority。
 - [ ] exact-head independent review 无 blocking finding。
 
 fork [issue #25](https://github.com/Eric-Song-Nop/pi-acp/issues/25) 是 canonical contract。
-最小 Pi patch surface 为 `packages/coding-agent/src/modes/rpc/rpc-types.ts`、
-`rpc-mode.ts`、`rpc-client.ts`、`packages/coding-agent/src/core/agent-session.ts`、
-`packages/coding-agent/docs/rpc.md` 与 focused tests。只有 upstream tagged release 提供等价
-wire/terminal semantics、通过同一 fixture matrix 且 pi-acp pin 该 release 后，才能删除
-patch；upstream merge 本身不够。rollback 是关闭 preview flag、恢复 stock Pi acquisition，
-且不 recapture C0.7。
+controlled Pi patch surface 精确为九个文件：
+`packages/coding-agent/docs/rpc.md`、
+`packages/coding-agent/src/core/agent-session.ts`、
+`packages/coding-agent/src/index.ts`、
+`packages/coding-agent/src/modes/index.ts`、
+`packages/coding-agent/src/modes/rpc/rpc-client.ts`、
+`packages/coding-agent/src/modes/rpc/rpc-mode.ts`、
+`packages/coding-agent/src/modes/rpc/rpc-types.ts`、
+`packages/coding-agent/test/rpc-client-execute-command.test.ts` 与
+`packages/coding-agent/test/rpc-execute-command.test.ts`。两个 public index 必须对外导出
+`RpcExecuteCommandError`、`RpcExecuteCommandOptions`、`RpcExecuteCommandResult`、
+`RpcExecuteCommandFailure`、`RpcExecuteCommandErrorCode` 与
+`RpcExecuteCommandDisposition`；这是受控 typed API 修复，不扩大 command execution
+surface。只有 upstream tagged release 提供等价 wire/terminal semantics、通过同一 fixture
+matrix 且 pi-acp pin 该 release 后，才能删除 patch；upstream merge 本身不够。rollback
+是关闭 preview flag、恢复 stock Pi acquisition，且不 recapture C0.7。
 
 ### M2 — Command Catalog
 
