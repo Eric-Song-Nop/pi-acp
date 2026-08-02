@@ -275,34 +275,97 @@ test('PiAcpAgent: non-colliding extension, prompt, skill, and unknown text prese
   const { agent, conn, proc, dispatches } = createPromptHarness()
   const imageData = Buffer.from('ordinary-image', 'utf8').toString('base64')
   const cases = [
-    { label: 'non-colliding extension command', prompt: [{ type: 'text', text: '/fixture-state' }] },
+    {
+      label: 'non-colliding extension command',
+      prompt: [{ type: 'text', text: '/fixture-state' }],
+      expected: { message: '/fixture-state', images: [] }
+    },
     {
       label: 'non-colliding prompt command',
-      prompt: [{ type: 'text', text: '/project-prompt argument' }]
+      prompt: [{ type: 'text', text: '/project-prompt argument' }],
+      expected: { message: '/project-prompt argument', images: [] }
     },
-    { label: 'non-colliding skill command', prompt: [{ type: 'text', text: '/skill:fixture argument' }] },
-    { label: 'unknown slash command', prompt: [{ type: 'text', text: '/unknown argument' }] },
-    { label: 'ordinary text', prompt: [{ type: 'text', text: 'explain /trust without invoking it' }] },
-    { label: 'case-sensitive name', prompt: [{ type: 'text', text: '/Trust' }] },
-    { label: 'built-in prefix only', prompt: [{ type: 'text', text: '/trustworthy' }] },
-    { label: 'built-in path suffix', prompt: [{ type: 'text', text: '/trust/foo' }] },
-    { label: 'double slash prefix', prompt: [{ type: 'text', text: '//trust' }] },
-    { label: 'stale clear name', prompt: [{ type: 'text', text: '/clear' }] },
-    { label: 'stale thinking name', prompt: [{ type: 'text', text: '/thinking' }] },
-    { label: 'stale queue name', prompt: [{ type: 'text', text: '/queue all' }] },
+    {
+      label: 'multi-block resource and image slash command',
+      prompt: [
+        { type: 'text', text: '/project-' },
+        { type: 'text', text: 'prompt argument' },
+        { type: 'resource_link', uri: 'file:///c2.2/context.txt', name: 'context' },
+        { type: 'image', mimeType: 'image/png', data: imageData }
+      ],
+      expected: {
+        message: '/project-prompt argument\n[Context] file:///c2.2/context.txt',
+        images: [{ type: 'image', mimeType: 'image/png', data: imageData }]
+      }
+    },
+    {
+      label: 'non-colliding skill command',
+      prompt: [{ type: 'text', text: '/skill:fixture argument' }],
+      expected: { message: '/skill:fixture argument', images: [] }
+    },
+    {
+      label: 'unknown slash command',
+      prompt: [{ type: 'text', text: '/unknown argument' }],
+      expected: { message: '/unknown argument', images: [] }
+    },
+    {
+      label: 'ordinary text',
+      prompt: [{ type: 'text', text: 'explain /trust without invoking it' }],
+      expected: { message: 'explain /trust without invoking it', images: [] }
+    },
+    {
+      label: 'case-sensitive name',
+      prompt: [{ type: 'text', text: '/Trust' }],
+      expected: { message: '/Trust', images: [] }
+    },
+    {
+      label: 'built-in prefix only',
+      prompt: [{ type: 'text', text: '/trustworthy' }],
+      expected: { message: '/trustworthy', images: [] }
+    },
+    {
+      label: 'built-in path suffix',
+      prompt: [{ type: 'text', text: '/trust/foo' }],
+      expected: { message: '/trust/foo', images: [] }
+    },
+    {
+      label: 'double slash prefix',
+      prompt: [{ type: 'text', text: '//trust' }],
+      expected: { message: '//trust', images: [] }
+    },
+    {
+      label: 'stale clear name',
+      prompt: [{ type: 'text', text: '/clear' }],
+      expected: { message: '/clear', images: [] }
+    },
+    {
+      label: 'stale thinking name',
+      prompt: [{ type: 'text', text: '/thinking' }],
+      expected: { message: '/thinking', images: [] }
+    },
+    {
+      label: 'stale queue name',
+      prompt: [{ type: 'text', text: '/queue all' }],
+      expected: { message: '/queue all', images: [] }
+    },
     {
       label: 'command text after a resource link',
       prompt: [
         { type: 'resource_link', uri: 'file:///c1.5/context.txt', name: 'context' },
         { type: 'text', text: '/trust' }
-      ]
+      ],
+      expected: { message: '\n[Context] file:///c1.5/context.txt/trust', images: [] }
     },
     {
       label: 'ordinary image prompt',
       prompt: [
         { type: 'text', text: 'describe this image' },
         { type: 'image', mimeType: 'image/png', data: imageData }
-      ]
+      ],
+      expected: {
+        message: 'describe this image',
+        images: [{ type: 'image', mimeType: 'image/png', data: imageData }]
+      }
     }
   ]
 
@@ -313,6 +376,7 @@ test('PiAcpAgent: non-colliding extension, prompt, skill, and unknown text prese
     assert.deepEqual(result, { stopReason: 'end_turn' }, item.label)
     assert.equal(conn.updates.length, updatesBefore, item.label)
     assert.equal(dispatches.length, dispatchesBefore + 1, item.label)
+    assert.deepEqual(dispatches.at(-1), item.expected, item.label)
     assert.equal(proc.prompts.length, 0, item.label)
   }
 

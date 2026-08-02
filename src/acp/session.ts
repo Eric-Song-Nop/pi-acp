@@ -23,7 +23,6 @@ import {
 } from '../pi-rpc/process.js'
 import { maybeAuthRequiredError } from './auth-required.js'
 import { SessionStore } from './session-store.js'
-import { expandSlashCommand, type FileSlashCommand } from './slash-commands.js'
 import {
   bashCommand,
   bashExitCode,
@@ -41,7 +40,8 @@ type SessionCreateParams = {
   cwd: string
   mcpServers: McpServer[]
   conn: AgentSideConnection
-  fileCommands?: import('./slash-commands.js').FileSlashCommand[]
+  /** @deprecated Retained as an inert construction shim for downstream tests. */
+  fileCommands?: unknown[]
   piCommand?: string
 }
 
@@ -460,8 +460,7 @@ export class SessionManager {
       cwd: params.cwd,
       mcpServers: params.mcpServers,
       proc: params.proc,
-      conn: params.conn,
-      fileCommands: params.fileCommands ?? []
+      conn: params.conn
     })
   }
 
@@ -551,8 +550,7 @@ export class SessionManager {
         cwd: params.cwd,
         mcpServers: params.mcpServers,
         proc,
-        conn: params.conn,
-        fileCommands: params.fileCommands ?? []
+        conn: params.conn
       })
       this.failedCandidateSessions.set(proc, session)
 
@@ -627,7 +625,6 @@ export class PiAcpSession {
 
   readonly proc: PiRpcProcess
   private readonly conn: AgentSideConnection
-  private readonly fileCommands: FileSlashCommand[]
   private readonly runtimeExtensionDiagnosticOptions: {
     cwd: string
     agentDir: string
@@ -675,7 +672,8 @@ export class PiAcpSession {
     mcpServers: McpServer[]
     proc: PiRpcProcess
     conn: AgentSideConnection
-    fileCommands?: FileSlashCommand[]
+    /** @deprecated Retained as an inert construction shim for downstream tests. */
+    fileCommands?: unknown[]
   }) {
     this.sessionId = opts.sessionId
     this.sessionFile = opts.sessionFile ?? null
@@ -684,7 +682,6 @@ export class PiAcpSession {
     this.mcpServers = opts.mcpServers
     this.proc = opts.proc
     this.conn = opts.conn
-    this.fileCommands = opts.fileCommands ?? []
     const env = { ...process.env }
     const agentDir = env.PI_CODING_AGENT_DIR ?? join(env.HOME ?? env.USERPROFILE ?? homedir(), '.pi', 'agent')
     this.runtimeExtensionDiagnosticOptions = { cwd: this.cwd, agentDir, env }
@@ -772,13 +769,10 @@ export class PiAcpSession {
   async prompt(message: string, images: unknown[] = []): Promise<StopReason> {
     if (this.terminalError) throw this.terminalError
 
-    // pi RPC mode disables slash command expansion, so we do it here.
-    const expandedMessage = expandSlashCommand(message, this.fileCommands)
-
     const turnPromise = new Promise<StopReason>((resolve, reject) => {
       const queued: PromptTurn = {
         id: this.nextTurnId,
-        message: expandedMessage,
+        message,
         images,
         resolve,
         reject,

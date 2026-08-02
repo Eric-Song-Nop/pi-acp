@@ -101,7 +101,7 @@ function createSession(sessionId: string, cwd: string, source: CatalogSource, ge
     },
     async getCommands() {
       getCommandsCalls.value += 1
-      if (source === 'fallback') throw new Error('force file-command fallback')
+      if (source === 'fallback') throw new Error('force builtin-only fallback')
       return {
         commands: [
           ...REJECTED_PI_BUILTIN_NAMES.map(name => ({
@@ -150,7 +150,7 @@ function restoreEnvironment(name: string, value: string | undefined): void {
 }
 
 async function exerciseCatalog(path: CatalogPath, source: CatalogSource): Promise<AvailableCommand[]> {
-  const root = mkdtempSync(join(tmpdir(), `pi-acp-c1.5-catalog-${path}-${source}-`))
+  const root = mkdtempSync(join(tmpdir(), `pi-acp-c2.2-catalog-${path}-${source}-`))
   const cwd = join(root, 'project')
   const promptDir = join(cwd, '.pi', 'prompts')
   const agentDir = join(root, 'agent')
@@ -204,20 +204,20 @@ async function exerciseCatalog(path: CatalogPath, source: CatalogSource): Promis
   }
 }
 
-test('PiAcpAgent: rejected Pi built-in collisions stay hidden in every new/load catalog path', async t => {
+test('PiAcpAgent: new/load catalogs use Pi discovery or adapter builtins only', async t => {
   for (const path of ['new', 'load'] as const) {
     for (const source of ['primary', 'fallback'] as const) {
       await t.test(`${path} uses filtered ${source} catalog`, async () => {
         const commands = await exerciseCatalog(path, source)
         const names = commands.map(command => command.name)
         const adapterNames = names.filter(name => (ADAPTER_COMMAND_NAMES as readonly string[]).includes(name))
-        const sourceMarker = source === 'primary' ? 'primary-visible' : 'fallback-visible'
 
         assert.deepEqual(
           names.filter(name => (REJECTED_PI_BUILTIN_NAMES as readonly string[]).includes(name)),
           []
         )
-        assert.equal(names.includes(sourceMarker), true)
+        assert.equal(names.includes('primary-visible'), source === 'primary')
+        assert.equal(names.includes('fallback-visible'), false)
         assert.deepEqual(adapterNames, ADAPTER_COMMAND_NAMES)
         assert.equal(new Set(names).size, names.length)
       })
