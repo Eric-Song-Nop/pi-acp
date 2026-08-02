@@ -175,7 +175,7 @@ commands 宣称为稳定支持。
 | `C1.6` | 所有项目强制批准，并在 child start 后固定披露 trust/local-permission boundary | `verified`  | `DEC-008`, `C1.1`         | `G1`      |
 | `C1.7` | startup readiness 与 early-event buffering                                    | `proposed`  | `C0.6`                    | `G1`      |
 | `C2.1` | 保存 ACP client capabilities                                                  | `proposed`  | `C0.4`                    | `G2`      |
-| `C2.2` | Pi 成为唯一 slash command/router；删除 adapter 提前展开                       | `proposed`  | `C0.7`                    | `G2`      |
+| `C2.2` | Pi 成为唯一 slash command/router；删除 adapter 提前展开                       | `active`    | `C0.7`                    | `G2`      |
 | `C2.3` | 公布兼容 extension commands 并保留 source/compatibility                       | `proposed`  | `DEC-003`, `C1.2`, `C2.2` | `G2`      |
 | `C2.4` | 定义 collision、reserved names 和稳定 ID 规则                                 | `proposed`  | `C0.4`, `C2.2`            | `G2`      |
 | `C2.5` | reload/runtime registration 后刷新命令目录                                    | `proposed`  | `C2.3`                    | `G2`      |
@@ -955,6 +955,45 @@ commit 不替换这个 implementation/run identity。
 ask/deny、trust allowlist、`--no-approve` escape hatch、sandbox/privilege separation、
 dependency upgrade 或 C0.7 recapture。这些不阻塞随后 M2→M3 的第一条 experimental
 extension-command preview。rollback 是 revert 完整 C1.6 stack 到上述 C1.5 publication。
+
+#### `C2.2` Pi-only non-adapter slash routing
+
+- [ ] session restore/transparent recovery 仍先于 command classification；C1.5 的 exact
+      unsupported built-in refusal 与既有 adapter-owned built-ins 保持优先级、response shape
+      和 provider/Pi zero-dispatch 语义。
+- [ ] 其它所有 prompt（包括 unknown/prompt-template/skill-like slash text、arguments、多个
+      text/resource blocks 与 images）只经普通 Pi `prompt` RPC 转发一次；adapter 不改写
+      slash text，不做 `$1`/`$2`/`$@` substitution，也不解析 prompt frontmatter。
+- [ ] production new/load/recovery 与 startup path 不读取 user/project prompt files；Pi
+      `get_commands` 是 non-adapter catalog 的唯一来源，extension commands 在本 checkpoint
+      仍按当前默认过滤。
+- [ ] new/load 的 `get_commands` failure 只 fallback 到 adapter-owned catalog，不从 prompt
+      files 重建目录；transparent recovery 不重新发布或改变 logical ACP session catalog。
+- [ ] pinned real Pi `0.83.0` 证明 adapter 原样转发 project prompt invocation、Pi 自己完成
+      template expansion、configured loopback provider 只看见 expanded body，ACP request
+      `end_turn`，随后第二 turn 仍 live，teardown clean。
+- [ ] current Node `26.5.0` 与 exact `22.19.0` focused/full/network-denied、typecheck、lint、
+      build、whole-tree Prettier、transcript/diff gates 在同一 immutable pushed head 全绿；
+      C0.7 manifest/transcript tree byte-identical，并通过 exact-head independent review。
+
+fork [issue #23](https://github.com/Eric-Song-Nop/pi-acp/issues/23) 是本 checkpoint 的
+canonical contract；branch `agent/c2.2-pi-router` 精确基于 verified C1.6 publication
+`7ae9f5e6de54af2effb221c424ff8864e3af17ca`。C2.2 只建立 authoritative routing，
+不宣称任意 unadvertised Pi route 已经 headless-compatible。
+
+证据计划：`src/acp/agent.ts`、`src/acp/session.ts`、
+`test/component/session-slash-commands.test.ts`、
+`test/component/real-pi-project-prompt-routing.test.ts`、
+`test/unit/builtin-command-catalog-collisions.test.ts`、
+`test/unit/builtin-commands.test.ts` 与 `test/unit/session-recovery-cas.test.ts`。
+
+边界：本 checkpoint 不公开/执行 extension commands，不加入 `execute_command` RPC、
+compatibility/source classification、general collision、dynamic registration/reload、argument
+hints、dialogs、agent-triggering completion、generic unknown-command UX 或 dependency/runtime
+upgrade，也不 recapture C0.7。人类 owner 于 2026-08-02 将第一条 command preview 的技术
+选择委托给实现团队；团队已选择可拔除的 patched/pinned Pi，但该 C3.1–C3.4 工作不扩大
+C2.2。rollback 是 revert 完整 C2.2 implementation/publication stack 到上述 C1.6
+publication，无需 session 或 transcript migration。
 
 ### M2 — Command Catalog
 

@@ -186,6 +186,11 @@ test('PiAcpAgent: concurrent post-terminal requests coalesce one validated gener
     assert.equal(old.proc.stopCount, 1)
     assert.equal((agent as any).sessions.snapshot(sessionId).generation, 2)
     assert.equal((agent as any).sessions.maybeGet(sessionId).proc, candidate)
+    assert.equal(
+      conn.updates.some(update => update.update.sessionUpdate === 'available_commands_update'),
+      false,
+      'transparent recovery must preserve the existing logical catalog without republishing it'
+    )
     old.proc.emit({ type: 'agent_settled' })
     assert.equal((agent as any).sessions.maybeGet(sessionId).proc, candidate)
   } finally {

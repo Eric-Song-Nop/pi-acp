@@ -40,7 +40,7 @@ import {
   isBashTool
 } from './translate/bash.js'
 import { promptToPiMessage } from './translate/prompt.js'
-import { loadSlashCommands, parseCommandArgs, toAvailableCommands } from './slash-commands.js'
+import { parseCommandArgs } from './slash-commands.js'
 import { getAgentDir, getEnableSkillCommands, getQuietStartup } from './pi-settings.js'
 import { toAvailableCommandsFromPiGetCommands } from './pi-commands.js'
 import {
@@ -62,7 +62,7 @@ import {
   unlinkSync
 } from 'node:fs'
 import type { AvailableCommand } from '@agentclientprotocol/sdk'
-import { join, dirname, basename } from 'node:path'
+import { join, dirname } from 'node:path'
 import { spawnSync } from 'node:child_process'
 
 type ThinkingLevel = 'off' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh'
@@ -541,13 +541,11 @@ export class PiAcpAgent implements ACPAgent {
         throw sessionRecoveryUnavailableError()
       }
 
-      const fileCommands = loadSlashCommands(cwd)
       candidateSession = this.createDetachedSession(sessionId, {
         cwd,
         mcpServers: opts?.mcpServers ?? [],
         conn: this.conn,
-        proc: recovery.candidate,
-        fileCommands
+        proc: recovery.candidate
       })
       recovery.candidateSession = candidateSession
       this.trackRecoveryCandidate(recovery.candidate, candidateSession)
@@ -809,7 +807,6 @@ export class PiAcpAgent implements ACPAgent {
 
     this.lastSessionCwd = params.cwd
 
-    const fileCommands = loadSlashCommands(params.cwd)
     const enableSkillCommands = getEnableSkillCommands(params.cwd)
 
     // Pi doesn't support mcpServers, but we accept and store.
@@ -819,7 +816,6 @@ export class PiAcpAgent implements ACPAgent {
         cwd: params.cwd,
         mcpServers: params.mcpServers,
         conn: this.conn,
-        fileCommands,
         piCommand: process.env.PI_ACP_PI_COMMAND
       })
     } catch (error) {
@@ -925,7 +921,6 @@ export class PiAcpAgent implements ACPAgent {
         ? [PROJECT_TRUST_WARNING, updateNotice].filter(Boolean).join('\n\n') + '\n'
         : buildStartupInfo({
             cwd: params.cwd,
-            fileCommands,
             updateNotice
           })
 
@@ -987,14 +982,15 @@ export class PiAcpAgent implements ACPAgent {
             })
             return
           } catch {
-            // Fall back to file-based prompt templates (legacy behavior).
+            // Pi is the sole non-adapter command catalog authority. A failed
+            // discovery must not be reconstructed from prompt files.
           }
 
           await this.conn.sessionUpdate({
             sessionId: session.sessionId,
             update: {
               sessionUpdate: 'available_commands_update',
-              availableCommands: mergeCommands(toAvailableCommands(fileCommands), builtinAvailableCommands())
+              availableCommands: builtinAvailableCommands()
             }
           })
         })()
@@ -1029,7 +1025,6 @@ export class PiAcpAgent implements ACPAgent {
     if (unsupportedPiBuiltin) return unsupportedPiBuiltinPromptResponse(unsupportedPiBuiltin)
 
     // Built-in ACP slash command handling (headless-friendly subset).
-    // Note: file-based slash commands are expanded inside session.prompt().
     if (images.length === 0 && message.trimStart().startsWith('/')) {
       const trimmed = message.trim()
       const space = trimmed.indexOf(' ')
@@ -1543,8 +1538,6 @@ export class PiAcpAgent implements ACPAgent {
       mcpServers: params.mcpServers
     })
     try {
-      const fileCommands = loadSlashCommands(params.cwd)
-
       // Policy: within a single ACP connection (one Zed window), keep only one live pi subprocess.
       // (Tests sometimes stub out `this.sessions`, so guard the call.)
       try {
@@ -1709,14 +1702,15 @@ export class PiAcpAgent implements ACPAgent {
             })
             return
           } catch {
-            // fall back
+            // Pi is the sole non-adapter command catalog authority. A failed
+            // discovery must not be reconstructed from prompt files.
           }
 
           await this.conn.sessionUpdate({
             sessionId: session.sessionId,
             update: {
               sessionUpdate: 'available_commands_update',
-              availableCommands: mergeCommands(toAvailableCommands(fileCommands), builtinAvailableCommands())
+              availableCommands: builtinAvailableCommands()
             }
           })
         })()
@@ -2183,13 +2177,7 @@ function buildUpdateNotice(): string | null {
   }
 }
 
-function buildStartupInfo(opts: {
-  cwd: string
-  fileCommands: ReturnType<typeof loadSlashCommands>
-  updateNotice: string | null
-}): string {
-  void opts.fileCommands
-
+function buildStartupInfo(opts: { cwd: string; updateNotice: string | null }): string {
   const md: string[] = []
 
   // pi version header
@@ -2291,17 +2279,6 @@ function buildStartupInfo(opts: {
   pushSkillFromRoot(projectSkillsDir)
 
   addSection('Skills', skillsItems)
-
-  // Prompts
-  const promptsItems: string[] = []
-  const promptsDir = join(process.env.HOME ?? '', '.pi', 'agent', 'prompts')
-  try {
-    const prompts = readdirSync(promptsDir).filter(f => f.endsWith('.md'))
-    for (const f of prompts) promptsItems.push(`/${basename(f, '.md')}`)
-  } catch {
-    // ignore
-  }
-  addSection('Prompts', promptsItems)
 
   // Extensions
   const extItems: string[] = []

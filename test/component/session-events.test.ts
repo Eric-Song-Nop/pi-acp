@@ -1159,7 +1159,7 @@ test('PiAcpSession: cancel clears queued prompts', async () => {
   assert.equal(r2, 'cancelled')
 })
 
-test('PiAcpSession: expands /command before sending to pi', async () => {
+test('PiAcpSession: leaves prompt-template expansion to Pi', async () => {
   const conn = new FakeAgentSideConnection()
   const proc = new FakePiRpcProcess()
 
@@ -1173,7 +1173,7 @@ test('PiAcpSession: expands /command before sending to pi', async () => {
       {
         name: 'hello',
         description: 'test',
-        content: 'Say hello to $1',
+        content: 'ADAPTER_MUST_NOT_EXPAND_$1',
         source: '(project)'
       }
     ]
@@ -1181,7 +1181,7 @@ test('PiAcpSession: expands /command before sending to pi', async () => {
 
   const p = session.prompt('/hello world')
   assert.equal(proc.prompts.length, 1)
-  assert.equal(proc.prompts[0]!.message, 'Say hello to world')
+  assert.equal(proc.prompts[0]!.message, '/hello world')
 
   proc.emit({ type: 'agent_start' })
   proc.emit({ type: 'turn_end' })
