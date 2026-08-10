@@ -1077,20 +1077,24 @@ test(
 )
 
 test('C0.7 updater CLI parser requires explicit scope, CAS, and acceptance', () => {
+  const recordingDate = '2026-07-31'
   assert.deepEqual(
-    parseTranscriptUpdateArgs([
-      '--case',
-      'C0.7-XF01',
-      '--case',
-      'C0.7-XF02',
-      '--case',
-      'C0.7-XF03',
-      '--expected-old-manifest-sha',
-      'absent',
-      '--recheck-date',
-      '2026-08-07',
-      '--accept-baseline-change'
-    ]),
+    parseTranscriptUpdateArgs(
+      [
+        '--case',
+        'C0.7-XF01',
+        '--case',
+        'C0.7-XF02',
+        '--case',
+        'C0.7-XF03',
+        '--expected-old-manifest-sha',
+        'absent',
+        '--recheck-date',
+        '2026-08-07',
+        '--accept-baseline-change'
+      ],
+      recordingDate
+    ),
     {
       cases: ['C0.7-XF01', 'C0.7-XF02', 'C0.7-XF03'],
       expectedOldManifestSha256: 'absent',
@@ -1117,7 +1121,7 @@ test('C0.7 updater CLI parser requires explicit scope, CAS, and acceptance', () 
     ],
     ['--wat']
   ]) {
-    assert.throws(() => parseTranscriptUpdateArgs(args), /./u)
+    assert.throws(() => parseTranscriptUpdateArgs(args, recordingDate), /./u)
   }
 })
 
