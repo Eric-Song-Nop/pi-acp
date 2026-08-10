@@ -10,6 +10,8 @@ readonly PATCHED_PI_STRESS_ITERATIONS=100
 readonly PATCHED_PI_STRESS_PATTERN='^C3\.4 (patched Pi completes exact state-only /fixture-state with notify-before-response and no model turn|post-write cancel stops the exact patched child and fresh recovery never replays the command)$'
 readonly PATCHED_PI_AGENT_STRESS_ITERATIONS=100
 readonly PATCHED_PI_AGENT_SCHEDULE_ITERATIONS=50
+readonly PATCHED_PI_FAILURE_STRESS_ITERATIONS=100
+readonly PATCHED_PI_FAILURE_SCHEDULE_ITERATIONS=20
 
 require_unset() {
   local name=$1
@@ -19,7 +21,7 @@ require_unset() {
   fi
 }
 
-if [[ "$gate" == 'patched-command-preview' || "$gate" == 'patched-agent-preview' ]]; then
+if [[ "$gate" == 'patched-command-preview' || "$gate" == 'patched-agent-preview' || "$gate" == 'patched-failure-preview' ]]; then
   if [[ "${PI_ACP_PATCHED_PI_PACKAGE_ROOT+x}" != x ]]; then
     echo "${gate} requires PI_ACP_PATCHED_PI_PACKAGE_ROOT" >&2
     exit 1
@@ -28,9 +30,9 @@ if [[ "$gate" == 'patched-command-preview' || "$gate" == 'patched-agent-preview'
     echo "${gate} requires the exact pinned patched Pi package root" >&2
     exit 1
   fi
-  if [[ "$gate" == 'patched-command-preview' ]]; then
+  if [[ "$gate" == 'patched-command-preview' || "$gate" == 'patched-failure-preview' ]]; then
     if [[ "${PI_ACP_EXPERIMENTAL_FIXTURE_STATE+x}" != x || "$PI_ACP_EXPERIMENTAL_FIXTURE_STATE" != 1 ]]; then
-      echo 'patched-command-preview requires PI_ACP_EXPERIMENTAL_FIXTURE_STATE=1' >&2
+      echo "${gate} requires PI_ACP_EXPERIMENTAL_FIXTURE_STATE=1" >&2
       exit 1
     fi
     require_unset PI_ACP_EXPERIMENTAL_FIXTURE_AGENT
@@ -193,6 +195,44 @@ case "${gate}" in
       fi
       if ((stress_iteration % 10 == 0)); then
         echo "patched-agent-preview stress ${stress_iteration}/${PATCHED_PI_AGENT_STRESS_ITERATIONS} passed"
+      fi
+    done
+    ;;
+  patched-failure-preview)
+    failure_preview_tap="${TMPDIR}/patched-failure-preview.tap"
+    node --import tsx --test --test-concurrency=1 --test-reporter=tap \
+      test/component/real-pi-fixture-command-failures.test.ts | tee "$failure_preview_tap"
+    if grep -Eq '# (SKIP|skipped [1-9][0-9]*)' "$failure_preview_tap"; then
+      echo 'patched-failure-preview must run without skipped tests' >&2
+      exit 1
+    fi
+    grep -Fx '# tests 5' "$failure_preview_tap"
+    grep -Fx '# pass 5' "$failure_preview_tap"
+    grep -Fx '# fail 0' "$failure_preview_tap"
+    grep -Fx '# skipped 0' "$failure_preview_tap"
+
+    failure_schedules=(throw cancel timeout exit-before-response response-before-exit)
+    failure_stress_tap="${TMPDIR}/patched-failure-preview-stress.tap"
+    for ((stress_iteration = 1; stress_iteration <= PATCHED_PI_FAILURE_STRESS_ITERATIONS; stress_iteration += 1)); do
+      schedule_index=$(((stress_iteration - 1) / PATCHED_PI_FAILURE_SCHEDULE_ITERATIONS))
+      stress_schedule="${failure_schedules[$schedule_index]}"
+      if ! PI_ACP_C3_6_STRESS_SCHEDULE="$stress_schedule" \
+        node --import tsx --test --test-concurrency=1 --test-reporter=tap \
+          test/component/real-pi-fixture-command-failures.test.ts >"$failure_stress_tap" 2>&1; then
+        cat "$failure_stress_tap" >&2
+        echo "patched-failure-preview ${stress_schedule} stress iteration ${stress_iteration} failed" >&2
+        exit 1
+      fi
+      if ! grep -Fx '# tests 1' "$failure_stress_tap" >/dev/null ||
+        ! grep -Fx '# pass 1' "$failure_stress_tap" >/dev/null ||
+        ! grep -Fx '# fail 0' "$failure_stress_tap" >/dev/null ||
+        ! grep -Fx '# skipped 0' "$failure_stress_tap" >/dev/null; then
+        cat "$failure_stress_tap" >&2
+        echo "patched-failure-preview ${stress_schedule} stress iteration ${stress_iteration} did not run exactly one schedule" >&2
+        exit 1
+      fi
+      if ((stress_iteration % 10 == 0)); then
+        echo "patched-failure-preview stress ${stress_iteration}/${PATCHED_PI_FAILURE_STRESS_ITERATIONS} passed"
       fi
     done
     ;;

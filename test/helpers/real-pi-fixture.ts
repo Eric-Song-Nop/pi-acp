@@ -37,6 +37,8 @@ export const C1_4_LF_JSONL_LIVENESS_RESPONSE_TEXT = 'C1.4 post-turn liveness res
 export const C1_4_LF_JSONL_USER_TEXT = 'Return the deterministic C1.4 LF JSONL response.'
 export const C1_4_LF_JSONL_LIVENESS_USER_TEXT = 'Return the deterministic C1.4 liveness response.'
 export const C3_4_FIXTURE_HANG_SENTINEL = 'hang-after-receipt'
+export const C3_6_FIXTURE_OK_NOTIFICATION = 'Pi ACP C3.6 fixture state ok'
+export const C3_6_PRIVATE_THROW_CANARY = 'C3.6 private throw canary 7f19644ea4c84604'
 const LOOPBACK_CLOSE_TIMEOUT_MS = 1_000
 const LOOPBACK_BODY_TIMEOUT_MS = 2_000
 export const MAX_LOOPBACK_BODY_BYTES = 64 * 1024
@@ -240,6 +242,27 @@ export type RealPiC3_5Receipt = {
   reason?: 'quit'
 }
 
+export type RealPiC3_6Schedule = 'throw' | 'cancel' | 'timeout' | 'exit-before-response' | 'response-before-exit'
+
+export type RealPiC3_6Receipt = {
+  schemaVersion: 1
+  checkpoint: 'C3.6'
+  phase: 'session_start' | 'command_invocation' | 'session_shutdown'
+  sequence: number
+  nonce: string
+  piVersion: '0.83.0'
+  piPid: number
+  sessionId: string
+  sessionFile: string | null
+  invocationCount?: number
+  name?: 'fixture-state'
+  args?: string
+  argsUtf8ByteLength?: number
+  argsSha256?: string
+  argsBase64?: string
+  reason?: 'quit'
+}
+
 export type VerifiedReceipt<T> = {
   receipt: T
   stat: Stats
@@ -260,10 +283,21 @@ export type RealPiFixtureOptions = {
   lfJsonlResponse?: true
   hardDeadlineMs?: number
   clientShutdownTimeoutMs?: number
-  transcriptCheckpoint?: 'C0.6' | 'C0.7' | 'C1.1' | 'C1.2' | 'C1.3' | 'C1.4' | 'C1.5' | 'C2.2' | 'C3.4' | 'C3.5'
+  transcriptCheckpoint?:
+    | 'C0.6'
+    | 'C0.7'
+    | 'C1.1'
+    | 'C1.2'
+    | 'C1.3'
+    | 'C1.4'
+    | 'C1.5'
+    | 'C2.2'
+    | 'C3.4'
+    | 'C3.5'
+    | 'C3.6'
   transcriptCaseId?: string
   transcriptMetadata?: AcpTranscriptMetadata
-  fixtureMode?: 'c3.4-execute-command' | 'c3.5-agent-run'
+  fixtureMode?: 'c3.4-execute-command' | 'c3.5-agent-run' | 'c3.6-failure-lifecycle'
   c3_5Schedule?: RealPiC3_5Schedule
   patchedPiPackageRoot?: string
   projectPrompts?: readonly {
@@ -292,6 +326,9 @@ const c3_4ExecuteCommandExtensionSourcePath = fileURLToPath(
 )
 const c3_5AgentRunExtensionSourcePath = fileURLToPath(
   new URL('../fixtures/pi-extension-pack/c3.5-agent-run/index.ts', import.meta.url)
+)
+const c3_6FailureLifecycleExtensionSourcePath = fileURLToPath(
+  new URL('../fixtures/pi-extension-pack/c3.6-failure-lifecycle/index.ts', import.meta.url)
 )
 const failingGlobalExtensionSourcePath = fileURLToPath(
   new URL('../fixtures/pi-extension-pack/failing-load/index.ts', import.meta.url)
@@ -654,12 +691,13 @@ export async function startRealPiFixture(options: RealPiFixtureOptions = {}) {
   const projectPrompts = validateProjectPrompts(options.projectPrompts)
   const c3_4ExecuteCommand = options.fixtureMode === 'c3.4-execute-command'
   const c3_5AgentRun = options.fixtureMode === 'c3.5-agent-run'
-  const patchedPreview = c3_4ExecuteCommand || c3_5AgentRun
+  const c3_6FailureLifecycle = options.fixtureMode === 'c3.6-failure-lifecycle'
+  const patchedPreview = c3_4ExecuteCommand || c3_5AgentRun || c3_6FailureLifecycle
   if (options.patchedPiPackageRoot !== undefined && !patchedPreview) {
-    throw new TypeError('patched Pi package root is accepted only by a C3.4/C3.5 execute-command fixture')
+    throw new TypeError('patched Pi package root is accepted only by a C3.4/C3.5/C3.6 execute-command fixture')
   }
   if (patchedPreview && !options.patchedPiPackageRoot) {
-    throw new TypeError('C3.4/C3.5 execute-command fixture requires a patched Pi package root')
+    throw new TypeError('C3.4/C3.5/C3.6 execute-command fixture requires a patched Pi package root')
   }
   if (options.patchedPiPackageRoot !== undefined && !isAbsolute(options.patchedPiPackageRoot)) {
     throw new TypeError('patched Pi package root must be absolute')
@@ -681,11 +719,12 @@ export async function startRealPiFixture(options: RealPiFixtureOptions = {}) {
       childTermination,
       lfJsonlResponse,
       c3_4ExecuteCommand,
-      c3_5AgentRun
+      c3_5AgentRun,
+      c3_6FailureLifecycle
     ].filter(Boolean).length > 1
   ) {
     throw new TypeError(
-      'real Pi fixture load failure, runtime error, child termination, LF JSONL response, C3.4, and C3.5 modes are mutually exclusive'
+      'real Pi fixture load failure, runtime error, child termination, LF JSONL response, C3.4, C3.5, and C3.6 modes are mutually exclusive'
     )
   }
   const hardDeadlineMs = options.hardDeadlineMs
@@ -1041,7 +1080,9 @@ export async function startRealPiFixture(options: RealPiFixtureOptions = {}) {
       ? c3_4ExecuteCommandExtensionSourcePath
       : c3_5AgentRun
         ? c3_5AgentRunExtensionSourcePath
-        : globalExtensionSourcePath
+        : c3_6FailureLifecycle
+          ? c3_6FailureLifecycleExtensionSourcePath
+          : globalExtensionSourcePath
     c3_5PreflightReleasePath = c3_5AgentRun ? join(receiptDir, `pi-acp-c3.5-preflight-release-${nonce}`) : undefined
     c3_5ProviderFinalReleasePath = c3_5AgentRun
       ? join(receiptDir, `pi-acp-c3.5-provider-final-release-${nonce}`)
@@ -1183,7 +1224,9 @@ export async function startRealPiFixture(options: RealPiFixtureOptions = {}) {
       ? 'pi-extension-pack-c3.4-execute-command'
       : c3_5AgentRun
         ? 'pi-extension-pack-c3.5-agent-run'
-        : 'pi-extension-pack-v1'
+        : c3_6FailureLifecycle
+          ? 'pi-extension-pack-c3.6-failure-lifecycle'
+          : 'pi-extension-pack-v1'
 
     const environment = isolatedEnvironment({
       homeDir,
@@ -1202,7 +1245,7 @@ export async function startRealPiFixture(options: RealPiFixtureOptions = {}) {
       piPackageRoot,
       piCommand,
       piNode: expectedNodeRealpath,
-      fixtureStatePreview: c3_4ExecuteCommand,
+      fixtureStatePreview: c3_4ExecuteCommand || c3_6FailureLifecycle,
       fixtureAgentPreview: c3_5AgentRun,
       c3_5Schedule: options.c3_5Schedule
     })
@@ -1219,7 +1262,9 @@ export async function startRealPiFixture(options: RealPiFixtureOptions = {}) {
       transcriptMetadata: {
         ...(options.transcriptMetadata ?? {}),
         planId: 'PACP-CMD-2026-01',
-        checkpoint: options.transcriptCheckpoint ?? (c3_4ExecuteCommand ? 'C3.4' : c3_5AgentRun ? 'C3.5' : 'C0.6'),
+        checkpoint:
+          options.transcriptCheckpoint ??
+          (c3_4ExecuteCommand ? 'C3.4' : c3_5AgentRun ? 'C3.5' : c3_6FailureLifecycle ? 'C3.6' : 'C0.6'),
         fixtureId,
         fixtureSources: [
           {
@@ -1227,7 +1272,9 @@ export async function startRealPiFixture(options: RealPiFixtureOptions = {}) {
               ? 'test/fixtures/pi-extension-pack/c3.4-execute-command/index.ts'
               : c3_5AgentRun
                 ? 'test/fixtures/pi-extension-pack/c3.5-agent-run/index.ts'
-                : 'test/fixtures/pi-extension-pack/index.ts',
+                : c3_6FailureLifecycle
+                  ? 'test/fixtures/pi-extension-pack/c3.6-failure-lifecycle/index.ts'
+                  : 'test/fixtures/pi-extension-pack/index.ts',
             sha256: expectedExtensionSha256
           },
           ...(expectedFailingExtensionSha256
@@ -1331,6 +1378,14 @@ export async function startRealPiFixture(options: RealPiFixtureOptions = {}) {
         names.sort()
         return await Promise.all(
           names.map(name => readVerifiedReceipt<RealPiC3_5Receipt>(join(receiptDir, name), receiptBoundary))
+        )
+      },
+      async readC3_6Receipts(phase: RealPiC3_6Receipt['phase']): Promise<VerifiedReceipt<RealPiC3_6Receipt>[]> {
+        const prefix = `pi-acp-c3.6-${phase}-${nonce}-`
+        const names = (await readdir(receiptDir)).filter(name => name.startsWith(prefix) && name.endsWith('.json'))
+        names.sort()
+        return await Promise.all(
+          names.map(name => readVerifiedReceipt<RealPiC3_6Receipt>(join(receiptDir, name), receiptBoundary))
         )
       },
       createRawPiProbeEnvironment(): NodeJS.ProcessEnv {

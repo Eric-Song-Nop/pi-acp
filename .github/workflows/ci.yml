@@ -333,6 +333,11 @@ jobs:
             patched_preview: true
             fixture_state_preview: false
             fixture_agent_preview: true
+          - suite: patched-failure-preview
+            label: pi-0.83.0-patched-failure-preview
+            patched_preview: true
+            fixture_state_preview: true
+            fixture_agent_preview: false
     steps:
       - name: Check out the requested immutable head
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
