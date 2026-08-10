@@ -34,14 +34,22 @@ const expectedDevelopmentAdvisories = [
   'GHSA-3jxr-9vmj-r5cp',
   'GHSA-3ppc-4f35-3m26',
   'GHSA-3v7f-55p6-f55p',
+  'GHSA-4cwx-7wf7-3272',
   'GHSA-52cp-r559-cp3m',
+  'GHSA-5p4m-2wfm-xmqj',
+  'GHSA-7p8r-x3mc-p8w7',
   'GHSA-7r86-cg39-jmmj',
+  'GHSA-8xcm-r25x-g524',
   'GHSA-c2c7-rcm5-vvqj',
   'GHSA-f886-m6hf-6m8v',
   'GHSA-h67p-54hq-rp68',
+  'GHSA-jr45-8vmc-qm54',
+  'GHSA-m8rv-5g2x-5cg5',
   'GHSA-mh99-v99m-4gvg',
   'GHSA-mw96-cpmx-2vgc',
-  'GHSA-rf6f-7fwh-wjgh'
+  'GHSA-rf6f-7fwh-wjgh',
+  'GHSA-rgw5-rvv9-x895',
+  'GHSA-v3r7-h72x-cjcm'
 ] as const
 
 function readJson(path: string): unknown {
@@ -395,10 +403,10 @@ test('compatibility matrix records exact live audit totals, advisories, and foll
   assert.deepEqual(matrix.dependencyAudit.development, {
     info: 0,
     low: 0,
-    moderate: 0,
-    high: 6,
+    moderate: 1,
+    high: 8,
     critical: 0,
-    total: 6
+    total: 9
   })
   assert.deepEqual(matrix.dependencyAudit.developmentAdvisories, expectedDevelopmentAdvisories)
   assert.deepEqual(matrix.dependencyAudit.tool, {
