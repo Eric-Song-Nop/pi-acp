@@ -4,6 +4,57 @@ set -euo pipefail
 gate="${1:-}"
 umask 077
 
+readonly PATCHED_PI_SOURCE_SHA='ec55c97d680f8f38359f7b6717c72b83c5e4d29a'
+readonly PATCHED_PI_PACKAGE_ROOT="/workspace/node_modules/.pi-acp-patched-pi/${PATCHED_PI_SOURCE_SHA}/package"
+readonly PATCHED_PI_STRESS_ITERATIONS=100
+readonly PATCHED_PI_STRESS_PATTERN='^C3\.4 (patched Pi completes exact state-only /fixture-state with notify-before-response and no model turn|post-write cancel stops the exact patched child and fresh recovery never replays the command)$'
+
+require_unset() {
+  local name=$1
+  if /usr/bin/printenv "$name" >/dev/null 2>&1; then
+    echo "${gate} must not receive ${name}" >&2
+    exit 1
+  fi
+}
+
+if [[ "$gate" == 'patched-command-preview' ]]; then
+  if [[ "${PI_ACP_PATCHED_PI_PACKAGE_ROOT+x}" != x ]]; then
+    echo 'patched-command-preview requires PI_ACP_PATCHED_PI_PACKAGE_ROOT' >&2
+    exit 1
+  fi
+  if [[ "$PI_ACP_PATCHED_PI_PACKAGE_ROOT" != "$PATCHED_PI_PACKAGE_ROOT" ]]; then
+    echo 'patched-command-preview requires the exact pinned patched Pi package root' >&2
+    exit 1
+  fi
+  if [[ "${PI_ACP_EXPERIMENTAL_FIXTURE_STATE+x}" != x || "$PI_ACP_EXPERIMENTAL_FIXTURE_STATE" != 1 ]]; then
+    echo 'patched-command-preview requires PI_ACP_EXPERIMENTAL_FIXTURE_STATE=1' >&2
+    exit 1
+  fi
+  if [[ ! -d "$PATCHED_PI_PACKAGE_ROOT" || ! -x "$PATCHED_PI_PACKAGE_ROOT/dist/cli.js" ]]; then
+    echo 'patched-command-preview requires the verified patched Pi package and executable CLI' >&2
+    exit 1
+  fi
+  if [[ ! -L "$PATCHED_PI_PACKAGE_ROOT/node_modules" ]]; then
+    echo 'patched-command-preview requires the verified patched Pi dependency link' >&2
+    exit 1
+  fi
+  if [[ "$(readlink -- "$PATCHED_PI_PACKAGE_ROOT/node_modules")" != '../../../@earendil-works/pi-coding-agent/node_modules' ]]; then
+    echo 'patched-command-preview rejected an unexpected patched Pi dependency link' >&2
+    exit 1
+  fi
+  if [[ "$(cd -- "$PATCHED_PI_PACKAGE_ROOT" && pwd -P)" != "$PATCHED_PI_PACKAGE_ROOT" ]]; then
+    echo 'patched-command-preview rejected a non-canonical patched Pi package root' >&2
+    exit 1
+  fi
+  if [[ "$(cd -- "$PATCHED_PI_PACKAGE_ROOT/node_modules" && pwd -P)" != '/workspace/node_modules/@earendil-works/pi-coding-agent/node_modules' ]]; then
+    echo 'patched-command-preview rejected a patched Pi dependency link outside the stock package' >&2
+    exit 1
+  fi
+else
+  require_unset PI_ACP_PATCHED_PI_PACKAGE_ROOT
+  require_unset PI_ACP_EXPERIMENTAL_FIXTURE_STATE
+fi
+
 mkdir -p \
   "${HOME}" \
   "${TMPDIR}" \
@@ -59,6 +110,39 @@ case "${gate}" in
     node --import tsx scripts/check-command-transcripts.ts
     node --import tsx --test --test-concurrency=1 \
       test/component/immutable-real-pi-transcripts.test.ts
+    ;;
+  patched-command-preview)
+    preview_tap="${TMPDIR}/patched-command-preview.tap"
+    node --import tsx --test --test-concurrency=1 --test-reporter=tap \
+      test/component/real-pi-fixture-state-preview.test.ts | tee "$preview_tap"
+    if grep -Eq '# (SKIP|skipped [1-9][0-9]*)' "$preview_tap"; then
+      echo 'patched-command-preview must run without skipped tests' >&2
+      exit 1
+    fi
+    grep -Eq '^# tests [1-9][0-9]*$' "$preview_tap"
+    grep -Fx '# skipped 0' "$preview_tap"
+
+    stress_tap="${TMPDIR}/patched-command-preview-stress.tap"
+    for ((stress_iteration = 1; stress_iteration <= PATCHED_PI_STRESS_ITERATIONS; stress_iteration += 1)); do
+      if ! node --import tsx --test --test-concurrency=1 --test-reporter=tap \
+        --test-name-pattern="$PATCHED_PI_STRESS_PATTERN" \
+        test/component/real-pi-fixture-state-preview.test.ts >"$stress_tap" 2>&1; then
+        cat "$stress_tap" >&2
+        echo "patched-command-preview stress iteration ${stress_iteration} failed" >&2
+        exit 1
+      fi
+      if ! grep -Fx '# tests 2' "$stress_tap" >/dev/null ||
+        ! grep -Fx '# pass 2' "$stress_tap" >/dev/null ||
+        ! grep -Fx '# fail 0' "$stress_tap" >/dev/null ||
+        ! grep -Fx '# skipped 0' "$stress_tap" >/dev/null; then
+        cat "$stress_tap" >&2
+        echo "patched-command-preview stress iteration ${stress_iteration} did not run exactly the two required schedules" >&2
+        exit 1
+      fi
+      if ((stress_iteration % 10 == 0)); then
+        echo "patched-command-preview stress ${stress_iteration}/${PATCHED_PI_STRESS_ITERATIONS} passed"
+      fi
+    done
     ;;
   *)
     echo "Unknown C0.3 CI gate: ${gate}" >&2

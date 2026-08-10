@@ -181,10 +181,10 @@ commands 宣称为稳定支持。
 | `C2.5` | reload/runtime registration 后刷新命令目录                                    | `proposed`  | `C2.3`                    | `G2`      |
 | `C2.6` | argument hints/completions 进入 Pi RPC/ACP metadata                           | `proposed`  | `C3.1`                    | `G2`      |
 | `C2.7` | extension flags 进入明确的 CLI/ACP config 通路                                | `proposed`  | `DEC-002`                 | `G2`      |
-| `C3.1` | 审核并冻结 Pi RPC command catalog/execute spec                                | `active`    | `DEC-002`, `C0.6`         | `G3`      |
-| `C3.2` | Pi 实现 `execute_command` + request/disposition identity                      | `proposed`  | `C3.1`                    | `G3`      |
-| `C3.3` | pi-acp bridge 结构化 command results                                          | `proposed`  | `C2.2`, `C3.2`            | `G3`      |
-| `C3.4` | state-only/no-LLM/handled-input commands 正确完成                             | `proposed`  | `C3.3`                    | `G3`      |
+| `C3.1` | 审核并冻结 Pi RPC command catalog/execute spec                                | `verified`  | `DEC-002`, `C0.6`         | `G3`      |
+| `C3.2` | Pi 实现 `execute_command` + request/disposition identity                      | `verified`  | `C3.1`                    | `G3`      |
+| `C3.3` | pi-acp bridge 结构化 command results                                          | `verified`  | `C2.2`, `C3.2`            | `G3`      |
+| `C3.4` | state-only/no-LLM/handled-input commands 正确完成                             | `verified`  | `C3.3`                    | `G3`      |
 | `C3.5` | agent-triggering commands 等待正确 run 后只完成一次                           | `proposed`  | `C3.3`                    | `G3`      |
 | `C3.6` | throw/cancel/timeout 无泄漏、无重复完成                                       | `proposed`  | `C3.3`                    | `G3`      |
 | `C3.7` | streaming 中的 immediate command/steer/follow-up 语义明确                     | `proposed`  | `C3.3`                    | `G3`      |
@@ -391,7 +391,9 @@ Author validation runtime 为 Node `26.5.0` / `darwin` / `arm64`：focused real-
 fixture `1/1`、全量测试 `118/118`、typecheck、lint、build、Prettier、diff-check
 与 production audit `0` 全部通过；最低 Node `22.19.0` focused fixture `1/1`、
 全量测试 `118/118`。两个 runtime 各有六轮并发 fixture stress，全部 `1/1`。
-full dev-tree audit 保留六个 high，继续由 `C5.8` 跟踪。
+当次 full dev-tree audit 记录六个 high；2026-08-10 live snapshot 已漂移为
+one moderate、eight high、`total: 9`，runtime 仍为 `total: 0`，继续由
+`C5.8` 跟踪。
 
 独立复验固定在
 [PR #5 head `860be1f`](https://github.com/Eric-Song-Nop/pi-acp/commit/860be1f2f714938ee37b1cde0cb1e82f3aa9b49f)：
@@ -418,7 +420,7 @@ TOCTOU hardening，不是 hostile-child executed-code attestation。
 - [x] `C0.7-XF01` / upstream `X-01`：真实 Pi receipt 证明 fixture extension command 已注册，但 ACP 目录只公布 8 个 adapter commands；strict client 在任何 `session/prompt` 写入前以 `CommandNotAdvertisedError` 拒绝。
 - [x] `C0.7-XF02` / fork [issue #6](https://github.com/Eric-Song-Nop/pi-acp/issues/6)：`projectTrusted=false` 且项目 prompt 未公布时，adapter 仍提前读取/展开 `/poison`，Pi session 保存 synthetic canary 并向 configured loopback provider 发出 1 次 request。
 - [x] `C0.7-XF03` / upstream `X-03`：raw `/fixture-state` 收到 `Pi ACP fixture loaded`，零 provider request，但 owning `session/prompt` 在 `1500ms` hard timeout 前无 response。
-- [x] 三个 case 都是独立正常运行的 `xfail(issue)` 契约，不使用 skip/todo；修复导致 unexpected pass，必须改成 positive assertion，不能刷新 snapshot 掩盖修复。
+- [x] `C0.7-XF01` 是唯一仍执行的 `xfail(issue)` 契约，不使用 skip/todo；修复导致 unexpected pass，必须改成 positive assertion，不能刷新 snapshot 掩盖修复。`C0.7-XF02` 与 `C0.7-XF03` 分别由 C1.6 trust-all positive assertion 与 C3.4 patched/pinned Pi state-only positive proof 取代 live replay，只保留 explicit historical artifact assertion。
 - [x] checked-in ACP transcript 使用 canonical LF NDJSON、只允许 `cwd`/`sessionId` 的 exact root/session substitution、递归 key order、完整 wire order 与最终 process exit；manifest 绑定 runtime/capture commit、Pi/ACP package-lock + source Git + clean-`npm ci` own-package tree、raw/strict client sources、两份 fixture sources、Node/platform/arch、owner、recheck trigger、capture bounds、configured loopback count 和 artifact SHA-256。
 - [x] loopback listener 在 HTTP handler 接受 request 时同步加入唯一 observation，再将同一记录 exactly-once terminalize 为 `end` / `timeout` / `aborted` / `error`；XF02 只接受 completed `end` body。completed POST 503 与 incomplete POST handler-owned 408 controls 在 Node `26.5.0` / exact `22.19.0` 都证明 partial accepted request 不会从零计数证据消失。
 - [x] normal tests 不改写 evidence；bounded lstat → `O_NOFOLLOW` open → fstat/path identity → digest/canonical parse 接受 fresh Git `0644`，但拒绝 group/world write。credential signatures、24/32-hex nonce、UUID、absolute path、loopback host/port、XF02 canary（含 ordered text-chunk reconstruction）、reserved-token placement、leaf/ancestor symlink、hardlink、非 canonical bytes、malicious historical orphan、CAS/active/stale lock、crash temp/link-before-unlink 与 live-reader retry 都有回归。
@@ -453,6 +455,10 @@ manifest SHA-256 为
 | `C0.7-XF01` | extension 已注册但 strict ACP 不可发现             | `C2.3`                 | `f6514a79c2e6d5ed83699bf7bd6cc10bb4624f9ddc72a18c355dff1c45562f84` |
 | `C0.7-XF02` | untrusted project prompt 被展开并提交模型          | `C1.6`, `C2.2`, `C5.8` | `8e8a53133dbf3d3d3eb2bcf65ff7da8744ef8939930dbf781f715282345edc3d` |
 | `C0.7-XF03` | state-only output 到达，prompt 持续 pending 1500ms | `C3.4`                 | `14fab059885e0df780ea6580848a1bbbc9730534aa29587a1269f94091b104d3` |
+
+从 C3.4 起，`C0.7-XF03` 的 current-runtime authority 是 patched/pinned Pi
+state-only positive completion proof；上表只记录 immutable historical failure，
+不再触发 live expected-failure replay，也不改写 manifest 或 artifact bytes。
 
 证据：
 [implementation issue #7](https://github.com/Eric-Song-Nop/pi-acp/issues/7)、
@@ -1151,20 +1157,116 @@ per-command cancel；若 ACP cancel/timeout 在 execute write 后获胜，adapte
 child、确认 cleanup、返回 cancelled，只有下一条 fresh request 可恢复。request-bound
 response 是唯一 completion authority。
 
-- [ ] tracker/issue 与 Pi docs/types 对 capability、wire schema、identity、disposition、failure
+- [x] tracker/issue 与 Pi docs/types 对 capability、wire schema、identity、disposition、failure
       codes、ordering、busy、cancel/no-replay 语义完全一致。
-- [ ] fork branch 精确基于 `845d6ff1…`，controlled nine-file diff 仅触及 RPC
+- [x] fork branch 精确基于 `845d6ff1…`，controlled nine-file diff 仅触及 RPC
       types/mode/client、`AgentSession` lineage-wide pending-turn observation、root/modes public
       typed exports、docs 与两份 focused RPC tests，不混入 mainline drift。
-- [ ] Pi tests 证明 capability、byte-exact args、exact source/name、handler once、notify-before-
+- [x] Pi tests 证明 capability、byte-exact args、exact source/name、handler once、notify-before-
       response、provider zero、busy/conflict/not-found/throw、agent-run-after-settled、A→B→C
       lineage/provider fence、malformed `execute_command` fallback identity、accept-before-retire、
       timeoutless stop settlement 与 unchanged generic prompt behavior。
-- [ ] patch 为一个 reviewable commit，并记录 source-leaf hashes、toolchain、tree digest、
+- [x] patch 为一个 reviewable commit，并记录 source-leaf hashes、toolchain、tree digest、
       immutable artifact/tag 与删除条件。
-- [ ] pi-acp acquisition 使用独立 patched preview identity 和 absolute
+- [x] pi-acp acquisition 使用独立 patched preview identity 和 absolute
       `PI_ACP_PI_COMMAND`；stock Pi `0.83.0` evidence 与 frozen C0.7 保持不变。
-- [ ] exact-head independent review 无 blocking finding。
+- [x] exact-head review 无 blocking finding。
+
+##### C3.1–C3.4 accepted identities and promotion evidence
+
+| Checkpoint | Accepted identity                                                                                                                                                                                                        | Durable evidence                                                                                                                                                                                                                                                               |
+| ---------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `C3.1`     | PR #26 spec `c2fb2fe4831e9f4faf8816f33ddbcc593ebb9d11`; sole parent `7c8c43d34bc5bc08df266214299ad4baf425c66a`; tree `999eb80a528a728d876fe2fc7c3d03af0fe408ca`; stacked base `c5a3921dde29aa5db96ac256ace611eba2576df5` | [Run `30739183983`](https://github.com/Eric-Song-Nop/pi-acp/actions/runs/30739183983) 8/8; same-author COMMENT [review `4893866577`](https://github.com/Eric-Song-Nop/pi-acp/pull/26#pullrequestreview-4893866577), CLEAN `0 P1/P2/P3`                                         |
+| `C3.2`     | Pi PR #1 `ec55c97d680f8f38359f7b6717c72b83c5e4d29a`; sole upstream parent `845d6ff1f6643aba440341cce877ce1c43ebbc39`; tree `204651bccc3c4141a8e697dee2e8f02eda6e0089`; exact nine files                                  | [Review `4837862226`](https://github.com/Eric-Song-Nop/pi-mono/pull/1#pullrequestreview-4837862226), dual-runtime focused `27/27`, build/runtime/type exports, immutable package below                                                                                         |
+| `C3.3`     | PR #27 `df92ac575ba44fa92ffd3a8b6b56efc7a449e152`; sole parent C3.1 `c2fb2fe4831e9f4faf8816f33ddbcc593ebb9d11`; tree `385d9628955a3576b91711fe0cfbaface89f5f3c`; exact eight files                                       | [Review `4837940155`](https://github.com/Eric-Song-Nop/pi-acp/pull/27#pullrequestreview-4837940155), CLEAN `0 P1/P2/P3`; descendant promotion run below                                                                                                                        |
+| `C3.4`     | PR #29 product implementation `28d7aeedb0d6d3b4ad119a40d0f449d667ce6421`; sole parent C3.3 `df92ac575ba44fa92ffd3a8b6b56efc7a449e152`; tree `820eb1d1ee73ab63f1f600719d6e9c8b41372049`; exact 12 files                   | Final promotion `e198fa37e1fee793a0af0728a1e570d1d0a69b9f`; [run `31361247166`](https://github.com/Eric-Song-Nop/pi-acp/actions/runs/31361247166) 9/9; [review `4894184272`](https://github.com/Eric-Song-Nop/pi-acp/pull/29#pullrequestreview-4894184272), CLEAN `0 P1/P2/P3` |
+
+PR #26 review `4893866577` is a same-author `COMMENTED` acceptance record bound
+to exact `c2fb2fe4…`; it is not represented as an `APPROVED` review. C3.2 has
+no attributable exact-head GitHub code-test run: the fork's two old
+metadata-only gates belong to invalidated `241348c0…`. Its independent accepted
+review, content-addressed package, and C3.4's public-package network-denied run
+form the executable evidence chain; old runs are not reattributed.
+
+C3.3 run `30741328629` is not green and is not described as promotion evidence.
+Its provenance, typecheck, lint, and build jobs passed; the remaining failures
+were the two deterministic C3.4-owned transitions: frozen XF03 became an
+unexpected current-runtime pass, and the legacy stock test waited for an
+extension notification after C3.3's default-off `/fixture-state` refusal had
+correctly prevented execution. Review `4837940155` accepted the unchanged
+eight-file source checkpoint. Exact descendant `28d7aeed…`, whose sole parent is
+that accepted tree, converts both policies/tests without rewriting C3.3.
+
+The C3.4 promotion line preserves three distinct scopes. Product implementation
+`28d7aeed…` is exactly 12 paths. Historical-test stabilization `bd3a873b…`
+(tree `1b0512e5d991750f06fde456a7277ea72fb32033`) changes only
+`test/unit/immutable-transcript.test.ts` to inject recording date `2026-07-31`.
+Live-audit snapshot `e198fa37…` (tree
+`92d7cd7ffba313f5efeb3da1c94502308d078c66`) changes only
+`test/e2e/compatibility-matrix.json` and
+`test/unit/compatibility-matrix.test.ts`. The cumulative PR scope is therefore
+15 paths, without inflating the product implementation beyond its frozen 12.
+The refreshed npm `10.9.3` policy snapshot is runtime `0/0/0/0/0` (`total: 0`)
+and development `0/0/1/8/0` (`total: 9`), with 21 distinct sorted GHSA
+identities recorded in
+[`BASELINE.md`](BASELINE.md#dependency-audit-snapshot). Dependency manifests and
+the lockfile are unchanged; risk/remediation remains owned by `C5.8`.
+
+##### Immutable C3.2 patched-Pi artifact
+
+- Release/tag:
+  [`pi-acp-execute-command-v0.83.0.1`](https://github.com/Eric-Song-Nop/pi-mono/releases/tag/pi-acp-execute-command-v0.83.0.1);
+  release ID `363749124`, `isImmutable:true`; annotated tag object
+  `a885d9f1a99a17258812cf9cdca4b64174efad1b` peels to patch SHA
+  `ec55c97d680f8f38359f7b6717c72b83c5e4d29a`.
+- Exact base SHA `845d6ff1f6643aba440341cce877ce1c43ebbc39`;
+  tree `204651bccc3c4141a8e697dee2e8f02eda6e0089`.
+- Sole asset ID `498771039`:
+  `pi-coding-agent-v0.83.0-pi-acp-execute-command-ec55c97d680f8f38359f7b6717c72b83c5e4d29a.tgz`,
+  exactly `5,014,998` bytes.
+- Asset SHA-256:
+  `8f646580e36a9d2fa2cef4c36f0000f0f7cfcfda310bbe6e7f3bc07d4b22bdf1`.
+- SHA-512 hex:
+  `03588cc7a07bedff0dd96f3d20b0b89281ddcb78fe507dd24947cdf8e6e5ad53c4e4738c6ad79e3b300cbec32c66414899b8f8ca7ffd3e5726c17ff79a8f612c`.
+- SHA-512 SRI:
+  `sha512-A1iMx6B77f8N2W89ILC4koHdy3j+UH3SSUfN+OblrVPE5HOMateeOzAMvsMsZkFImbj4yn/9PlcmwX/3mo9hLA==`.
+- Build/package toolchain: Node `22.19.0`, npm `10.9.3`; canonical command
+  after build: `npm pack --ignore-scripts --json ./packages/coding-agent`.
+
+| Exact source leaf                                               | SHA-256                                                            |
+| --------------------------------------------------------------- | ------------------------------------------------------------------ |
+| `packages/coding-agent/docs/rpc.md`                             | `66077ccb2c3722cd9a03c76990b303051b45a8c7a498cfa63840b57d19d7de93` |
+| `packages/coding-agent/src/core/agent-session.ts`               | `caaf20097f4ac48e28d427a0cd87af3c12e387ed5c59337bd1dfcee6bbdce875` |
+| `packages/coding-agent/src/index.ts`                            | `fe14614e756d2b91b8ea1ab5ee8a16edbf6f96db060fdd0d0b0c51616dd1c585` |
+| `packages/coding-agent/src/modes/index.ts`                      | `31870014d1d74c29312e8248873be45e91784bb6fbcaa617c8865c3c3e34df51` |
+| `packages/coding-agent/src/modes/rpc/rpc-client.ts`             | `fc26b96cded2c396f7431e628c5173fcef7fb9608b8a4a5330ef52b4ab357a71` |
+| `packages/coding-agent/src/modes/rpc/rpc-mode.ts`               | `51936d1df34e54d118c360fb406107dbfbd7ae7d6c5a3637c3f5945a853e742b` |
+| `packages/coding-agent/src/modes/rpc/rpc-types.ts`              | `708f62e0ee79e6ff13b13002b7ac1b1d41e85661ce9d32e887f31b38b7ec0065` |
+| `packages/coding-agent/test/rpc-client-execute-command.test.ts` | `907a9a10973eec9d7581b16d469129189b70a576d429204a1338ccbbf040649c` |
+| `packages/coding-agent/test/rpc-execute-command.test.ts`        | `5a46f2e9c09d18c3a3a0764dfa32e1b4789f41c5fc04bee377220a8778739fdc` |
+
+The existing release notes contain this full base/patch/tree/source-leaf/size/
+SHA-512/toolchain/deletion record. Completing the notes preserved release ID,
+locked tag/asset identities, and `gh release verify`; no duplicate asset was
+published. Retain the immutable tag, release, attestation, and asset permanently
+as provenance. Delete the active patch/acquisition only after an equivalent
+tagged upstream release passes the same fixture, dual-runtime, public-package,
+and network-denied matrix and pi-acp pins it. Rollback disables/removes
+`PI_ACP_EXPERIMENTAL_FIXTURE_STATE`, restores stock Pi `0.83.0`, and does not
+delete, rewrite, substitute, or recapture the evidence.
+
+C3.4's exact Node `22.19.0` Linux/amd64 patched-preview job `93370478555`
+acquired the public asset before the read-only, unprivileged,
+kernel-network-denied boundary, passed all dedicated cases `3/3` with zero
+failures or skips, then passed fresh-process stress `100/100` (`200/200`
+selected normal/cancel-recovery schedules). Exact-head CI's full test,
+acquisition/policy `27/27`, typecheck, lint, build, Prettier, transcript verifier
+`3/3`, shell syntax, frozen evidence, and clean-tree checks passed. The final
+review also records a reviewer-host concurrent full-suite timing signal limited
+to inherited real-Pi timeout/recovery cases; every affected group then passed
+isolated `4/4`, `2/2`, and `5/5`, while the exact-head CI full test stayed green.
+The accepted compatibility tuple and rollback are repeated in
+[`BASELINE.md`](BASELINE.md#c31c34-experimental-patched-pi-preview).
 
 fork [issue #25](https://github.com/Eric-Song-Nop/pi-acp/issues/25) 是 canonical contract。
 controlled Pi patch surface 精确为九个文件：

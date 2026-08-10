@@ -18,6 +18,10 @@ env:
   CI_NODE_VERSION: '22.19.0'
   CI_NPM_VERSION: '10.9.3'
   CI_CONTAINER_IMAGE: node:22.19.0-bookworm@sha256:afff6d8c97964a438d2e6a9c96509367e45d8bf93f790ad561a1eaea926303d9
+  CI_PATCHED_PI_RELEASE_URL: https://github.com/Eric-Song-Nop/pi-mono/releases/download/pi-acp-execute-command-v0.83.0.1/pi-coding-agent-v0.83.0-pi-acp-execute-command-ec55c97d680f8f38359f7b6717c72b83c5e4d29a.tgz
+  CI_PATCHED_PI_SOURCE_SHA: ec55c97d680f8f38359f7b6717c72b83c5e4d29a
+  CI_PATCHED_PI_SHA512_HEX: 03588cc7a07bedff0dd96f3d20b0b89281ddcb78fe507dd24947cdf8e6e5ad53c4e4738c6ad79e3b300cbec32c66414899b8f8ca7ffd3e5726c17ff79a8f612c
+  CI_PATCHED_PI_SHA512_SRI: sha512-A1iMx6B77f8N2W89ILC4koHdy3j+UH3SSUfN+OblrVPE5HOMateeOzAMvsMsZkFImbj4yn/9PlcmwX/3mo9hLA==
   EXPECTED_ADAPTER_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
   C0_3_PR_HEAD_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || '' }}
   C0_3_PR_BASE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || '' }}
@@ -115,7 +119,7 @@ jobs:
               CI_EXPECTED_NODE_VERSION="${CI_NODE_VERSION}" \
               CI_EXPECTED_NPM_VERSION="${CI_NPM_VERSION}" \
               GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null GIT_TERMINAL_PROMPT=0 GIT_OPTIONAL_LOCKS=0 \
-              /bin/bash .github/scripts/run-network-denied-ci.sh typecheck
+              /bin/bash /workspace/.github/scripts/run-network-denied-ci.sh typecheck
 
   lint:
     name: lint
@@ -176,7 +180,7 @@ jobs:
               CI_EXPECTED_NODE_VERSION="${CI_NODE_VERSION}" \
               CI_EXPECTED_NPM_VERSION="${CI_NPM_VERSION}" \
               GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null GIT_TERMINAL_PROMPT=0 GIT_OPTIONAL_LOCKS=0 \
-              /bin/bash .github/scripts/run-network-denied-ci.sh lint
+              /bin/bash /workspace/.github/scripts/run-network-denied-ci.sh lint
 
   test:
     name: test
@@ -237,7 +241,7 @@ jobs:
               CI_EXPECTED_NODE_VERSION="${CI_NODE_VERSION}" \
               CI_EXPECTED_NPM_VERSION="${CI_NPM_VERSION}" \
               GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null GIT_TERMINAL_PROMPT=0 GIT_OPTIONAL_LOCKS=0 \
-              /bin/bash .github/scripts/run-network-denied-ci.sh test
+              /bin/bash /workspace/.github/scripts/run-network-denied-ci.sh test
 
   build:
     name: build
@@ -298,7 +302,7 @@ jobs:
               CI_EXPECTED_NODE_VERSION="${CI_NODE_VERSION}" \
               CI_EXPECTED_NPM_VERSION="${CI_NPM_VERSION}" \
               GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null GIT_TERMINAL_PROMPT=0 GIT_OPTIONAL_LOCKS=0 \
-              /bin/bash .github/scripts/run-network-denied-ci.sh build
+              /bin/bash /workspace/.github/scripts/run-network-denied-ci.sh build
 
   real-pi-e2e:
     name: real-pi-e2e / ${{ matrix.label }}
@@ -311,8 +315,13 @@ jobs:
         include:
           - suite: load-boundaries
             label: pi-0.83.0-raw-load-boundaries
+            patched_preview: false
           - suite: immutable-failures
             label: pi-0.83.0-raw-strict-xfails
+            patched_preview: false
+          - suite: patched-command-preview
+            label: pi-0.83.0-patched-command-preview
+            patched_preview: true
     steps:
       - name: Check out the requested immutable head
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
@@ -337,12 +346,38 @@ jobs:
           npm ci --ignore-scripts --no-audit --fund=false
           --registry=https://registry.npmjs.org/ --userconfig=/dev/null
 
+      - name: Acquire the exact patched Pi artifact over the network
+        if: ${{ matrix.patched_preview == true }}
+        shell: bash
+        run: |
+          before_status="$(git status --porcelain=v1 --untracked-files=all)"
+          patched_package_root="$(
+            /bin/bash "${GITHUB_WORKSPACE}/.github/scripts/acquire-patched-pi.sh" \
+              --release-url "${CI_PATCHED_PI_RELEASE_URL}" \
+              --source-sha "${CI_PATCHED_PI_SOURCE_SHA}" \
+              --sha512-hex "${CI_PATCHED_PI_SHA512_HEX}" \
+              --sha512-sri "${CI_PATCHED_PI_SHA512_SRI}" \
+              --stock-package-root "${GITHUB_WORKSPACE}/node_modules/@earendil-works/pi-coding-agent" \
+              --destination-root "${GITHUB_WORKSPACE}/node_modules/.pi-acp-patched-pi"
+          )"
+          expected_package_root="${GITHUB_WORKSPACE}/node_modules/.pi-acp-patched-pi/${CI_PATCHED_PI_SOURCE_SHA}/package"
+          test "${patched_package_root}" = "${expected_package_root}"
+          after_status="$(git status --porcelain=v1 --untracked-files=all)"
+          test "${after_status}" = "${before_status}"
+
       - name: Pull the immutable execution image
         run: docker pull "${CI_CONTAINER_IMAGE}"
 
       - name: Run ${{ matrix.label }} without external networking
         shell: bash
         run: |
+          gate_environment=()
+          if [[ '${{ matrix.patched_preview }}' == 'true' ]]; then
+            gate_environment=(
+              PI_ACP_PATCHED_PI_PACKAGE_ROOT=/workspace/node_modules/.pi-acp-patched-pi/ec55c97d680f8f38359f7b6717c72b83c5e4d29a/package
+              PI_ACP_EXPERIMENTAL_FIXTURE_STATE=1
+            )
+          fi
           docker run --rm --init \
             --platform linux/amd64 \
             --network none \
@@ -367,7 +402,8 @@ jobs:
               CI_EXPECTED_NODE_VERSION="${CI_NODE_VERSION}" \
               CI_EXPECTED_NPM_VERSION="${CI_NPM_VERSION}" \
               GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null GIT_TERMINAL_PROMPT=0 GIT_OPTIONAL_LOCKS=0 \
-              /bin/bash .github/scripts/run-network-denied-ci.sh "${{ matrix.suite }}"
+              "${gate_environment[@]}" \
+              /bin/bash /workspace/.github/scripts/run-network-denied-ci.sh "${{ matrix.suite }}"
 
   required:
     name: required
