@@ -4,6 +4,7 @@ import {
   access,
   chmod,
   copyFile,
+  link,
   lstat,
   mkdir,
   mkdtemp,
@@ -25,6 +26,10 @@ export const REAL_PI_VERSION = '0.83.0'
 export const REAL_PI_FIXTURE_PROVIDER_ID = 'pi-acp-fixture'
 export const REAL_PI_FIXTURE_MODEL_ID = 'fixture-model-v1'
 export const REAL_PI_FIXTURE_COMMAND_ID = 'fixture-state'
+export const REAL_PI_FIXTURE_AGENT_COMMAND_ID = 'fixture-agent'
+export const C3_5_FIXTURE_AGENT_USER_TEXT = 'Run the deterministic Pi ACP C3.5 fixture agent turn.'
+export const C3_5_FIXTURE_AGENT_RESPONSE_TEXT = 'Pi ACP C3.5 fixture agent response'
+const C3_5_RELEASE_TEXT = 'release\n'
 export const C1_2_RUNTIME_EXTENSION_RESPONSE_TEXT = 'C1.2 deterministic agent response'
 export const C1_3_RECOVERY_RESPONSE_TEXT = 'C1.3 deterministic recovery response'
 export const C1_4_LF_JSONL_RESPONSE_TEXT = 'BEFORE\u2028MIDDLE\u2029AFTER'
@@ -206,6 +211,35 @@ export type RealPiC3_4ShutdownReceipt = {
   piPid: number
 }
 
+export type RealPiC3_5Schedule = 'preflight' | 'provider-final'
+
+export type RealPiC3_5Receipt = {
+  schemaVersion: 1
+  checkpoint: 'C3.5'
+  phase:
+    | 'session-start'
+    | 'command-invocation'
+    | 'before-agent-start-entered'
+    | 'before-agent-start-released'
+    | 'agent-start'
+    | 'agent-end'
+    | 'agent-settled'
+    | 'session-shutdown'
+  sequence: number
+  nonce: string
+  schedule: RealPiC3_5Schedule
+  piVersion: '0.83.0'
+  piPid: number
+  sessionId: string
+  sessionFile: string | null
+  invocationCount?: number
+  name?: 'fixture-agent'
+  args?: string
+  argsUtf8ByteLength?: number
+  argsBase64?: string
+  reason?: 'quit'
+}
+
 export type VerifiedReceipt<T> = {
   receipt: T
   stat: Stats
@@ -226,10 +260,11 @@ export type RealPiFixtureOptions = {
   lfJsonlResponse?: true
   hardDeadlineMs?: number
   clientShutdownTimeoutMs?: number
-  transcriptCheckpoint?: 'C0.6' | 'C0.7' | 'C1.1' | 'C1.2' | 'C1.3' | 'C1.4' | 'C1.5' | 'C2.2' | 'C3.4'
+  transcriptCheckpoint?: 'C0.6' | 'C0.7' | 'C1.1' | 'C1.2' | 'C1.3' | 'C1.4' | 'C1.5' | 'C2.2' | 'C3.4' | 'C3.5'
   transcriptCaseId?: string
   transcriptMetadata?: AcpTranscriptMetadata
-  fixtureMode?: 'c3.4-execute-command'
+  fixtureMode?: 'c3.4-execute-command' | 'c3.5-agent-run'
+  c3_5Schedule?: RealPiC3_5Schedule
   patchedPiPackageRoot?: string
   projectPrompts?: readonly {
     name: string
@@ -255,6 +290,9 @@ const globalExtensionSourcePath = fileURLToPath(new URL('../fixtures/pi-extensio
 const c3_4ExecuteCommandExtensionSourcePath = fileURLToPath(
   new URL('../fixtures/pi-extension-pack/c3.4-execute-command/index.ts', import.meta.url)
 )
+const c3_5AgentRunExtensionSourcePath = fileURLToPath(
+  new URL('../fixtures/pi-extension-pack/c3.5-agent-run/index.ts', import.meta.url)
+)
 const failingGlobalExtensionSourcePath = fileURLToPath(
   new URL('../fixtures/pi-extension-pack/failing-load/index.ts', import.meta.url)
 )
@@ -276,6 +314,8 @@ export type LoopbackRequest = {
   bodyByteLength: number
   bodyExceededLimit: boolean
   outcome: 'pending' | 'end' | 'timeout' | 'aborted' | 'error'
+  authorization?: string
+  contentType?: string
 }
 
 async function listen(server: Server): Promise<AddressInfo> {
@@ -456,6 +496,8 @@ function isolatedEnvironment(paths: {
   piCommand: string
   piNode: string
   fixtureStatePreview: boolean
+  fixtureAgentPreview: boolean
+  c3_5Schedule: RealPiC3_5Schedule | undefined
 }): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = Object.create(null)
   Object.assign(env, {
@@ -491,6 +533,10 @@ function isolatedEnvironment(paths: {
     PI_ACP_PROJECT_CANARY_PATH: paths.projectCanaryPath
   })
   if (paths.fixtureStatePreview) env.PI_ACP_EXPERIMENTAL_FIXTURE_STATE = '1'
+  if (paths.fixtureAgentPreview) {
+    env.PI_ACP_EXPERIMENTAL_FIXTURE_AGENT = '1'
+    env.PI_ACP_C3_5_SCHEDULE = paths.c3_5Schedule
+  }
 
   for (const name of ['SYSTEMROOT', 'WINDIR', 'ComSpec', 'PATHEXT']) {
     if (process.env[name] !== undefined) env[name] = process.env[name]
@@ -533,28 +579,113 @@ function validateProjectPrompts(
   return normalized
 }
 
+async function throwAfterC3_5ReleaseCleanup(temporaryPath: string, error: unknown): Promise<never> {
+  try {
+    await rm(temporaryPath, { force: true })
+  } catch (cleanupError) {
+    throw new AggregateError([error, cleanupError], 'C3.5 release sentinel publication and cleanup failed')
+  }
+  throw error
+}
+
+async function writeC3_5Release(path: string | undefined): Promise<void> {
+  if (!path) return
+  const temporaryPath = `${path}.${String(process.pid)}.${randomBytes(8).toString('hex')}.tmp`
+  const handle = await open(temporaryPath, 'wx', 0o600)
+  let stageError: unknown
+  try {
+    await handle.writeFile(C3_5_RELEASE_TEXT, 'utf8')
+    await handle.sync()
+  } catch (error) {
+    stageError = error
+  }
+  try {
+    await handle.close()
+  } catch (error) {
+    stageError =
+      stageError === undefined
+        ? error
+        : new AggregateError([stageError, error], 'C3.5 release sentinel staging and close failed')
+  }
+  if (stageError !== undefined) await throwAfterC3_5ReleaseCleanup(temporaryPath, stageError)
+
+  try {
+    await link(temporaryPath, path)
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'EEXIST') {
+      await throwAfterC3_5ReleaseCleanup(temporaryPath, error)
+    }
+    let existingContents: string | undefined
+    try {
+      existingContents = await readFile(path, 'utf8')
+    } catch (readError) {
+      await throwAfterC3_5ReleaseCleanup(
+        temporaryPath,
+        new AggregateError([error, readError], 'C3.5 release sentinel publication failed')
+      )
+    }
+    if (existingContents !== C3_5_RELEASE_TEXT) {
+      await throwAfterC3_5ReleaseCleanup(
+        temporaryPath,
+        new Error('C3.5 release sentinel has invalid contents', { cause: error })
+      )
+    }
+  }
+  await rm(temporaryPath, { force: true })
+}
+
+async function waitForC3_5Release(path: string): Promise<void> {
+  const deadline = Date.now() + 10_000
+  for (;;) {
+    try {
+      if ((await readFile(path, 'utf8')) !== C3_5_RELEASE_TEXT) {
+        throw new Error('C3.5 release sentinel has invalid contents')
+      }
+      return
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
+    }
+    if (Date.now() >= deadline) throw new Error('C3.5 provider-final release sentinel timed out')
+    await new Promise(resolve => setTimeout(resolve, 5))
+  }
+}
+
 export async function startRealPiFixture(options: RealPiFixtureOptions = {}) {
   const projectPrompts = validateProjectPrompts(options.projectPrompts)
   const c3_4ExecuteCommand = options.fixtureMode === 'c3.4-execute-command'
-  if (options.patchedPiPackageRoot !== undefined && !c3_4ExecuteCommand) {
-    throw new TypeError('patched Pi package root is accepted only by the C3.4 execute-command fixture')
+  const c3_5AgentRun = options.fixtureMode === 'c3.5-agent-run'
+  const patchedPreview = c3_4ExecuteCommand || c3_5AgentRun
+  if (options.patchedPiPackageRoot !== undefined && !patchedPreview) {
+    throw new TypeError('patched Pi package root is accepted only by a C3.4/C3.5 execute-command fixture')
   }
-  if (c3_4ExecuteCommand && !options.patchedPiPackageRoot) {
-    throw new TypeError('C3.4 execute-command fixture requires a patched Pi package root')
+  if (patchedPreview && !options.patchedPiPackageRoot) {
+    throw new TypeError('C3.4/C3.5 execute-command fixture requires a patched Pi package root')
   }
   if (options.patchedPiPackageRoot !== undefined && !isAbsolute(options.patchedPiPackageRoot)) {
     throw new TypeError('patched Pi package root must be absolute')
+  }
+  if (c3_5AgentRun && options.c3_5Schedule !== 'preflight' && options.c3_5Schedule !== 'provider-final') {
+    throw new TypeError('C3.5 agent-run fixture requires a preflight or provider-final schedule')
+  }
+  if (!c3_5AgentRun && options.c3_5Schedule !== undefined) {
+    throw new TypeError('C3.5 schedule is accepted only by the C3.5 agent-run fixture')
   }
   const extensionLoadFailure = options.extensionLoadFailure === true
   const runtimeExtensionError = options.runtimeExtensionError === true
   const childTermination = options.childTermination === true
   const lfJsonlResponse = options.lfJsonlResponse === true
   if (
-    [extensionLoadFailure, runtimeExtensionError, childTermination, lfJsonlResponse, c3_4ExecuteCommand].filter(Boolean)
-      .length > 1
+    [
+      extensionLoadFailure,
+      runtimeExtensionError,
+      childTermination,
+      lfJsonlResponse,
+      c3_4ExecuteCommand,
+      c3_5AgentRun
+    ].filter(Boolean).length > 1
   ) {
     throw new TypeError(
-      'real Pi fixture load failure, runtime error, child termination, LF JSONL response, and C3.4 modes are mutually exclusive'
+      'real Pi fixture load failure, runtime error, child termination, LF JSONL response, C3.4, and C3.5 modes are mutually exclusive'
     )
   }
   const hardDeadlineMs = options.hardDeadlineMs
@@ -570,6 +701,9 @@ export async function startRealPiFixture(options: RealPiFixtureOptions = {}) {
   }
   const rootDir = await mkdtemp(join(await realpath(tmpdir()), 'pi-acp-real-pi-'))
   await chmod(rootDir, 0o700)
+  const nonce = randomBytes(16).toString('hex')
+  let c3_5PreflightReleasePath: string | undefined
+  let c3_5ProviderFinalReleasePath: string | undefined
 
   const requests: LoopbackRequest[] = []
   const sockets = new Set<Socket>()
@@ -584,7 +718,15 @@ export async function startRealPiFixture(options: RealPiFixtureOptions = {}) {
       body: undefined,
       bodyByteLength: 0,
       bodyExceededLimit: false,
-      outcome: 'pending'
+      outcome: 'pending',
+      ...(c3_5AgentRun
+        ? {
+            authorization:
+              typeof request.headers.authorization === 'string' ? request.headers.authorization : undefined,
+            contentType:
+              typeof request.headers['content-type'] === 'string' ? request.headers['content-type'] : undefined
+          }
+        : {})
     }
     requests.push(observation)
 
@@ -596,8 +738,112 @@ export async function startRealPiFixture(options: RealPiFixtureOptions = {}) {
       observation.outcome = outcome
       return true
     }
+    const sendC3_5Response = async (): Promise<void> => {
+      const fail = (statusCode: number, message: string): void => {
+        response.statusCode = statusCode
+        response.end(`${message}\n`)
+      }
+      if (bodyExceededLimit || !observation.body) {
+        fail(413, 'C3.5 fixture rejected an oversized provider request')
+        return
+      }
+      if (
+        observation.method !== 'POST' ||
+        observation.url !== '/v1/chat/completions' ||
+        observation.authorization !== `Bearer pi-acp-fixture-${nonce}` ||
+        !observation.contentType?.startsWith('application/json')
+      ) {
+        fail(400, 'C3.5 fixture rejected provider request metadata')
+        return
+      }
+
+      let requestBody: Record<string, unknown>
+      try {
+        requestBody = JSON.parse(observation.body.toString('utf8')) as Record<string, unknown>
+      } catch {
+        fail(400, 'C3.5 fixture rejected malformed provider JSON')
+        return
+      }
+      const messages = Array.isArray(requestBody.messages) ? requestBody.messages : []
+      const userMessages = messages.filter(message => {
+        const candidate = message as { role?: unknown }
+        return candidate && typeof candidate === 'object' && candidate.role === 'user'
+      }) as { content?: unknown }[]
+      const userContent = userMessages[0]?.content
+      const hasExactUserContent =
+        userContent === C3_5_FIXTURE_AGENT_USER_TEXT ||
+        (Array.isArray(userContent) &&
+          userContent.length === 1 &&
+          (userContent[0] as { type?: unknown; text?: unknown })?.type === 'text' &&
+          (userContent[0] as { type?: unknown; text?: unknown })?.text === C3_5_FIXTURE_AGENT_USER_TEXT)
+      if (
+        requestBody.model !== REAL_PI_FIXTURE_MODEL_ID ||
+        requestBody.stream !== true ||
+        userMessages.length !== 1 ||
+        !hasExactUserContent ||
+        observation.body.includes(Buffer.from('/fixture-agent'))
+      ) {
+        fail(400, 'C3.5 fixture rejected provider request semantics')
+        return
+      }
+
+      const chunkBase = {
+        id: 'c3.5-fixture-agent-turn',
+        object: 'chat.completion.chunk',
+        created: 0,
+        model: REAL_PI_FIXTURE_MODEL_ID
+      }
+      response.writeHead(200, {
+        'content-type': 'text/event-stream',
+        'cache-control': 'no-cache',
+        connection: 'close'
+      })
+      response.write(
+        `data: ${JSON.stringify({
+          ...chunkBase,
+          choices: [
+            {
+              index: 0,
+              delta: {
+                role: 'assistant',
+                content: C3_5_FIXTURE_AGENT_RESPONSE_TEXT
+              },
+              finish_reason: null
+            }
+          ]
+        })}\n\n`
+      )
+      if (options.c3_5Schedule === 'provider-final') {
+        if (!c3_5ProviderFinalReleasePath) throw new Error('C3.5 provider-final release path is unavailable')
+        await waitForC3_5Release(c3_5ProviderFinalReleasePath)
+      }
+      response.write(
+        `data: ${JSON.stringify({
+          ...chunkBase,
+          choices: [
+            {
+              index: 0,
+              delta: {},
+              finish_reason: 'stop'
+            }
+          ],
+          usage: {
+            prompt_tokens: 1,
+            completion_tokens: 7,
+            total_tokens: 8
+          }
+        })}\n\n`
+      )
+      response.end('data: [DONE]\n\n')
+    }
     const finish = (): void => {
       if (!settle('end')) return
+      if (c3_5AgentRun) {
+        void sendC3_5Response().catch(error => {
+          response.destroy(error instanceof Error ? error : new Error(String(error)))
+        })
+        return
+      }
       const lfJsonlResponseText = lfJsonlResponse
         ? observation.body?.includes(Buffer.from(C1_4_LF_JSONL_LIVENESS_USER_TEXT))
           ? C1_4_LF_JSONL_LIVENESS_RESPONSE_TEXT
@@ -710,6 +956,11 @@ export async function startRealPiFixture(options: RealPiFixtureOptions = {}) {
     cleanupPromise ??= (async () => {
       const errors: unknown[] = []
       try {
+        await Promise.all([writeC3_5Release(c3_5PreflightReleasePath), writeC3_5Release(c3_5ProviderFinalReleasePath)])
+      } catch (error) {
+        errors.push(error)
+      }
+      try {
         await client?.close()
       } catch (error) {
         errors.push(error)
@@ -778,7 +1029,6 @@ export async function startRealPiFixture(options: RealPiFixtureOptions = {}) {
     const runtimeErrorExtensionPath = join(runtimeErrorExtensionDir, 'index.ts')
     const childTerminationExtensionPath = join(childTerminationExtensionDir, 'index.ts')
     const projectExtensionPath = join(projectExtensionDir, 'project-canary.js')
-    const nonce = randomBytes(16).toString('hex')
     const registrationReceiptPath = join(receiptDir, `pi-acp-c0.6-registration-${nonce}.json`)
     const shutdownReceiptPath = join(receiptDir, `pi-acp-c0.6-shutdown-${nonce}.json`)
     const projectCanaryPath = join(rootDir, 'project-extension-loaded')
@@ -789,7 +1039,13 @@ export async function startRealPiFixture(options: RealPiFixtureOptions = {}) {
     const baseUrl = `http://127.0.0.1:${String(address.port)}/v1`
     const selectedExtensionSourcePath = c3_4ExecuteCommand
       ? c3_4ExecuteCommandExtensionSourcePath
-      : globalExtensionSourcePath
+      : c3_5AgentRun
+        ? c3_5AgentRunExtensionSourcePath
+        : globalExtensionSourcePath
+    c3_5PreflightReleasePath = c3_5AgentRun ? join(receiptDir, `pi-acp-c3.5-preflight-release-${nonce}`) : undefined
+    c3_5ProviderFinalReleasePath = c3_5AgentRun
+      ? join(receiptDir, `pi-acp-c3.5-provider-final-release-${nonce}`)
+      : undefined
 
     await Promise.all(
       [
@@ -815,12 +1071,12 @@ export async function startRealPiFixture(options: RealPiFixtureOptions = {}) {
 
     const repositoryRealpath = await realpath(repositoryRoot)
     const nodeModulesRoot = await realpath(join(repositoryRoot, 'node_modules'))
-    const selectedPiPackageRootPath = c3_4ExecuteCommand ? options.patchedPiPackageRoot! : piPackageRootPath
+    const selectedPiPackageRootPath = patchedPreview ? options.patchedPiPackageRoot! : piPackageRootPath
     const piPackageRoot = await realpath(selectedPiPackageRootPath)
     const expectedCliRealpath = await realpath(join(piPackageRoot, 'dist', 'cli.js'))
     const expectedNodeRealpath = await realpath(process.execPath)
     assertContainedPath(repositoryRealpath, nodeModulesRoot, 'C0.6 node_modules')
-    if (!c3_4ExecuteCommand) assertContainedPath(nodeModulesRoot, piPackageRoot, 'C0.6 Pi package')
+    if (!patchedPreview) assertContainedPath(nodeModulesRoot, piPackageRoot, 'C0.6 Pi package')
     assertContainedPath(piPackageRoot, expectedCliRealpath, 'C0.6 Pi CLI')
     await access(expectedNodeRealpath, constants.X_OK)
     await access(expectedCliRealpath, constants.X_OK)
@@ -923,7 +1179,11 @@ export async function startRealPiFixture(options: RealPiFixtureOptions = {}) {
     assertReceiptDirectoryStat(receiptBoundary.rootDir, receiptBoundary.rootStat)
     assertReceiptDirectoryStat(receiptBoundary.receiptDir, receiptBoundary.receiptDirStat)
     assertContainedPath(receiptBoundary.rootDir, receiptBoundary.receiptDir, 'C0.6 receipt directory')
-    const fixtureId = c3_4ExecuteCommand ? 'pi-extension-pack-c3.4-execute-command' : 'pi-extension-pack-v1'
+    const fixtureId = c3_4ExecuteCommand
+      ? 'pi-extension-pack-c3.4-execute-command'
+      : c3_5AgentRun
+        ? 'pi-extension-pack-c3.5-agent-run'
+        : 'pi-extension-pack-v1'
 
     const environment = isolatedEnvironment({
       homeDir,
@@ -942,7 +1202,9 @@ export async function startRealPiFixture(options: RealPiFixtureOptions = {}) {
       piPackageRoot,
       piCommand,
       piNode: expectedNodeRealpath,
-      fixtureStatePreview: c3_4ExecuteCommand
+      fixtureStatePreview: c3_4ExecuteCommand,
+      fixtureAgentPreview: c3_5AgentRun,
+      c3_5Schedule: options.c3_5Schedule
     })
     client = new AcpProcessClient({
       command: process.execPath,
@@ -957,13 +1219,15 @@ export async function startRealPiFixture(options: RealPiFixtureOptions = {}) {
       transcriptMetadata: {
         ...(options.transcriptMetadata ?? {}),
         planId: 'PACP-CMD-2026-01',
-        checkpoint: options.transcriptCheckpoint ?? (c3_4ExecuteCommand ? 'C3.4' : 'C0.6'),
+        checkpoint: options.transcriptCheckpoint ?? (c3_4ExecuteCommand ? 'C3.4' : c3_5AgentRun ? 'C3.5' : 'C0.6'),
         fixtureId,
         fixtureSources: [
           {
             path: c3_4ExecuteCommand
               ? 'test/fixtures/pi-extension-pack/c3.4-execute-command/index.ts'
-              : 'test/fixtures/pi-extension-pack/index.ts',
+              : c3_5AgentRun
+                ? 'test/fixtures/pi-extension-pack/c3.5-agent-run/index.ts'
+                : 'test/fixtures/pi-extension-pack/index.ts',
             sha256: expectedExtensionSha256
           },
           ...(expectedFailingExtensionSha256
@@ -1048,6 +1312,27 @@ export async function startRealPiFixture(options: RealPiFixtureOptions = {}) {
         port: address.port
       },
       requests,
+      c3_5Schedule: options.c3_5Schedule,
+      async releaseC3_5Preflight(): Promise<void> {
+        if (!c3_5AgentRun || !c3_5PreflightReleasePath) {
+          throw new Error('C3.5 preflight release is available only in the C3.5 agent-run fixture')
+        }
+        await writeC3_5Release(c3_5PreflightReleasePath)
+      },
+      async releaseC3_5ProviderFinal(): Promise<void> {
+        if (!c3_5AgentRun || !c3_5ProviderFinalReleasePath) {
+          throw new Error('C3.5 provider-final release is available only in the C3.5 agent-run fixture')
+        }
+        await writeC3_5Release(c3_5ProviderFinalReleasePath)
+      },
+      async readC3_5Receipts(phase: RealPiC3_5Receipt['phase']): Promise<VerifiedReceipt<RealPiC3_5Receipt>[]> {
+        const prefix = `pi-acp-c3.5-${phase}-${nonce}-`
+        const names = (await readdir(receiptDir)).filter(name => name.startsWith(prefix) && name.endsWith('.json'))
+        names.sort()
+        return await Promise.all(
+          names.map(name => readVerifiedReceipt<RealPiC3_5Receipt>(join(receiptDir, name), receiptBoundary))
+        )
+      },
       createRawPiProbeEnvironment(): NodeJS.ProcessEnv {
         const probeNonce = randomBytes(16).toString('hex')
         return Object.assign(Object.create(null) as NodeJS.ProcessEnv, environment, {

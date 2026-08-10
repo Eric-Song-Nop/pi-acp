@@ -8,6 +8,8 @@ readonly PATCHED_PI_SOURCE_SHA='ec55c97d680f8f38359f7b6717c72b83c5e4d29a'
 readonly PATCHED_PI_PACKAGE_ROOT="/workspace/node_modules/.pi-acp-patched-pi/${PATCHED_PI_SOURCE_SHA}/package"
 readonly PATCHED_PI_STRESS_ITERATIONS=100
 readonly PATCHED_PI_STRESS_PATTERN='^C3\.4 (patched Pi completes exact state-only /fixture-state with notify-before-response and no model turn|post-write cancel stops the exact patched child and fresh recovery never replays the command)$'
+readonly PATCHED_PI_AGENT_STRESS_ITERATIONS=100
+readonly PATCHED_PI_AGENT_SCHEDULE_ITERATIONS=50
 
 require_unset() {
   local name=$1
@@ -17,42 +19,52 @@ require_unset() {
   fi
 }
 
-if [[ "$gate" == 'patched-command-preview' ]]; then
+if [[ "$gate" == 'patched-command-preview' || "$gate" == 'patched-agent-preview' ]]; then
   if [[ "${PI_ACP_PATCHED_PI_PACKAGE_ROOT+x}" != x ]]; then
-    echo 'patched-command-preview requires PI_ACP_PATCHED_PI_PACKAGE_ROOT' >&2
+    echo "${gate} requires PI_ACP_PATCHED_PI_PACKAGE_ROOT" >&2
     exit 1
   fi
   if [[ "$PI_ACP_PATCHED_PI_PACKAGE_ROOT" != "$PATCHED_PI_PACKAGE_ROOT" ]]; then
-    echo 'patched-command-preview requires the exact pinned patched Pi package root' >&2
+    echo "${gate} requires the exact pinned patched Pi package root" >&2
     exit 1
   fi
-  if [[ "${PI_ACP_EXPERIMENTAL_FIXTURE_STATE+x}" != x || "$PI_ACP_EXPERIMENTAL_FIXTURE_STATE" != 1 ]]; then
-    echo 'patched-command-preview requires PI_ACP_EXPERIMENTAL_FIXTURE_STATE=1' >&2
-    exit 1
+  if [[ "$gate" == 'patched-command-preview' ]]; then
+    if [[ "${PI_ACP_EXPERIMENTAL_FIXTURE_STATE+x}" != x || "$PI_ACP_EXPERIMENTAL_FIXTURE_STATE" != 1 ]]; then
+      echo 'patched-command-preview requires PI_ACP_EXPERIMENTAL_FIXTURE_STATE=1' >&2
+      exit 1
+    fi
+    require_unset PI_ACP_EXPERIMENTAL_FIXTURE_AGENT
+  else
+    if [[ "${PI_ACP_EXPERIMENTAL_FIXTURE_AGENT+x}" != x || "$PI_ACP_EXPERIMENTAL_FIXTURE_AGENT" != 1 ]]; then
+      echo 'patched-agent-preview requires PI_ACP_EXPERIMENTAL_FIXTURE_AGENT=1' >&2
+      exit 1
+    fi
+    require_unset PI_ACP_EXPERIMENTAL_FIXTURE_STATE
   fi
   if [[ ! -d "$PATCHED_PI_PACKAGE_ROOT" || ! -x "$PATCHED_PI_PACKAGE_ROOT/dist/cli.js" ]]; then
-    echo 'patched-command-preview requires the verified patched Pi package and executable CLI' >&2
+    echo "${gate} requires the verified patched Pi package and executable CLI" >&2
     exit 1
   fi
   if [[ ! -L "$PATCHED_PI_PACKAGE_ROOT/node_modules" ]]; then
-    echo 'patched-command-preview requires the verified patched Pi dependency link' >&2
+    echo "${gate} requires the verified patched Pi dependency link" >&2
     exit 1
   fi
   if [[ "$(readlink -- "$PATCHED_PI_PACKAGE_ROOT/node_modules")" != '../../../@earendil-works/pi-coding-agent/node_modules' ]]; then
-    echo 'patched-command-preview rejected an unexpected patched Pi dependency link' >&2
+    echo "${gate} rejected an unexpected patched Pi dependency link" >&2
     exit 1
   fi
   if [[ "$(cd -- "$PATCHED_PI_PACKAGE_ROOT" && pwd -P)" != "$PATCHED_PI_PACKAGE_ROOT" ]]; then
-    echo 'patched-command-preview rejected a non-canonical patched Pi package root' >&2
+    echo "${gate} rejected a non-canonical patched Pi package root" >&2
     exit 1
   fi
   if [[ "$(cd -- "$PATCHED_PI_PACKAGE_ROOT/node_modules" && pwd -P)" != '/workspace/node_modules/@earendil-works/pi-coding-agent/node_modules' ]]; then
-    echo 'patched-command-preview rejected a patched Pi dependency link outside the stock package' >&2
+    echo "${gate} rejected a patched Pi dependency link outside the stock package" >&2
     exit 1
   fi
 else
   require_unset PI_ACP_PATCHED_PI_PACKAGE_ROOT
   require_unset PI_ACP_EXPERIMENTAL_FIXTURE_STATE
+  require_unset PI_ACP_EXPERIMENTAL_FIXTURE_AGENT
 fi
 
 mkdir -p \
@@ -141,6 +153,46 @@ case "${gate}" in
       fi
       if ((stress_iteration % 10 == 0)); then
         echo "patched-command-preview stress ${stress_iteration}/${PATCHED_PI_STRESS_ITERATIONS} passed"
+      fi
+    done
+    ;;
+  patched-agent-preview)
+    agent_preview_tap="${TMPDIR}/patched-agent-preview.tap"
+    node --import tsx --test --test-concurrency=1 --test-reporter=tap \
+      test/component/real-pi-fixture-agent-preview.test.ts | tee "$agent_preview_tap"
+    if grep -Eq '# (SKIP|skipped [1-9][0-9]*)' "$agent_preview_tap"; then
+      echo 'patched-agent-preview must run without skipped tests' >&2
+      exit 1
+    fi
+    grep -Fx '# tests 2' "$agent_preview_tap"
+    grep -Fx '# pass 2' "$agent_preview_tap"
+    grep -Fx '# fail 0' "$agent_preview_tap"
+    grep -Fx '# skipped 0' "$agent_preview_tap"
+
+    agent_stress_tap="${TMPDIR}/patched-agent-preview-stress.tap"
+    for ((stress_iteration = 1; stress_iteration <= PATCHED_PI_AGENT_STRESS_ITERATIONS; stress_iteration += 1)); do
+      if ((stress_iteration <= PATCHED_PI_AGENT_SCHEDULE_ITERATIONS)); then
+        stress_schedule='preflight'
+      else
+        stress_schedule='provider-final'
+      fi
+      if ! PI_ACP_C3_5_STRESS_SCHEDULE="$stress_schedule" \
+        node --import tsx --test --test-concurrency=1 --test-reporter=tap \
+          test/component/real-pi-fixture-agent-preview.test.ts >"$agent_stress_tap" 2>&1; then
+        cat "$agent_stress_tap" >&2
+        echo "patched-agent-preview ${stress_schedule} stress iteration ${stress_iteration} failed" >&2
+        exit 1
+      fi
+      if ! grep -Fx '# tests 1' "$agent_stress_tap" >/dev/null ||
+        ! grep -Fx '# pass 1' "$agent_stress_tap" >/dev/null ||
+        ! grep -Fx '# fail 0' "$agent_stress_tap" >/dev/null ||
+        ! grep -Fx '# skipped 0' "$agent_stress_tap" >/dev/null; then
+        cat "$agent_stress_tap" >&2
+        echo "patched-agent-preview ${stress_schedule} stress iteration ${stress_iteration} did not run exactly one schedule" >&2
+        exit 1
+      fi
+      if ((stress_iteration % 10 == 0)); then
+        echo "patched-agent-preview stress ${stress_iteration}/${PATCHED_PI_AGENT_STRESS_ITERATIONS} passed"
       fi
     done
     ;;

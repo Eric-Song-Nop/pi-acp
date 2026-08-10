@@ -1,6 +1,8 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import {
+  FIXTURE_AGENT_COMMAND_NAME,
+  FIXTURE_AGENT_SAFE_COMMAND_METADATA,
   FIXTURE_STATE_COMMAND_NAME,
   FIXTURE_STATE_SAFE_COMMAND_METADATA,
   freezePiCommandCatalog
@@ -220,4 +222,121 @@ test('freezePiCommandCatalog preserves C2.2 generic display normalization withou
     { enableSkillCommands: false }
   )
   assert.deepEqual(skillsDisabled.commands, [])
+})
+
+test('freezePiCommandCatalog exposes fixture-agent independently with exact agent metadata', () => {
+  const data = {
+    commands: [
+      {
+        name: FIXTURE_STATE_COMMAND_NAME,
+        description: 'Fixture state',
+        source: 'extension',
+        sourceInfo: nestedSourceInfo
+      },
+      {
+        name: FIXTURE_AGENT_COMMAND_NAME,
+        description: 'Run fixture agent',
+        source: 'extension',
+        sourceInfo: nestedSourceInfo
+      },
+      { name: 'project-prompt', description: 'Project prompt', source: 'prompt' }
+    ]
+  }
+
+  const stateOnly = freezePiCommandCatalog(data, { enableFixtureStateCommand: true })
+  assert.deepEqual(
+    stateOnly.commands.map(command => command.name),
+    [FIXTURE_STATE_COMMAND_NAME, 'project-prompt']
+  )
+
+  const agentOnly = freezePiCommandCatalog(data, { enableFixtureAgentCommand: true })
+  assert.equal(agentOnly.hasFixtureStateExtension, true)
+  assert.equal(agentOnly.fixtureStateExtensionCount, 1)
+  assert.equal(agentOnly.hasFixtureAgentExtension, true)
+  assert.equal(agentOnly.fixtureAgentExtensionCount, 1)
+  assert.deepEqual(
+    agentOnly.commands.map(command => command.name),
+    [FIXTURE_AGENT_COMMAND_NAME, 'project-prompt']
+  )
+
+  const fixtureAgent = agentOnly.commands[0] as any
+  assert.deepEqual(fixtureAgent._meta?.piAcp?.command, FIXTURE_AGENT_SAFE_COMMAND_METADATA)
+  assert.deepEqual(fixtureAgent._meta?.piAcp?.command, {
+    schemaVersion: 1,
+    id: 'extension:pi-acp-fixture:fixture-agent',
+    source: 'extension',
+    sourceId: 'extension:pi-acp-fixture',
+    compatibility: 'rpc-native',
+    execution: 'agent',
+    exposure: 'experimental',
+    interactions: []
+  })
+  assert.equal(JSON.stringify(fixtureAgent._meta).includes('/private/project'), false)
+
+  const both = freezePiCommandCatalog(data, {
+    enableFixtureStateCommand: true,
+    enableFixtureAgentCommand: true
+  })
+  assert.deepEqual(
+    both.commands.map(command => command.name),
+    [FIXTURE_STATE_COMMAND_NAME, FIXTURE_AGENT_COMMAND_NAME, 'project-prompt']
+  )
+})
+
+for (const collisionSource of ['extension', 'prompt', 'skill'] as const) {
+  test(`freezePiCommandCatalog fences normalized fixture-agent ${collisionSource} collisions`, () => {
+    const aliasName = collisionSource === 'extension' ? ' fixture-agent ' : 'fixture-agent '
+    const catalog = freezePiCommandCatalog(
+      {
+        commands: [
+          { name: FIXTURE_AGENT_COMMAND_NAME, source: 'extension', sourceInfo: nestedSourceInfo },
+          { name: aliasName, source: collisionSource, sourceInfo: nestedSourceInfo },
+          { name: 'unrelated-prompt', source: 'prompt' }
+        ]
+      },
+      { enableFixtureAgentCommand: true }
+    )
+
+    assert.equal(catalog.fixtureAgentExtensionCount, 1)
+    assert.equal(catalog.hasFixtureAgentExtension, false)
+    assert.deepEqual(
+      catalog.commands.map(command => command.name),
+      ['unrelated-prompt']
+    )
+  })
+}
+
+test('freezePiCommandCatalog rejects duplicate exact fixture-agent extensions', () => {
+  const catalog = freezePiCommandCatalog(
+    {
+      commands: [
+        { name: FIXTURE_AGENT_COMMAND_NAME, source: 'extension' },
+        { name: FIXTURE_AGENT_COMMAND_NAME, source: 'extension' }
+      ]
+    },
+    { enableFixtureAgentCommand: true }
+  )
+
+  assert.equal(catalog.fixtureAgentExtensionCount, 2)
+  assert.equal(catalog.hasFixtureAgentExtension, false)
+  assert.deepEqual(catalog.commands, [])
+})
+
+test('freezePiCommandCatalog reserves fixture-agent without enabling it or the fixture-state preview', () => {
+  const data = {
+    commands: [{ name: ' fixture-agent ', description: 'Generic alias', source: 'prompt' }]
+  }
+  const reserved = freezePiCommandCatalog(data, {
+    reserveFixtureAgentName: true,
+    enableFixtureStateCommand: true
+  })
+  assert.equal(reserved.fixtureAgentExtensionCount, 0)
+  assert.equal(reserved.hasFixtureAgentExtension, false)
+  assert.deepEqual(reserved.commands, [])
+
+  const defaultOff = freezePiCommandCatalog(data)
+  assert.deepEqual(
+    defaultOff.commands.map(command => command.name),
+    [FIXTURE_AGENT_COMMAND_NAME]
+  )
 })

@@ -316,12 +316,23 @@ jobs:
           - suite: load-boundaries
             label: pi-0.83.0-raw-load-boundaries
             patched_preview: false
+            fixture_state_preview: false
+            fixture_agent_preview: false
           - suite: immutable-failures
             label: pi-0.83.0-raw-strict-xfails
             patched_preview: false
+            fixture_state_preview: false
+            fixture_agent_preview: false
           - suite: patched-command-preview
             label: pi-0.83.0-patched-command-preview
             patched_preview: true
+            fixture_state_preview: true
+            fixture_agent_preview: false
+          - suite: patched-agent-preview
+            label: pi-0.83.0-patched-agent-preview
+            patched_preview: true
+            fixture_state_preview: false
+            fixture_agent_preview: true
     steps:
       - name: Check out the requested immutable head
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
@@ -372,10 +383,15 @@ jobs:
         shell: bash
         run: |
           gate_environment=()
-          if [[ '${{ matrix.patched_preview }}' == 'true' ]]; then
+          if [[ '${{ matrix.fixture_state_preview }}' == 'true' && '${{ matrix.fixture_agent_preview }}' == 'false' ]]; then
             gate_environment=(
               PI_ACP_PATCHED_PI_PACKAGE_ROOT=/workspace/node_modules/.pi-acp-patched-pi/ec55c97d680f8f38359f7b6717c72b83c5e4d29a/package
               PI_ACP_EXPERIMENTAL_FIXTURE_STATE=1
+            )
+          elif [[ '${{ matrix.fixture_state_preview }}' == 'false' && '${{ matrix.fixture_agent_preview }}' == 'true' ]]; then
+            gate_environment=(
+              PI_ACP_PATCHED_PI_PACKAGE_ROOT=/workspace/node_modules/.pi-acp-patched-pi/ec55c97d680f8f38359f7b6717c72b83c5e4d29a/package
+              PI_ACP_EXPERIMENTAL_FIXTURE_AGENT=1
             )
           fi
           docker run --rm --init \
