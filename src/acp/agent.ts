@@ -552,6 +552,42 @@ export class PiAcpAgent implements ACPAgent {
     return typeof checkpoint === 'function' ? checkpoint.call(session, reservation) : null
   }
 
+  private async raceReservedCommandPreparation<T>(
+    session: PiAcpSession,
+    reservation: SessionCommandReservation,
+    operation: Promise<T>
+  ): Promise<
+    Readonly<{ kind: 'completed'; value: T }> | Readonly<{ kind: 'interrupted'; outcome: SessionExecuteCommandOutcome }>
+  > {
+    const getInterruption = (
+      session as PiAcpSession & {
+        commandReservationInterruption?: (reservation: SessionCommandReservation) => Promise<void>
+      }
+    ).commandReservationInterruption
+    if (typeof getInterruption !== 'function') {
+      return Object.freeze({ kind: 'completed', value: await operation })
+    }
+
+    const interruption = getInterruption.call(session, reservation)
+    const completed = operation.then(value => Object.freeze({ kind: 'completed' as const, value }))
+    const result = await Promise.race([
+      completed,
+      interruption.then(() => Object.freeze({ kind: 'interrupted' as const }))
+    ])
+    if (result.kind === 'completed') return result
+
+    // Promise.race already observes the losing operation; retain an explicit
+    // rejection sink because cancellation/terminal releases the reservation
+    // before catalog discovery or client publication is allowed to settle.
+    void operation.catch(() => undefined)
+    const outcome = this.commandReservationOutcome(session, reservation)
+    if (outcome) return Object.freeze({ kind: 'interrupted', outcome })
+    throw RequestError.internalError(
+      { code: 'COMMAND_REQUEST_CONFLICT' },
+      'The command preparation was interrupted without a terminal outcome.'
+    )
+  }
+
   private async executeFixtureStatePreview(
     session: PiAcpSession,
     invocation: FixtureStateInvocation,
@@ -590,7 +626,18 @@ export class PiAcpAgent implements ACPAgent {
 
       let catalog: FrozenPiCommandCatalog
       try {
-        catalog = await this.discoverCommandCatalog(session, options)
+        const discovery = this.discoverCommandCatalog(session, options)
+        const prepared = await this.raceReservedCommandPreparation(session, reservation, discovery)
+        if (prepared.kind === 'interrupted') {
+          if (prepared.outcome.kind === 'cancelled') {
+            return fixtureCommandCancelled(prepared.outcome.requestId, FIXTURE_STATE_COMMAND_NAME)
+          }
+          throw RequestError.internalError(
+            { code: 'COMMAND_REQUEST_CONFLICT' },
+            'The command discovery returned an unexpected response outcome.'
+          )
+        }
+        catalog = prepared.value
       } catch (error) {
         const interrupted = this.commandReservationOutcome(session, reservation)
         if (interrupted?.kind === 'cancelled') {
@@ -652,7 +699,17 @@ export class PiAcpAgent implements ACPAgent {
       }
 
       try {
-        await this.publishCommandCatalog(session, catalog)
+        const publication = this.publishCommandCatalog(session, catalog)
+        const prepared = await this.raceReservedCommandPreparation(session, reservation, publication)
+        if (prepared.kind === 'interrupted') {
+          if (prepared.outcome.kind === 'cancelled') {
+            return fixtureCommandCancelled(prepared.outcome.requestId, FIXTURE_STATE_COMMAND_NAME)
+          }
+          throw RequestError.internalError(
+            { code: 'COMMAND_REQUEST_CONFLICT' },
+            'The command publication returned an unexpected response outcome.'
+          )
+        }
       } catch (error) {
         const interrupted = this.commandReservationOutcome(session, reservation)
         if (interrupted?.kind === 'cancelled') {
@@ -747,7 +804,18 @@ export class PiAcpAgent implements ACPAgent {
       let catalog = catalogBeforeReservation
       if (!catalog) {
         try {
-          catalog = await this.discoverCommandCatalog(session, options)
+          const discovery = this.discoverCommandCatalog(session, options)
+          const prepared = await this.raceReservedCommandPreparation(session, reservation, discovery)
+          if (prepared.kind === 'interrupted') {
+            if (prepared.outcome.kind === 'cancelled') {
+              return fixtureCommandCancelled(prepared.outcome.requestId, FIXTURE_AGENT_COMMAND_NAME)
+            }
+            throw RequestError.internalError(
+              { code: 'COMMAND_REQUEST_CONFLICT' },
+              'The command discovery returned an unexpected response outcome.'
+            )
+          }
+          catalog = prepared.value
         } catch (error) {
           const interrupted = this.commandReservationOutcome(session, reservation)
           if (interrupted?.kind === 'cancelled') {
@@ -808,7 +876,17 @@ export class PiAcpAgent implements ACPAgent {
       }
 
       try {
-        await this.publishCommandCatalog(session, catalog)
+        const publication = this.publishCommandCatalog(session, catalog)
+        const prepared = await this.raceReservedCommandPreparation(session, reservation, publication)
+        if (prepared.kind === 'interrupted') {
+          if (prepared.outcome.kind === 'cancelled') {
+            return fixtureCommandCancelled(prepared.outcome.requestId, FIXTURE_AGENT_COMMAND_NAME)
+          }
+          throw RequestError.internalError(
+            { code: 'COMMAND_REQUEST_CONFLICT' },
+            'The command publication returned an unexpected response outcome.'
+          )
+        }
       } catch (error) {
         const interrupted = this.commandReservationOutcome(session, reservation)
         if (interrupted?.kind === 'cancelled') {

@@ -89,6 +89,8 @@ type ActiveCommand = SessionCommandReservation & {
   writeStarted: boolean
   cancelStop: Promise<void> | null
   cleanupFailure: RequestError | null
+  readonly interruption: Promise<void>
+  readonly resolveInterruption: () => void
 }
 
 export type SessionMutationReservation = Readonly<{
@@ -816,6 +818,10 @@ export class PiAcpSession {
   reserveCommand(name: string): SessionCommandReservation {
     this.assertMutationAdmission()
 
+    let resolveInterruption!: () => void
+    const interruption = new Promise<void>(resolve => {
+      resolveInterruption = resolve
+    })
     const active: ActiveCommand = {
       kind: 'command',
       requestId: crypto.randomUUID(),
@@ -824,7 +830,9 @@ export class PiAcpSession {
       failure: null,
       writeStarted: false,
       cancelStop: null,
-      cleanupFailure: null
+      cleanupFailure: null,
+      interruption,
+      resolveInterruption
     }
     this.activeMutation = active
     this.activeCommand = active
@@ -845,6 +853,17 @@ export class PiAcpSession {
     if (active.claim === 'failed') throw active.failure
     if (this.terminalError) throw this.terminalError
     return null
+  }
+
+  commandReservationInterruption(reservation: SessionCommandReservation): Promise<void> {
+    const active = this.activeCommand
+    if (active !== reservation) {
+      throw RequestError.internalError(
+        { code: 'COMMAND_REQUEST_CONFLICT' },
+        'The command reservation is no longer active.'
+      )
+    }
+    return active.interruption
   }
 
   private async awaitCommandCancelStop(active: ActiveCommand): Promise<void> {
@@ -915,7 +934,8 @@ export class PiAcpSession {
         executeCommand?: (
           requestId: string,
           commandName: string,
-          commandArgs: string
+          commandArgs: string,
+          onAcceptedResponse?: () => void
         ) => Promise<PiRpcExecuteCommandResult>
       }
     ).executeCommand
@@ -933,7 +953,9 @@ export class PiAcpSession {
 
     let response: PiRpcExecuteCommandResult
     try {
-      response = await execute.call(this.proc, active.requestId, active.name, args)
+      response = await execute.call(this.proc, active.requestId, active.name, args, () => {
+        if (this.activeCommand === active && !active.claim) active.claim = 'response'
+      })
     } catch (error) {
       if (error instanceof PiRpcProcessTerminatedError) this.handleTerminal(error)
       if (!active.claim) {
@@ -949,7 +971,10 @@ export class PiAcpSession {
       throw active.failure ?? error
     }
 
-    if (!active.claim) active.claim = 'response'
+    // Narrow fakes and older downstream test doubles may ignore the optional
+    // synchronous transport hook. Preserve their post-await behavior without
+    // weakening the real transport's accept-before-terminal ownership.
+    if (this.activeCommand === active && !active.claim) active.claim = 'response'
     if (active.claim === 'cancelled') {
       await this.awaitCommandCancelStop(active)
       return Object.freeze({ kind: 'cancelled', requestId: active.requestId })
@@ -1087,6 +1112,7 @@ export class PiAcpSession {
     if (command) {
       if (!command.claim) {
         command.claim = 'cancelled'
+        command.resolveInterruption()
         if (command.writeStarted) {
           // v1 has no native per-command abort. Once the write starts,
           // cancellation stops this exact child and waits for cleanup proof;
@@ -1384,6 +1410,7 @@ export class PiAcpSession {
     if (command && !command.claim) {
       command.claim = 'failed'
       command.failure = requestError
+      command.resolveInterruption()
     }
 
     const terminalTurns: PromptTurn[] = []

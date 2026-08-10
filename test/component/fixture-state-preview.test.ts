@@ -236,6 +236,31 @@ class GatedAssistantConnection extends FakeAgentSideConnection {
   }
 }
 
+class GatedCatalogPublicationConnection extends FakeAgentSideConnection {
+  private releasePublicationGate!: () => void
+  private resolvePublicationStarted!: () => void
+  readonly publicationStarted = new Promise<void>(resolve => {
+    this.resolvePublicationStarted = resolve
+  })
+  private readonly publicationGate = new Promise<void>(resolve => {
+    this.releasePublicationGate = resolve
+  })
+  publicationFailure: Error | null = null
+
+  override async sessionUpdate(message: Parameters<AgentSideConnection['sessionUpdate']>[0]): Promise<void> {
+    if (message.update.sessionUpdate === 'available_commands_update') {
+      this.resolvePublicationStarted()
+      await this.publicationGate
+      if (this.publicationFailure) throw this.publicationFailure
+    }
+    await super.sessionUpdate(message)
+  }
+
+  releasePublication(): void {
+    this.releasePublicationGate()
+  }
+}
+
 class FailThenGateCatalogConnection extends FakeAgentSideConnection {
   private releasePublicationGate!: () => void
   private resolveRetryStarted!: () => void
@@ -854,15 +879,16 @@ test('fixture-state pre-write cancel claims the reserved request without stoppin
 
   await proc.catalogStarted
   await agent.cancel({ sessionId: SESSION_ID })
-  assert.equal(responseSettled, false)
+  const response = await responsePromise
+  assert.equal(responseSettled, true)
+  assert.equal(response.stopReason, 'cancelled')
   assert.equal(proc.executeCalls.length, 0)
   assert.equal(proc.stopCount, 0)
   assert.equal(proc.abortCount, 0)
   assert.equal(proc.isAlive(), true)
 
   proc.releaseCatalog()
-  const response = await responsePromise
-  assert.equal(response.stopReason, 'cancelled')
+  await new Promise(resolve => setImmediate(resolve))
   assert.equal(proc.executeCalls.length, 0)
   assert.equal(proc.stopCount, 0)
   assert.equal(proc.prompts.length, 0)
@@ -876,8 +902,6 @@ test('fixture-state pre-write cancellation remains causal when catalog discovery
 
   await proc.catalogStarted
   await agent.cancel({ sessionId: SESSION_ID })
-  proc.releaseCatalog()
-
   const response = await responsePromise
   assert.equal(response.stopReason, 'cancelled')
   assert.equal(JSON.stringify(response).includes('cancel-secret'), false)
@@ -885,6 +909,195 @@ test('fixture-state pre-write cancellation remains causal when catalog discovery
   assert.equal(proc.executeCalls.length, 0)
   assert.equal(proc.stopCount, 0)
   assert.equal(proc.prompts.length, 0)
+
+  proc.releaseCatalog()
+  await new Promise(resolve => setImmediate(resolve))
+  assert.equal(proc.executeCalls.length, 0)
+})
+
+test('fixture-state flag-off exact extension cancellation interrupts reserved catalog discovery', async () => {
+  const proc = new GatedCatalogPreviewPiProcess()
+  const { agent } = createHarness({ proc })
+  const responsePromise = agent.prompt(prompt([{ type: 'text', text: '/fixture-state disabled-cancel' }]))
+
+  await proc.catalogStarted
+  await agent.cancel({ sessionId: SESSION_ID })
+  const response = await responsePromise
+  assert.equal(response.stopReason, 'cancelled')
+  assert.equal(proc.executeCalls.length, 0)
+  assert.equal(proc.stopCount, 0)
+  assert.equal(proc.abortCount, 0)
+  assert.equal(proc.prompts.length, 0)
+
+  proc.releaseCatalog()
+  await new Promise(resolve => setImmediate(resolve))
+  assert.equal(proc.executeCalls.length, 0)
+  assert.equal(proc.prompts.length, 0)
+})
+
+test('fixture-state flag-off exact extension terminal interrupts reserved catalog discovery', async () => {
+  const proc = new GatedCatalogPreviewPiProcess()
+  const { agent } = createHarness({ proc })
+  const responsePromise = agent.prompt(prompt([{ type: 'text', text: '/fixture-state disabled-terminal' }]))
+
+  await proc.catalogStarted
+  proc.terminate(
+    new PiRpcProcessTerminatedError('The Pi child exited during disabled catalog discovery.', undefined, {
+      kind: 'exit',
+      code: 35
+    })
+  )
+  await assert.rejects(responsePromise, (error: any) => error?.data?.code === 'PI_RPC_PROCESS_TERMINATED')
+  assert.equal(proc.executeCalls.length, 0)
+  assert.equal(proc.stopCount, 0)
+  assert.equal(proc.prompts.length, 0)
+
+  proc.releaseCatalog()
+  await new Promise(resolve => setImmediate(resolve))
+  assert.equal(proc.executeCalls.length, 0)
+  assert.equal(proc.prompts.length, 0)
+})
+
+test('fixture-state pre-write terminal fails promptly while catalog discovery later resolves without execute', async () => {
+  const proc = new GatedCatalogPreviewPiProcess()
+  const { agent } = createHarness({ enabled: true, proc })
+  const responsePromise = agent.prompt(prompt([{ type: 'text', text: '/fixture-state terminal-discovery' }]))
+
+  await proc.catalogStarted
+  proc.terminate(
+    new PiRpcProcessTerminatedError('The Pi child exited during reserved catalog discovery.', undefined, {
+      kind: 'exit',
+      code: 31
+    })
+  )
+  await assert.rejects(responsePromise, (error: any) => error?.data?.code === 'PI_RPC_PROCESS_TERMINATED')
+  assert.equal(proc.executeCalls.length, 0)
+  assert.equal(proc.stopCount, 0)
+
+  proc.releaseCatalog()
+  await new Promise(resolve => setImmediate(resolve))
+  assert.equal(proc.executeCalls.length, 0)
+})
+
+test('fixture-state pre-write terminal fails promptly while catalog discovery later rejects without execute', async () => {
+  const proc = new GatedCatalogPreviewPiProcess()
+  proc.catalogFailure = new Error('late terminal discovery rejection')
+  const { agent } = createHarness({ enabled: true, proc })
+  const responsePromise = agent.prompt(prompt([{ type: 'text', text: '/fixture-state terminal-discovery-reject' }]))
+
+  await proc.catalogStarted
+  proc.terminate(
+    new PiRpcProcessTerminatedError('The Pi child exited before rejected catalog discovery.', undefined, {
+      kind: 'exit',
+      code: 33
+    })
+  )
+  await assert.rejects(responsePromise, (error: any) => error?.data?.code === 'PI_RPC_PROCESS_TERMINATED')
+  assert.equal(proc.executeCalls.length, 0)
+  assert.equal(proc.stopCount, 0)
+
+  proc.releaseCatalog()
+  await new Promise(resolve => setImmediate(resolve))
+  assert.equal(proc.executeCalls.length, 0)
+})
+
+test('fixture-state pre-write cancel returns promptly while catalog publication later rejects without execute', async () => {
+  const conn = new GatedCatalogPublicationConnection()
+  conn.publicationFailure = new Error('late publication rejection')
+  const proc = new PreviewPiProcess()
+  const { agent } = createHarness({ enabled: true, proc, conn })
+  const responsePromise = agent.prompt(prompt([{ type: 'text', text: '/fixture-state publication-cancel' }]))
+
+  await conn.publicationStarted
+  await agent.cancel({ sessionId: SESSION_ID })
+  const response = await responsePromise
+  assert.equal(response.stopReason, 'cancelled')
+  assert.equal(proc.executeCalls.length, 0)
+  assert.equal(proc.stopCount, 0)
+  assert.equal(proc.abortCount, 0)
+
+  conn.releasePublication()
+  await new Promise(resolve => setImmediate(resolve))
+  assert.equal(proc.executeCalls.length, 0)
+})
+
+test('fixture-state pre-write cancel returns promptly while catalog publication later succeeds without cross-settlement', async () => {
+  const conn = new GatedCatalogPublicationConnection()
+  const proc = new PreviewPiProcess()
+  const { agent } = createHarness({ enabled: true, proc, conn })
+  const responsePromise = agent.prompt(prompt([{ type: 'text', text: '/fixture-state publication-cancel-success' }]))
+
+  await conn.publicationStarted
+  await agent.cancel({ sessionId: SESSION_ID })
+  const response = await responsePromise
+  assert.equal(response.stopReason, 'cancelled')
+  assert.equal(proc.executeCalls.length, 0)
+  assert.equal(proc.stopCount, 0)
+  assert.equal(proc.abortCount, 0)
+
+  conn.releasePublication()
+  for (
+    let attempt = 0;
+    attempt < 100 && !conn.updates.some(update => update.update.sessionUpdate === 'available_commands_update');
+    attempt += 1
+  ) {
+    await new Promise(resolve => setImmediate(resolve))
+  }
+  assert.equal(
+    conn.updates.some(update => update.update.sessionUpdate === 'available_commands_update'),
+    true
+  )
+  assert.equal(proc.executeCalls.length, 0)
+
+  const fresh = await agent.prompt(prompt([{ type: 'text', text: '/fixture-state fresh-after-cancel' }]))
+  assert.equal(fresh.stopReason, 'end_turn')
+  assert.equal(proc.executeCalls.length, 1)
+  assert.equal(proc.executeCalls[0]!.args, 'fresh-after-cancel')
+})
+
+test('fixture-state pre-write terminal fails promptly while catalog publication later resolves without execute', async () => {
+  const conn = new GatedCatalogPublicationConnection()
+  const proc = new PreviewPiProcess()
+  const { agent } = createHarness({ enabled: true, proc, conn })
+  const responsePromise = agent.prompt(prompt([{ type: 'text', text: '/fixture-state publication-terminal' }]))
+
+  await conn.publicationStarted
+  proc.terminate(
+    new PiRpcProcessTerminatedError('The Pi child exited during reserved catalog publication.', undefined, {
+      kind: 'exit',
+      code: 32
+    })
+  )
+  await assert.rejects(responsePromise, (error: any) => error?.data?.code === 'PI_RPC_PROCESS_TERMINATED')
+  assert.equal(proc.executeCalls.length, 0)
+  assert.equal(proc.stopCount, 0)
+
+  conn.releasePublication()
+  await new Promise(resolve => setImmediate(resolve))
+  assert.equal(proc.executeCalls.length, 0)
+})
+
+test('fixture-state pre-write terminal fails promptly while catalog publication later rejects without execute', async () => {
+  const conn = new GatedCatalogPublicationConnection()
+  conn.publicationFailure = new Error('late terminal publication rejection')
+  const proc = new PreviewPiProcess()
+  const { agent } = createHarness({ enabled: true, proc, conn })
+  const responsePromise = agent.prompt(prompt([{ type: 'text', text: '/fixture-state publication-terminal-reject' }]))
+
+  await conn.publicationStarted
+  proc.terminate(
+    new PiRpcProcessTerminatedError('The Pi child exited before rejected catalog publication.', undefined, {
+      kind: 'exit',
+      code: 34
+    })
+  )
+  await assert.rejects(responsePromise, (error: any) => error?.data?.code === 'PI_RPC_PROCESS_TERMINATED')
+  assert.equal(proc.executeCalls.length, 0)
+  assert.equal(proc.stopCount, 0)
+
+  conn.releasePublication()
+  await new Promise(resolve => setImmediate(resolve))
+  assert.equal(proc.executeCalls.length, 0)
 })
 
 test('fixture-state reservation blocks a mutating adapter RPC before its Pi write but not read-only RPCs', async () => {
@@ -1176,6 +1389,9 @@ test('fixture-state catalog discovery terminal propagates instead of freezing a 
   assert.ok(terminalError instanceof RequestError)
   assert.equal((terminalError.data as { code?: unknown } | undefined)?.code, 'PI_RPC_PROCESS_TERMINATED')
   assert.equal(terminalError.message, 'The Pi child exited during catalog discovery.')
+  // Terminal ownership is intentionally prompt; the losing discovery rejects
+  // on its own microtask and then clears the shared retry slot.
+  await new Promise(resolve => setImmediate(resolve))
   assert.equal(session.commandCatalogState.snapshot, null)
   assert.equal(session.commandCatalogState.discovery, null)
   assert.equal(proc.getCommandsCount, 1)

@@ -343,6 +343,7 @@ export class PiRpcProcess {
       resolve: (v: PiRpcResponse) => void
       reject: (e: unknown) => void
       accepts: (response: unknown) => boolean
+      onAcceptedResponse?: () => void
     }
   >()
   private eventHandlers: Array<(ev: PiRpcEvent) => void> = []
@@ -688,6 +689,19 @@ export class PiRpcProcess {
         const pending = this.pending.get(id)
         if (pending?.accepts(msg)) {
           this.pending.delete(id)
+          // The validated response owns the request at pending retirement,
+          // before a same-tick child terminal can publish and before the
+          // request Promise continuation runs.
+          try {
+            pending.onAcceptedResponse?.()
+          } catch (error) {
+            // The raw response remains retired and quarantined. A faulty
+            // internal ownership hook is request-causal: reject this one
+            // Promise exactly once instead of escaping the stdout callback or
+            // leaving the caller pending forever.
+            pending.reject(error)
+            return !this.terminalTriggered
+          }
           pending.resolve(msg as PiRpcResponse)
           return !this.terminalTriggered
         }
@@ -826,18 +840,28 @@ export class PiRpcProcess {
     return res.data
   }
 
-  async executeCommand(requestId: string, name: string, args: string): Promise<PiRpcExecuteCommandResult> {
+  async executeCommand(
+    requestId: string,
+    name: string,
+    args: string,
+    onAcceptedResponse?: () => void
+  ): Promise<PiRpcExecuteCommandResult> {
     if (!requestId || !name || typeof args !== 'string') {
       throw new PiRpcExecuteCommandProtocolError('Invalid execute_command request identity or arguments.')
     }
-    const response = await this.request({ type: 'execute_command', name, args }, requestId, candidate => {
-      try {
-        validatePiRpcExecuteCommandResponse(candidate, requestId, name)
-        return true
-      } catch {
-        return false
-      }
-    })
+    const response = await this.request(
+      { type: 'execute_command', name, args },
+      requestId,
+      candidate => {
+        try {
+          validatePiRpcExecuteCommandResponse(candidate, requestId, name)
+          return true
+        } catch {
+          return false
+        }
+      },
+      onAcceptedResponse
+    )
     return validatePiRpcExecuteCommandResponse(response, requestId, name)
   }
 
@@ -848,7 +872,8 @@ export class PiRpcProcess {
   private request(
     cmd: PiRpcCommand,
     requestId?: string,
-    accepts: (response: unknown) => boolean = () => true
+    accepts: (response: unknown) => boolean = () => true,
+    onAcceptedResponse?: () => void
   ): Promise<PiRpcResponse> {
     if (this.terminalTriggered) {
       return this.terminalPromise!.then(error => {
@@ -865,7 +890,7 @@ export class PiRpcProcess {
     const line = `${JSON.stringify(withId)}\n`
 
     return new Promise<PiRpcResponse>((resolve, reject) => {
-      this.pending.set(id, { resolve, reject, accepts })
+      this.pending.set(id, { resolve, reject, accepts, onAcceptedResponse })
 
       void this.writeLine(line).catch(error => {
         // The terminal publisher normally rejects every entry together. The

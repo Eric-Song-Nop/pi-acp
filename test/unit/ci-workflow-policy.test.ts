@@ -26,6 +26,8 @@ const PATCHED_PI_PACKAGE_ROOT =
 const PATCHED_PI_STRESS_ITERATIONS = 100
 const PATCHED_PI_AGENT_STRESS_ITERATIONS = 100
 const PATCHED_PI_AGENT_SCHEDULE_ITERATIONS = 50
+const PATCHED_PI_FAILURE_STRESS_ITERATIONS = 100
+const PATCHED_PI_FAILURE_SCHEDULE_ITERATIONS = 20
 const ACQUISITION_COMMAND =
   'npm ci --ignore-scripts --no-audit --fund=false\n          --registry=https://registry.npmjs.org/ --userconfig=/dev/null'
 
@@ -48,6 +50,15 @@ function jobSource(jobId: string): string {
   const remainder = source.slice(start + marker.length)
   const nextJob = /^ {2}[a-z][a-z0-9-]*:\n/mu.exec(remainder)
   return nextJob ? remainder.slice(0, nextJob.index) : remainder
+}
+
+function gateCaseSource(gate: string): string {
+  const marker = `\n  ${gate})\n`
+  const start = gateScript.indexOf(marker)
+  assert.notEqual(start, -1, `network-denied script must define the ${gate} gate`)
+  const remainder = gateScript.slice(start + marker.length)
+  const nextGate = /^ {2}(?:[a-z][a-z0-9-]*|\*)\)\n/mu.exec(remainder)
+  return nextGate ? remainder.slice(0, nextGate.index) : remainder
 }
 
 test('C0.3 CI checks out the immutable event head with an exact toolchain and provenance preflight', () => {
@@ -107,16 +118,18 @@ test('C0.3 CI exposes distinct required gates and a stable aggregate', () => {
   assert.match(realPi, /suite: immutable-failures/u)
   assert.match(realPi, /suite: patched-command-preview/u)
   assert.match(realPi, /suite: patched-agent-preview/u)
+  assert.match(realPi, /suite: patched-failure-preview/u)
   assert.match(realPi, /pi-0\.83\.0-raw-load-boundaries/u)
   assert.match(realPi, /pi-0\.83\.0-raw-strict-xfails/u)
   assert.match(realPi, /pi-0\.83\.0-patched-command-preview/u)
   assert.match(realPi, /pi-0\.83\.0-patched-agent-preview/u)
+  assert.match(realPi, /pi-0\.83\.0-patched-failure-preview/u)
   assert.equal(count(realPi, 'patched_preview: false'), 2)
-  assert.equal(count(realPi, 'patched_preview: true'), 2)
-  assert.equal(count(realPi, 'fixture_state_preview: true'), 1)
+  assert.equal(count(realPi, 'patched_preview: true'), 3)
+  assert.equal(count(realPi, 'fixture_state_preview: true'), 2)
   assert.equal(count(realPi, 'fixture_agent_preview: true'), 1)
   assert.equal(count(realPi, 'fixture_state_preview: false'), 3)
-  assert.equal(count(realPi, 'fixture_agent_preview: false'), 3)
+  assert.equal(count(realPi, 'fixture_agent_preview: false'), 4)
 
   const required = jobSource('required')
   assert.match(required, /if: \$\{\{ always\(\) \}\}/u)
@@ -160,7 +173,7 @@ test('every executable gate runs unprivileged in the same loopback-only Docker p
   assert.ok(jobSource('real-pi-e2e').includes('run-network-denied-ci.sh "${{ matrix.suite }}"'))
 })
 
-test('C3.4/C3.5 acquire the same exact patched artifact before the network-denied execution boundary', () => {
+test('C3.4/C3.5/C3.6 acquire the same exact patched artifact before the network-denied execution boundary', () => {
   const realPi = jobSource('real-pi-e2e')
   const acquisitionStart = realPi.indexOf('Acquire the exact patched Pi artifact over the network')
   const executionStart = realPi.indexOf('docker run --rm --init')
@@ -201,7 +214,7 @@ test('C3.4/C3.5 acquire the same exact patched artifact before the network-denie
   assert.equal(gateScript.includes('acquire-patched-pi.sh'), false)
 })
 
-test('C3.4/C3.5 pass mutually exclusive default-off preview flags only to their dedicated matrix rows', () => {
+test('C3.4/C3.5/C3.6 pass mutually exclusive default-off preview flags only to their dedicated matrix rows', () => {
   const genericJobs = ['typecheck', 'lint', 'test', 'build'].map(jobSource).join('\n')
   assert.equal(genericJobs.includes('PI_ACP_PATCHED_PI_PACKAGE_ROOT'), false)
   assert.equal(genericJobs.includes('PI_ACP_EXPERIMENTAL_FIXTURE_STATE'), false)
@@ -229,13 +242,22 @@ test('C3.4/C3.5 pass mutually exclusive default-off preview flags only to their 
   )
   assert.match(
     gateScript,
-    /if \[\[ "\$gate" == 'patched-command-preview' \|\| "\$gate" == 'patched-agent-preview' \]\]; then/u
+    /if \[\[ "\$gate" == 'patched-command-preview' \|\| "\$gate" == 'patched-agent-preview' \|\| "\$gate" == 'patched-failure-preview' \]\]; then/u
   )
-  assert.match(gateScript, /require_unset PI_ACP_PATCHED_PI_PACKAGE_ROOT/u)
-  assert.match(gateScript, /require_unset PI_ACP_EXPERIMENTAL_FIXTURE_STATE/u)
-  assert.match(gateScript, /require_unset PI_ACP_EXPERIMENTAL_FIXTURE_AGENT/u)
-  assert.match(gateScript, /"\$PI_ACP_EXPERIMENTAL_FIXTURE_STATE" != 1/u)
-  assert.match(gateScript, /"\$PI_ACP_EXPERIMENTAL_FIXTURE_AGENT" != 1/u)
+  const patchedEnvironmentStart = gateScript.indexOf(
+    `if [[ "$gate" == 'patched-command-preview' || "$gate" == 'patched-agent-preview' || "$gate" == 'patched-failure-preview' ]]; then`
+  )
+  const patchedEnvironmentEnd = gateScript.indexOf('\nmkdir -p', patchedEnvironmentStart)
+  assert.notEqual(patchedEnvironmentStart, -1)
+  assert.notEqual(patchedEnvironmentEnd, -1)
+  const patchedEnvironment = gateScript.slice(patchedEnvironmentStart, patchedEnvironmentEnd)
+  assert.match(
+    patchedEnvironment,
+    /if \[\[ "\$gate" == 'patched-command-preview' \|\| "\$gate" == 'patched-failure-preview' \]\]; then[\s\S]*?"\$PI_ACP_EXPERIMENTAL_FIXTURE_STATE" != 1[\s\S]*?\$\{gate\} requires PI_ACP_EXPERIMENTAL_FIXTURE_STATE=1[\s\S]*?require_unset PI_ACP_EXPERIMENTAL_FIXTURE_AGENT\n {2}else[\s\S]*?"\$PI_ACP_EXPERIMENTAL_FIXTURE_AGENT" != 1[\s\S]*?require_unset PI_ACP_EXPERIMENTAL_FIXTURE_STATE\n {2}fi/u
+  )
+  assert.equal(count(patchedEnvironment, 'require_unset PI_ACP_PATCHED_PI_PACKAGE_ROOT'), 1)
+  assert.equal(count(patchedEnvironment, 'require_unset PI_ACP_EXPERIMENTAL_FIXTURE_STATE'), 2)
+  assert.equal(count(patchedEnvironment, 'require_unset PI_ACP_EXPERIMENTAL_FIXTURE_AGENT'), 2)
   assert.match(gateScript, /\$\{gate\} requires the exact pinned patched Pi package root/u)
   assert.equal(gateScript.includes('PI_ACP_PI_COMMAND'), false)
 })
@@ -268,7 +290,8 @@ test('the checked-in network and suite scripts make the workflow policy executab
     'load-boundaries',
     'immutable-failures',
     'patched-command-preview',
-    'patched-agent-preview'
+    'patched-agent-preview',
+    'patched-failure-preview'
   ]) {
     assert.match(gateScript, new RegExp(`^  ${gate}\\)$`, 'mu'))
   }
@@ -291,6 +314,10 @@ test('the checked-in network and suite scripts make the workflow policy executab
   assert.match(
     gateScript,
     /patched-agent-preview\)[\s\S]*?--test-concurrency=1 --test-reporter=tap[\s\S]*?test\/component\/real-pi-fixture-agent-preview\.test\.ts[\s\S]*?patched-agent-preview must run without skipped tests[\s\S]*?grep -Fx '# skipped 0'/u
+  )
+  assert.match(
+    gateScript,
+    /patched-failure-preview\)[\s\S]*?--test-concurrency=1 --test-reporter=tap[\s\S]*?test\/component\/real-pi-fixture-command-failures\.test\.ts[\s\S]*?patched-failure-preview must run without skipped tests[\s\S]*?grep -Fx '# tests 5'[\s\S]*?grep -Fx '# pass 5'[\s\S]*?grep -Fx '# fail 0'[\s\S]*?grep -Fx '# skipped 0'/u
   )
   assert.ok(gateScript.includes(`readonly PATCHED_PI_STRESS_ITERATIONS=${PATCHED_PI_STRESS_ITERATIONS}`))
   assert.match(
@@ -324,6 +351,39 @@ test('the checked-in network and suite scripts make the workflow policy executab
   assert.match(
     gateScript,
     /patched-agent-preview stress \$\{stress_iteration\}\/\$\{PATCHED_PI_AGENT_STRESS_ITERATIONS\} passed/u
+  )
+  assert.ok(
+    gateScript.includes(`readonly PATCHED_PI_FAILURE_STRESS_ITERATIONS=${PATCHED_PI_FAILURE_STRESS_ITERATIONS}`)
+  )
+  assert.ok(
+    gateScript.includes(`readonly PATCHED_PI_FAILURE_SCHEDULE_ITERATIONS=${PATCHED_PI_FAILURE_SCHEDULE_ITERATIONS}`)
+  )
+  const failureGate = gateCaseSource('patched-failure-preview')
+  assert.match(failureGate, /failure_schedules=\(throw cancel timeout exit-before-response response-before-exit\)/u)
+  assert.match(
+    failureGate,
+    /for \(\(stress_iteration = 1; stress_iteration <= PATCHED_PI_FAILURE_STRESS_ITERATIONS; stress_iteration \+= 1\)\); do/u
+  )
+  assert.match(
+    failureGate,
+    /schedule_index=\$\(\(\(stress_iteration - 1\) \/ PATCHED_PI_FAILURE_SCHEDULE_ITERATIONS\)\)/u
+  )
+  assert.match(failureGate, /PI_ACP_C3_6_STRESS_SCHEDULE="\$stress_schedule"/u)
+  for (const token of [
+    "grep -Fx '# tests 1'",
+    "grep -Fx '# pass 1'",
+    "grep -Fx '# fail 0'",
+    "grep -Fx '# skipped 0'"
+  ]) {
+    assert.ok(failureGate.includes(token), `C3.6 stress gate must enforce ${token}`)
+  }
+  assert.match(
+    failureGate,
+    /patched-failure-preview \$\{stress_schedule\} stress iteration \$\{stress_iteration\} did not run exactly one schedule/u
+  )
+  assert.match(
+    failureGate,
+    /patched-failure-preview stress \$\{stress_iteration\}\/\$\{PATCHED_PI_FAILURE_STRESS_ITERATIONS\} passed/u
   )
   assert.match(gateScript, /npm --version/u)
   assert.match(gateScript, /cp -a package\.json tsconfig\.json tsup\.config\.ts src/u)
