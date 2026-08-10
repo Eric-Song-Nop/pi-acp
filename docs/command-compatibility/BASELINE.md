@@ -143,9 +143,9 @@ teardown without a real model account. The load-only case and sole live C0.7
 The immutable `C0.7-XF02` and `C0.7-XF03` artifacts are historical-only and do
 not execute a current-runtime replay.
 
-## C3.1–C3.4 experimental patched-Pi preview
+## C3.1–C3.5 experimental patched-Pi previews
 
-The verified default-off preview tuple is:
+The verified C3.4 default-off preview tuple is:
 
 ```text
 pi-acp 0.0.33 promotion head @ e198fa37e1fee793a0af0728a1e570d1d0a69b9f
@@ -159,11 +159,31 @@ pi-acp 0.0.33 promotion head @ e198fa37e1fee793a0af0728a1e570d1d0a69b9f
 × PI_ACP_EXPERIMENTAL_FIXTURE_STATE=1
 ```
 
-This tuple certifies only the exact `/fixture-state` extension-command preview.
-The flag is off unless its value is exactly `1`; all broader extension-command,
-agent-triggering, dialog, dynamic-catalog, and manual-client claims remain in
-their later checkpoints. It does not replace the stock Pi `0.83.0` C0.2
-baseline or constitute Zed/non-Zed manual certification.
+The verified C3.5 default-off preview tuple is:
+
+```text
+pi-acp 0.0.33 implementation @ bfe2f0d3fde105b20581f5d7b86dd485277cd783
+  sole parent / C3.4 documentation publication @ ca2d093b57a4d56f3ac39427987a0e6751b28cad
+  C3.4 product ancestor @ 28d7aeedb0d6d3b4ad119a40d0f449d667ce6421
+× C3.3 adapter bridge @ df92ac575ba44fa92ffd3a8b6b56efc7a449e152
+× patched Pi 0.83.0 @ ec55c97d680f8f38359f7b6717c72b83c5e4d29a
+  (upstream base 845d6ff1f6643aba440341cce877ce1c43ebbc39)
+× ACP protocol 1 / TypeScript SDK 0.26.0
+× Node 22.19.0 / npm 10.9.3 in CI; Node 26.5.0 focused/static locally
+× raw ACP client / Linux amd64 / network-none execution boundary
+× PI_ACP_EXPERIMENTAL_FIXTURE_AGENT=1
+  with PI_ACP_EXPERIMENTAL_FIXTURE_STATE unset
+```
+
+The C3.4 tuple certifies only exact state-only `/fixture-state` completion with
+disposition `handled`. The C3.5 tuple certifies only exact `/fixture-agent`
+completion after its attributed provider stream and agent run settle, with
+disposition `agent_run`. Each flag is independent, default-off, and enabled
+only by exact value `1`. Broader extension publication, general collision and
+reserved-name policy, failure/cancel/child-exit lifecycle, streaming
+concurrency, dialog, dynamic-catalog, and manual-client claims remain in later
+checkpoints. Neither tuple replaces the stock Pi `0.83.0` C0.2 baseline or
+constitutes Zed/non-Zed manual certification.
 
 ### Immutable patched-Pi artifact record
 
@@ -247,6 +267,110 @@ and network-denied matrix and pi-acp pins it. Rollback disables/removes
 `PI_ACP_EXPERIMENTAL_FIXTURE_STATE`, restores stock Pi `0.83.0`, and requires no
 session or transcript migration; it never deletes, rewrites, or substitutes the
 provenance artifact.
+
+### C3.5 agent-triggering execution evidence
+
+The C3.5 implementation is PR #31 commit
+[`bfe2f0d3fde105b20581f5d7b86dd485277cd783`](https://github.com/Eric-Song-Nop/pi-acp/commit/bfe2f0d3fde105b20581f5d7b86dd485277cd783),
+with sole parent the C3.4 documentation publication
+`ca2d093b57a4d56f3ac39427987a0e6751b28cad`, tree
+`eedd4552b24a0f6462b29201e74c3535fb4206f3`, and the exact 12-path scope below.
+The fixture-only `/fixture-agent` preview is exposed only by exact
+`PI_ACP_EXPERIMENTAL_FIXTURE_AGENT=1`. It preserves Pi's request-bound
+`agent_run` response only after the attributed provider stream and agent turn
+settle, emits the assistant chunk before one ACP `end_turn`, persists exactly
+the synthetic user/assistant turn, remains live on the same Pi PID for the
+post-completion probe, and then tears down without a surviving child, listener,
+receipt writer, temporary evidence file, or repository mutation. General
+extension exposure, lifecycle failures, and streaming concurrency remain
+deferred.
+
+Fixture-agent ownership follows the generic slash router's `trimStart()`
+boundary: a leading space or newline cannot bypass the enabled preview or the
+flag-off exact-extension kill switch into generic prompt/model routing. This is
+candidate/fence normalization only. A valid invocation remains raw byte-exact:
+exactly one text block whose complete content is `/fixture-agent`; leading or
+trailing whitespace, arguments, multiple blocks, and attachments are refused
+before prompt or execute, while `/fixture-agentx` remains an unrelated generic
+route even with leading whitespace. The only structured execution is exact
+extension name `fixture-agent` with empty arguments.
+
+Two predecessor candidates are permanently invalidated. Original
+`8f77eb12552ae109e975941a3515654b51e8bb26` was rejected by COMMENT
+[review `4894728897`](https://github.com/Eric-Song-Nop/pi-acp/pull/31#pullrequestreview-4894728897)
+with `1 P1`: its raw candidate check did not match the generic router's
+leading-whitespace normalization. Replacement
+`53a8e3e75b896879a5b5d505faba4c1a2dd408c0` fixed that routing defect, but
+[run `31368632822`](https://github.com/Eric-Song-Nop/pi-acp/actions/runs/31368632822)
+failed patched-agent stress iteration 41 after a final release path became
+visible before its contents were complete; an exact local reproduction also
+observed a zero-byte final receipt during the analogous publication window.
+Neither predecessor is accepted evidence.
+
+The final proof harness closes both partial-publication windows. Release
+sentinels are written to a unique same-directory staging file, file-fsynced and
+closed, then published by an atomic no-clobber hard link; an existing final is
+accepted only when its bytes are exactly `release\n`, and a corrupt final is
+preserved and rejected. Receipts remain reader-invisible under a unique
+`.json.tmp` name until write, file fsync, and close complete, then use a
+same-directory rename and directory fsync. Receipt target uniqueness relies on
+the contractual fresh private root and single writer: its `lstat`-then-rename
+sequence is reader-atomic but is not adversarial atomic no-replace against a
+competing same-UID actor. Tests preseed a corrupt final, exercise concurrent
+identical release publishers, parse every receipt, and require no staging-file
+residue after quiescent shutdown; staging/close/publication/cleanup failures are
+preserved rather than hidden.
+
+Exact source-leaf SHA-256 values:
+
+| Source leaf                                               | SHA-256                                                            |
+| --------------------------------------------------------- | ------------------------------------------------------------------ |
+| `src/pi-rpc/process.ts`                                   | `92aea5099cb2cdb4e0bf53716911f25dba568883c28006ac0c254a8077b3242c` |
+| `src/acp/pi-commands.ts`                                  | `08a8da8e555ee71018ee704a2ffe802a897a7e4c0ff737a9ba1ff6a76d562679` |
+| `src/acp/agent.ts`                                        | `8795690598a1d87b4597581c65826e666faf6bbddf637832e7eaafa4e60568e8` |
+| `test/unit/pi-rpc-execute-command.test.ts`                | `429ea57ffb37505c940f63fce2e9fdbc3f55d03d36bc16123631644be6971332` |
+| `test/unit/pi-command-catalog-preview.test.ts`            | `4953c68a268bc1f4ae0043f4b32cf990c6780abb03e0d5cefb85ee444337980e` |
+| `test/component/fixture-state-preview.test.ts`            | `43fa89d2fae72cb38e3ca453747657fd8fe4f93760508e5ee5adcef437d6ca21` |
+| `test/fixtures/pi-extension-pack/c3.5-agent-run/index.ts` | `1a2e16bf77538d581f0211dcef886171b85d73f7243dfbb763fcb8e88cf452e8` |
+| `test/helpers/real-pi-fixture.ts`                         | `79ba15d5cc2a8f67d70626cedf8f3464db2b05788976e68d5d10b331fb8e5f77` |
+| `test/component/real-pi-fixture-agent-preview.test.ts`    | `466b6b272e4401e9173306cb634c39c002e196e2b85f280319e3b11c9d2c54e2` |
+| `.github/scripts/run-network-denied-ci.sh`                | `a7dec9806a52f857648768f4b9cfeef7c24ba2e2f627d94c4fc0e9b1f1616c9f` |
+| `.github/workflows/ci.yml`                                | `7ef3d043a63e5e9f1c72a51525f0de081b894060fc6873c11887f158ed9f801a` |
+| `test/unit/ci-workflow-policy.test.ts`                    | `911308b46ed6634ba3322d4fab3670ad79268bb4c67fe83f2a88e000d3794a1b` |
+
+Exact-head [run `31371715892`](https://github.com/Eric-Song-Nop/pi-acp/actions/runs/31371715892)
+passed all ten jobs. Full-test job `93402022300` ran 472 tests: 467 passed, zero
+failed, and five were expected dedicated-row skips. Patched-agent job
+`93402022420` acquired the unchanged public artifact before entering the
+read-only, unprivileged, kernel-network-denied Node `22.19.0` Linux/amd64
+boundary; its two real-Pi schedules passed `2/2` with zero skips, followed by
+`100/100` fresh processes split into 50 asynchronous-preflight and 50
+provider-final schedules. Stable required job `93403883152` passed with tested
+and expected head `bfe2f0d3…` and base `ca2d093b…`. Local current/exact
+focused-policy tests passed `93/93`; the canonical real schedules raise the
+combined proof to `95/95`, and the exact local fresh-process stress also passed
+`100/100`. Same-author `COMMENTED`
+[review `4895294936`](https://github.com/Eric-Song-Nop/pi-acp/pull/31#pullrequestreview-4895294936)
+is bound to exact `bfe2f0d3…`, records CLEAN `0 P1/P2/P3`, and leaves PR #31
+draft/open/unmerged; the original P1 thread is resolved. It is not represented
+as an `APPROVED` review.
+
+Across the implementation, `package.json` remains blob
+`302bbd32a25daec8f7bfdd10fc18476ff9f08acf` / SHA-256
+`a51d5433ac8d3afdbe3c0691ef71a73b74ce621ac3c47abad5733672dd917a6b`, and
+`package-lock.json` remains blob `0dfce41174db70696f090c01a4dd2b6b8d833223`
+/ SHA-256
+`342287dd88c848abe09556a2778f2e883728fb347f873c5cde4bed51d7e366c3`. The C0.7
+transcript tree remains `8c51d3cbb48cf9e7b1762469f9a199be70ac456a`;
+its manifest remains blob `79bc179f67eda2f794b134dfdb673bf41ddc9001` /
+SHA-256
+`edfbbf2807e84f409e826a853e514debb30bd51a964a711cccd0577dea469ce3`,
+and every content-addressed artifact remains byte-identical. Rollback
+unsets/removes only
+`PI_ACP_EXPERIMENTAL_FIXTURE_AGENT` and reverts the fixture-agent path and its
+dedicated gate. It preserves C3.4 `/fixture-state`, the immutable Pi artifact,
+stock Pi `0.83.0`, and frozen C0.7 evidence; successful fixture-agent turns are
+ordinary persisted Pi messages and require no migration or deletion.
 
 ## C0.7 immutable failure baseline
 
