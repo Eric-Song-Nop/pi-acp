@@ -24,6 +24,8 @@ const PATCHED_PI_SHA512_SRI =
 const PATCHED_PI_PACKAGE_ROOT =
   '/workspace/node_modules/.pi-acp-patched-pi/ec55c97d680f8f38359f7b6717c72b83c5e4d29a/package'
 const PATCHED_PI_STRESS_ITERATIONS = 100
+const PATCHED_PI_AGENT_STRESS_ITERATIONS = 100
+const PATCHED_PI_AGENT_SCHEDULE_ITERATIONS = 50
 const ACQUISITION_COMMAND =
   'npm ci --ignore-scripts --no-audit --fund=false\n          --registry=https://registry.npmjs.org/ --userconfig=/dev/null'
 
@@ -104,11 +106,17 @@ test('C0.3 CI exposes distinct required gates and a stable aggregate', () => {
   assert.match(realPi, /suite: load-boundaries/u)
   assert.match(realPi, /suite: immutable-failures/u)
   assert.match(realPi, /suite: patched-command-preview/u)
+  assert.match(realPi, /suite: patched-agent-preview/u)
   assert.match(realPi, /pi-0\.83\.0-raw-load-boundaries/u)
   assert.match(realPi, /pi-0\.83\.0-raw-strict-xfails/u)
   assert.match(realPi, /pi-0\.83\.0-patched-command-preview/u)
+  assert.match(realPi, /pi-0\.83\.0-patched-agent-preview/u)
   assert.equal(count(realPi, 'patched_preview: false'), 2)
-  assert.equal(count(realPi, 'patched_preview: true'), 1)
+  assert.equal(count(realPi, 'patched_preview: true'), 2)
+  assert.equal(count(realPi, 'fixture_state_preview: true'), 1)
+  assert.equal(count(realPi, 'fixture_agent_preview: true'), 1)
+  assert.equal(count(realPi, 'fixture_state_preview: false'), 3)
+  assert.equal(count(realPi, 'fixture_agent_preview: false'), 3)
 
   const required = jobSource('required')
   assert.match(required, /if: \$\{\{ always\(\) \}\}/u)
@@ -152,7 +160,7 @@ test('every executable gate runs unprivileged in the same loopback-only Docker p
   assert.ok(jobSource('real-pi-e2e').includes('run-network-denied-ci.sh "${{ matrix.suite }}"'))
 })
 
-test('C3.4 acquires one exact patched artifact before the network-denied execution boundary', () => {
+test('C3.4/C3.5 acquire the same exact patched artifact before the network-denied execution boundary', () => {
   const realPi = jobSource('real-pi-e2e')
   const acquisitionStart = realPi.indexOf('Acquire the exact patched Pi artifact over the network')
   const executionStart = realPi.indexOf('docker run --rm --init')
@@ -193,18 +201,20 @@ test('C3.4 acquires one exact patched artifact before the network-denied executi
   assert.equal(gateScript.includes('acquire-patched-pi.sh'), false)
 })
 
-test('C3.4 passes only the pinned package root and default-off preview flag to its dedicated matrix row', () => {
+test('C3.4/C3.5 pass mutually exclusive default-off preview flags only to their dedicated matrix rows', () => {
   const genericJobs = ['typecheck', 'lint', 'test', 'build'].map(jobSource).join('\n')
   assert.equal(genericJobs.includes('PI_ACP_PATCHED_PI_PACKAGE_ROOT'), false)
   assert.equal(genericJobs.includes('PI_ACP_EXPERIMENTAL_FIXTURE_STATE'), false)
+  assert.equal(genericJobs.includes('PI_ACP_EXPERIMENTAL_FIXTURE_AGENT'), false)
 
   const realPi = jobSource('real-pi-e2e')
   assert.match(
     realPi,
-    /gate_environment=\(\)\n {10}if \[\[ '\$\{\{ matrix\.patched_preview \}\}' == 'true' \]\]; then\n {12}gate_environment=\([\s\S]*?PI_ACP_PATCHED_PI_PACKAGE_ROOT=\/workspace\/node_modules\/\.pi-acp-patched-pi\/ec55c97d680f8f38359f7b6717c72b83c5e4d29a\/package\n {14}PI_ACP_EXPERIMENTAL_FIXTURE_STATE=1\n {12}\)\n {10}fi/u
+    /gate_environment=\(\)\n {10}if \[\[ '\$\{\{ matrix\.fixture_state_preview \}\}' == 'true' && '\$\{\{ matrix\.fixture_agent_preview \}\}' == 'false' \]\]; then\n {12}gate_environment=\([\s\S]*?PI_ACP_EXPERIMENTAL_FIXTURE_STATE=1\n {12}\)\n {10}elif \[\[ '\$\{\{ matrix\.fixture_state_preview \}\}' == 'false' && '\$\{\{ matrix\.fixture_agent_preview \}\}' == 'true' \]\]; then\n {12}gate_environment=\([\s\S]*?PI_ACP_EXPERIMENTAL_FIXTURE_AGENT=1\n {12}\)\n {10}fi/u
   )
-  assert.equal(count(realPi, 'PI_ACP_PATCHED_PI_PACKAGE_ROOT='), 1)
+  assert.equal(count(realPi, 'PI_ACP_PATCHED_PI_PACKAGE_ROOT='), 2)
   assert.equal(count(realPi, 'PI_ACP_EXPERIMENTAL_FIXTURE_STATE=1'), 1)
+  assert.equal(count(realPi, 'PI_ACP_EXPERIMENTAL_FIXTURE_AGENT=1'), 1)
   assert.match(realPi, /"\$\{gate_environment\[@\]\}"/u)
   assert.equal(workflow.includes('PI_ACP_PI_COMMAND'), false)
 
@@ -217,11 +227,16 @@ test('C3.4 passes only the pinned package root and default-off preview flag to i
       )
     )
   )
-  assert.match(gateScript, /if \[\[ "\$gate" == 'patched-command-preview' \]\]; then/u)
+  assert.match(
+    gateScript,
+    /if \[\[ "\$gate" == 'patched-command-preview' \|\| "\$gate" == 'patched-agent-preview' \]\]; then/u
+  )
   assert.match(gateScript, /require_unset PI_ACP_PATCHED_PI_PACKAGE_ROOT/u)
   assert.match(gateScript, /require_unset PI_ACP_EXPERIMENTAL_FIXTURE_STATE/u)
+  assert.match(gateScript, /require_unset PI_ACP_EXPERIMENTAL_FIXTURE_AGENT/u)
   assert.match(gateScript, /"\$PI_ACP_EXPERIMENTAL_FIXTURE_STATE" != 1/u)
-  assert.match(gateScript, /patched-command-preview requires the exact pinned patched Pi package root/u)
+  assert.match(gateScript, /"\$PI_ACP_EXPERIMENTAL_FIXTURE_AGENT" != 1/u)
+  assert.match(gateScript, /\$\{gate\} requires the exact pinned patched Pi package root/u)
   assert.equal(gateScript.includes('PI_ACP_PI_COMMAND'), false)
 })
 
@@ -252,7 +267,8 @@ test('the checked-in network and suite scripts make the workflow policy executab
     'build',
     'load-boundaries',
     'immutable-failures',
-    'patched-command-preview'
+    'patched-command-preview',
+    'patched-agent-preview'
   ]) {
     assert.match(gateScript, new RegExp(`^  ${gate}\\)$`, 'mu'))
   }
@@ -272,6 +288,10 @@ test('the checked-in network and suite scripts make the workflow policy executab
     gateScript,
     /patched-command-preview\)[\s\S]*?--test-concurrency=1 --test-reporter=tap[\s\S]*?test\/component\/real-pi-fixture-state-preview\.test\.ts[\s\S]*?patched-command-preview must run without skipped tests[\s\S]*?grep -Fx '# skipped 0'/u
   )
+  assert.match(
+    gateScript,
+    /patched-agent-preview\)[\s\S]*?--test-concurrency=1 --test-reporter=tap[\s\S]*?test\/component\/real-pi-fixture-agent-preview\.test\.ts[\s\S]*?patched-agent-preview must run without skipped tests[\s\S]*?grep -Fx '# skipped 0'/u
+  )
   assert.ok(gateScript.includes(`readonly PATCHED_PI_STRESS_ITERATIONS=${PATCHED_PI_STRESS_ITERATIONS}`))
   assert.match(
     gateScript,
@@ -285,6 +305,25 @@ test('the checked-in network and suite scripts make the workflow policy executab
   assert.match(
     gateScript,
     /patched-command-preview stress \$\{stress_iteration\}\/\$\{PATCHED_PI_STRESS_ITERATIONS\} passed/u
+  )
+  assert.ok(gateScript.includes(`readonly PATCHED_PI_AGENT_STRESS_ITERATIONS=${PATCHED_PI_AGENT_STRESS_ITERATIONS}`))
+  assert.ok(
+    gateScript.includes(`readonly PATCHED_PI_AGENT_SCHEDULE_ITERATIONS=${PATCHED_PI_AGENT_SCHEDULE_ITERATIONS}`)
+  )
+  assert.match(
+    gateScript,
+    /for \(\(stress_iteration = 1; stress_iteration <= PATCHED_PI_AGENT_STRESS_ITERATIONS; stress_iteration \+= 1\)\); do/u
+  )
+  assert.match(
+    gateScript,
+    /if \(\(stress_iteration <= PATCHED_PI_AGENT_SCHEDULE_ITERATIONS\)\); then[\s\S]*?stress_schedule='preflight'[\s\S]*?stress_schedule='provider-final'/u
+  )
+  assert.match(gateScript, /PI_ACP_C3_5_STRESS_SCHEDULE="\$stress_schedule"/u)
+  assert.match(gateScript, /grep -Fx '# tests 1'/u)
+  assert.match(gateScript, /grep -Fx '# pass 1'/u)
+  assert.match(
+    gateScript,
+    /patched-agent-preview stress \$\{stress_iteration\}\/\$\{PATCHED_PI_AGENT_STRESS_ITERATIONS\} passed/u
   )
   assert.match(gateScript, /npm --version/u)
   assert.match(gateScript, /cp -a package\.json tsconfig\.json tsup\.config\.ts src/u)

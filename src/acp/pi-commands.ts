@@ -6,6 +6,7 @@ import {
 } from './command-compatibility.js'
 
 export const FIXTURE_STATE_COMMAND_NAME = 'fixture-state' as const
+export const FIXTURE_AGENT_COMMAND_NAME = 'fixture-agent' as const
 
 export type PiRpcCommandInfo = {
   name?: unknown
@@ -36,12 +37,16 @@ export type FrozenPiCommandCatalog = Readonly<{
   raw: readonly NormalizedPiRpcCommandInfo[]
   hasFixtureStateExtension: boolean
   fixtureStateExtensionCount: number
+  hasFixtureAgentExtension: boolean
+  fixtureAgentExtensionCount: number
 }>
 
 export type PiCommandCatalogOptions = Readonly<{
   enableSkillCommands?: boolean
   enableFixtureStateCommand?: boolean
   reserveFixtureStateName?: boolean
+  enableFixtureAgentCommand?: boolean
+  reserveFixtureAgentName?: boolean
 }>
 
 export type PiCommandCatalogState = {
@@ -67,6 +72,22 @@ const fixtureStateCompatibility = commandCompatibilitySchema.parse({
 })
 
 export const FIXTURE_STATE_SAFE_COMMAND_METADATA = Object.freeze(toSafeCommandMetadata(fixtureStateCompatibility))
+
+const fixtureAgentCompatibility = commandCompatibilitySchema.parse({
+  schemaVersion: COMMAND_COMPATIBILITY_SCHEMA_VERSION,
+  id: 'extension:pi-acp-fixture:fixture-agent',
+  name: FIXTURE_AGENT_COMMAND_NAME,
+  source: 'extension',
+  sourceId: 'extension:pi-acp-fixture',
+  compatibility: 'rpc-native',
+  execution: 'agent',
+  exposure: 'experimental',
+  interactions: [],
+  evidence: [{ kind: 'fixture', ref: 'test/fixtures/pi-extension-pack/c3.5-agent-run/index.ts' }],
+  description: 'Run the deterministic Pi ACP C3.5 fixture agent turn'
+})
+
+export const FIXTURE_AGENT_SAFE_COMMAND_METADATA = Object.freeze(toSafeCommandMetadata(fixtureAgentCompatibility))
 
 export function createPiCommandCatalogState(): PiCommandCatalogState {
   return {
@@ -149,6 +170,8 @@ export function freezePiCommandCatalog(data: unknown, opts?: PiCommandCatalogOpt
   const enableSkillCommands = opts?.enableSkillCommands ?? true
   const enableFixtureStateCommand = opts?.enableFixtureStateCommand ?? false
   const reserveFixtureStateName = opts?.reserveFixtureStateName ?? false
+  const enableFixtureAgentCommand = opts?.enableFixtureAgentCommand ?? false
+  const reserveFixtureAgentName = opts?.reserveFixtureAgentName ?? false
   const raw = normalizeCommands(data)
   const fixtureStateExtensionCommands = raw.filter(
     command => command.source === 'extension' && command.name === FIXTURE_STATE_COMMAND_NAME
@@ -162,6 +185,18 @@ export function freezePiCommandCatalog(data: unknown, opts?: PiCommandCatalogOpt
   const hasFixtureStateExtension = fixtureStateExtensionCount === 1 && fixtureStateVisibleNameCommands.length === 1
   const fixtureStateNameReserved =
     enableFixtureStateCommand || reserveFixtureStateName || fixtureStateExtensionCount > 0
+  const fixtureAgentExtensionCommands = raw.filter(
+    command => command.source === 'extension' && command.name === FIXTURE_AGENT_COMMAND_NAME
+  )
+  const fixtureAgentExtensionCount = fixtureAgentExtensionCommands.length
+  const fixtureAgentVisibleNameCommands = raw.filter(
+    command =>
+      (command.source === 'extension' || command.source === 'prompt' || command.source === 'skill') &&
+      command.name.trim() === FIXTURE_AGENT_COMMAND_NAME
+  )
+  const hasFixtureAgentExtension = fixtureAgentExtensionCount === 1 && fixtureAgentVisibleNameCommands.length === 1
+  const fixtureAgentNameReserved =
+    enableFixtureAgentCommand || reserveFixtureAgentName || fixtureAgentExtensionCount > 0
   const commands: AvailableCommand[] = []
 
   for (const command of raw) {
@@ -169,19 +204,35 @@ export function freezePiCommandCatalog(data: unknown, opts?: PiCommandCatalogOpt
     if (availableName === FIXTURE_STATE_COMMAND_NAME && !hasFixtureStateExtension && fixtureStateNameReserved) {
       continue
     }
+    if (availableName === FIXTURE_AGENT_COMMAND_NAME && !hasFixtureAgentExtension && fixtureAgentNameReserved) {
+      continue
+    }
 
     if (command.source === 'extension') {
-      if (!enableFixtureStateCommand || !hasFixtureStateExtension || command.name !== FIXTURE_STATE_COMMAND_NAME) {
+      if (command.name === FIXTURE_STATE_COMMAND_NAME) {
+        if (!enableFixtureStateCommand || !hasFixtureStateExtension) continue
+
+        commands.push(
+          Object.freeze({
+            name: FIXTURE_STATE_COMMAND_NAME,
+            description: command.description || fixtureStateCompatibility.description,
+            _meta: { piAcp: { command: FIXTURE_STATE_SAFE_COMMAND_METADATA } }
+          }) as AvailableCommand
+        )
         continue
       }
 
-      commands.push(
-        Object.freeze({
-          name: FIXTURE_STATE_COMMAND_NAME,
-          description: command.description || fixtureStateCompatibility.description,
-          _meta: { piAcp: { command: FIXTURE_STATE_SAFE_COMMAND_METADATA } }
-        }) as AvailableCommand
-      )
+      if (command.name === FIXTURE_AGENT_COMMAND_NAME) {
+        if (!enableFixtureAgentCommand || !hasFixtureAgentExtension) continue
+
+        commands.push(
+          Object.freeze({
+            name: FIXTURE_AGENT_COMMAND_NAME,
+            description: command.description || fixtureAgentCompatibility.description,
+            _meta: { piAcp: { command: FIXTURE_AGENT_SAFE_COMMAND_METADATA } }
+          }) as AvailableCommand
+        )
+      }
       continue
     }
 
@@ -202,7 +253,9 @@ export function freezePiCommandCatalog(data: unknown, opts?: PiCommandCatalogOpt
     commands: Object.freeze(commands),
     raw: Object.freeze(raw),
     hasFixtureStateExtension,
-    fixtureStateExtensionCount
+    fixtureStateExtensionCount,
+    hasFixtureAgentExtension,
+    fixtureAgentExtensionCount
   })
 }
 

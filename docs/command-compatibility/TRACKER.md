@@ -185,7 +185,7 @@ commands 宣称为稳定支持。
 | `C3.2` | Pi 实现 `execute_command` + request/disposition identity                      | `verified`  | `C3.1`                    | `G3`      |
 | `C3.3` | pi-acp bridge 结构化 command results                                          | `verified`  | `C2.2`, `C3.2`            | `G3`      |
 | `C3.4` | state-only/no-LLM/handled-input commands 正确完成                             | `verified`  | `C3.3`                    | `G3`      |
-| `C3.5` | agent-triggering commands 等待正确 run 后只完成一次                           | `proposed`  | `C3.3`                    | `G3`      |
+| `C3.5` | agent-triggering commands 等待正确 run 后只完成一次                           | `verified`  | `C3.4`                    | `G3`      |
 | `C3.6` | throw/cancel/timeout 无泄漏、无重复完成                                       | `proposed`  | `C3.3`                    | `G3`      |
 | `C3.7` | streaming 中的 immediate command/steer/follow-up 语义明确                     | `proposed`  | `C3.3`                    | `G3`      |
 | `C3.8` | new/switch/fork/reload 后 ACP session 映射与目录同步                          | `proposed`  | `C3.3`, `C2.5`            | `G3`      |
@@ -1172,14 +1172,15 @@ response 是唯一 completion authority。
       `PI_ACP_PI_COMMAND`；stock Pi `0.83.0` evidence 与 frozen C0.7 保持不变。
 - [x] exact-head review 无 blocking finding。
 
-##### C3.1–C3.4 accepted identities and promotion evidence
+##### C3.1–C3.5 accepted identities and promotion evidence
 
-| Checkpoint | Accepted identity                                                                                                                                                                                                        | Durable evidence                                                                                                                                                                                                                                                               |
-| ---------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `C3.1`     | PR #26 spec `c2fb2fe4831e9f4faf8816f33ddbcc593ebb9d11`; sole parent `7c8c43d34bc5bc08df266214299ad4baf425c66a`; tree `999eb80a528a728d876fe2fc7c3d03af0fe408ca`; stacked base `c5a3921dde29aa5db96ac256ace611eba2576df5` | [Run `30739183983`](https://github.com/Eric-Song-Nop/pi-acp/actions/runs/30739183983) 8/8; same-author COMMENT [review `4893866577`](https://github.com/Eric-Song-Nop/pi-acp/pull/26#pullrequestreview-4893866577), CLEAN `0 P1/P2/P3`                                         |
-| `C3.2`     | Pi PR #1 `ec55c97d680f8f38359f7b6717c72b83c5e4d29a`; sole upstream parent `845d6ff1f6643aba440341cce877ce1c43ebbc39`; tree `204651bccc3c4141a8e697dee2e8f02eda6e0089`; exact nine files                                  | [Review `4837862226`](https://github.com/Eric-Song-Nop/pi-mono/pull/1#pullrequestreview-4837862226), dual-runtime focused `27/27`, build/runtime/type exports, immutable package below                                                                                         |
-| `C3.3`     | PR #27 `df92ac575ba44fa92ffd3a8b6b56efc7a449e152`; sole parent C3.1 `c2fb2fe4831e9f4faf8816f33ddbcc593ebb9d11`; tree `385d9628955a3576b91711fe0cfbaface89f5f3c`; exact eight files                                       | [Review `4837940155`](https://github.com/Eric-Song-Nop/pi-acp/pull/27#pullrequestreview-4837940155), CLEAN `0 P1/P2/P3`; descendant promotion run below                                                                                                                        |
-| `C3.4`     | PR #29 product implementation `28d7aeedb0d6d3b4ad119a40d0f449d667ce6421`; sole parent C3.3 `df92ac575ba44fa92ffd3a8b6b56efc7a449e152`; tree `820eb1d1ee73ab63f1f600719d6e9c8b41372049`; exact 12 files                   | Final promotion `e198fa37e1fee793a0af0728a1e570d1d0a69b9f`; [run `31361247166`](https://github.com/Eric-Song-Nop/pi-acp/actions/runs/31361247166) 9/9; [review `4894184272`](https://github.com/Eric-Song-Nop/pi-acp/pull/29#pullrequestreview-4894184272), CLEAN `0 P1/P2/P3` |
+| Checkpoint | Accepted identity                                                                                                                                                                                                        | Durable evidence                                                                                                                                                                                                                                                                                      |
+| ---------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `C3.1`     | PR #26 spec `c2fb2fe4831e9f4faf8816f33ddbcc593ebb9d11`; sole parent `7c8c43d34bc5bc08df266214299ad4baf425c66a`; tree `999eb80a528a728d876fe2fc7c3d03af0fe408ca`; stacked base `c5a3921dde29aa5db96ac256ace611eba2576df5` | [Run `30739183983`](https://github.com/Eric-Song-Nop/pi-acp/actions/runs/30739183983) 8/8; same-author COMMENT [review `4893866577`](https://github.com/Eric-Song-Nop/pi-acp/pull/26#pullrequestreview-4893866577), CLEAN `0 P1/P2/P3`                                                                |
+| `C3.2`     | Pi PR #1 `ec55c97d680f8f38359f7b6717c72b83c5e4d29a`; sole upstream parent `845d6ff1f6643aba440341cce877ce1c43ebbc39`; tree `204651bccc3c4141a8e697dee2e8f02eda6e0089`; exact nine files                                  | [Review `4837862226`](https://github.com/Eric-Song-Nop/pi-mono/pull/1#pullrequestreview-4837862226), dual-runtime focused `27/27`, build/runtime/type exports, immutable package below                                                                                                                |
+| `C3.3`     | PR #27 `df92ac575ba44fa92ffd3a8b6b56efc7a449e152`; sole parent C3.1 `c2fb2fe4831e9f4faf8816f33ddbcc593ebb9d11`; tree `385d9628955a3576b91711fe0cfbaface89f5f3c`; exact eight files                                       | [Review `4837940155`](https://github.com/Eric-Song-Nop/pi-acp/pull/27#pullrequestreview-4837940155), CLEAN `0 P1/P2/P3`; descendant promotion run below                                                                                                                                               |
+| `C3.4`     | PR #29 product implementation `28d7aeedb0d6d3b4ad119a40d0f449d667ce6421`; sole parent C3.3 `df92ac575ba44fa92ffd3a8b6b56efc7a449e152`; tree `820eb1d1ee73ab63f1f600719d6e9c8b41372049`; exact 12 files                   | Final promotion `e198fa37e1fee793a0af0728a1e570d1d0a69b9f`; [run `31361247166`](https://github.com/Eric-Song-Nop/pi-acp/actions/runs/31361247166) 9/9; [review `4894184272`](https://github.com/Eric-Song-Nop/pi-acp/pull/29#pullrequestreview-4894184272), CLEAN `0 P1/P2/P3`                        |
+| `C3.5`     | PR #31 implementation `bfe2f0d3fde105b20581f5d7b86dd485277cd783`; sole parent C3.4 publication `ca2d093b57a4d56f3ac39427987a0e6751b28cad`; tree `eedd4552b24a0f6462b29201e74c3535fb4206f3`; exact 12 files               | [Run `31371715892`](https://github.com/Eric-Song-Nop/pi-acp/actions/runs/31371715892) 10/10; patched-agent job `93402022420` real `2/2` plus fresh-process `100/100`; [COMMENT review `4895294936`](https://github.com/Eric-Song-Nop/pi-acp/pull/31#pullrequestreview-4895294936), CLEAN `0 P1/P2/P3` |
 
 PR #26 review `4893866577` is a same-author `COMMENTED` acceptance record bound
 to exact `c2fb2fe4…`; it is not represented as an `APPROVED` review. C3.2 has
@@ -1211,6 +1212,95 @@ and development `0/0/1/8/0` (`total: 9`), with 21 distinct sorted GHSA
 identities recorded in
 [`BASELINE.md`](BASELINE.md#dependency-audit-snapshot). Dependency manifests and
 the lockfile are unchanged; risk/remediation remains owned by `C5.8`.
+
+##### C3.5 fixture-agent completion evidence
+
+PR #31 implementation
+[`bfe2f0d3fde105b20581f5d7b86dd485277cd783`](https://github.com/Eric-Song-Nop/pi-acp/commit/bfe2f0d3fde105b20581f5d7b86dd485277cd783)
+has sole parent the accepted C3.4 documentation publication
+`ca2d093b57a4d56f3ac39427987a0e6751b28cad`, tree
+`eedd4552b24a0f6462b29201e74c3535fb4206f3`, and exact 12-path scope. Its
+fixture-only, default-off `/fixture-agent` preview requires exact
+`PI_ACP_EXPERIMENTAL_FIXTURE_AGENT=1`; no other value exposes or dispatches the
+extension. The adapter preserves request-bound `agent_run` only after the
+attributed provider stream and agent turn settle, emits one assistant chunk
+before one ACP `end_turn`, persists the synthetic user/assistant turn, proves a
+same-PID follow-up probe, and tears down without mutable repository output.
+General extension publication, lifecycle failures, and streaming concurrency
+remain in C2.3/C2.4, C3.6, and C3.7.
+
+Ownership recognition intentionally follows the generic slash router's
+`trimStart()` boundary, so leading space/newline cannot bypass either the
+enabled preview or the flag-off exact-extension kill switch into prompt/model
+routing. Invocation validity remains raw byte-exact: exactly one text block
+equal to `/fixture-agent`. Leading/trailing whitespace, arguments, multiple
+blocks, and attachments are owned refusals before prompt or execute;
+`/fixture-agentx`, including with leading whitespace, remains unrelated generic
+routing. The structured call itself is exact extension source/name
+`extension`/`fixture-agent` with empty arguments.
+
+Two earlier candidates remain excluded from accepted evidence. Original
+`8f77eb12552ae109e975941a3515654b51e8bb26` was invalidated by COMMENT
+[review `4894728897`](https://github.com/Eric-Song-Nop/pi-acp/pull/31#pullrequestreview-4894728897)
+(`1 P1`) because raw candidate recognition diverged from the generic router's
+leading-whitespace normalization. Replacement
+`53a8e3e75b896879a5b5d505faba4c1a2dd408c0` repaired that ownership gap, but
+[run `31368632822`](https://github.com/Eric-Song-Nop/pi-acp/actions/runs/31368632822)
+failed patched-agent stress iteration 41 when a final release sentinel became
+reader-visible before its contents were complete; an exact local reproduction
+also observed an analogous zero-byte final receipt.
+
+Final `bfe2f0d3…` publishes release sentinels only after unique same-directory
+staging, file fsync, and close, using an atomic no-clobber hard link with
+exact-content `EEXIST` validation. Receipts remain hidden under a unique
+`.json.tmp` staging name through write/file-fsync/close, then use same-directory
+rename and directory fsync. The receipt path proves atomic complete visibility
+under the contractual fresh private root and single-writer model; its
+`lstat`-then-rename sequence is not adversarial atomic no-replace against a
+competing same-UID actor. Deterministic coverage preserves/rejects a corrupt
+final, exercises concurrent identical release publishers, parses all receipts,
+and requires no temporary residue after quiescent shutdown.
+
+Exact source-leaf SHA-256 values:
+
+| Source leaf                                               | SHA-256                                                            |
+| --------------------------------------------------------- | ------------------------------------------------------------------ |
+| `src/pi-rpc/process.ts`                                   | `92aea5099cb2cdb4e0bf53716911f25dba568883c28006ac0c254a8077b3242c` |
+| `src/acp/pi-commands.ts`                                  | `08a8da8e555ee71018ee704a2ffe802a897a7e4c0ff737a9ba1ff6a76d562679` |
+| `src/acp/agent.ts`                                        | `8795690598a1d87b4597581c65826e666faf6bbddf637832e7eaafa4e60568e8` |
+| `test/unit/pi-rpc-execute-command.test.ts`                | `429ea57ffb37505c940f63fce2e9fdbc3f55d03d36bc16123631644be6971332` |
+| `test/unit/pi-command-catalog-preview.test.ts`            | `4953c68a268bc1f4ae0043f4b32cf990c6780abb03e0d5cefb85ee444337980e` |
+| `test/component/fixture-state-preview.test.ts`            | `43fa89d2fae72cb38e3ca453747657fd8fe4f93760508e5ee5adcef437d6ca21` |
+| `test/fixtures/pi-extension-pack/c3.5-agent-run/index.ts` | `1a2e16bf77538d581f0211dcef886171b85d73f7243dfbb763fcb8e88cf452e8` |
+| `test/helpers/real-pi-fixture.ts`                         | `79ba15d5cc2a8f67d70626cedf8f3464db2b05788976e68d5d10b331fb8e5f77` |
+| `test/component/real-pi-fixture-agent-preview.test.ts`    | `466b6b272e4401e9173306cb634c39c002e196e2b85f280319e3b11c9d2c54e2` |
+| `.github/scripts/run-network-denied-ci.sh`                | `a7dec9806a52f857648768f4b9cfeef7c24ba2e2f627d94c4fc0e9b1f1616c9f` |
+| `.github/workflows/ci.yml`                                | `7ef3d043a63e5e9f1c72a51525f0de081b894060fc6873c11887f158ed9f801a` |
+| `test/unit/ci-workflow-policy.test.ts`                    | `911308b46ed6634ba3322d4fab3670ad79268bb4c67fe83f2a88e000d3794a1b` |
+
+Exact-head [run `31371715892`](https://github.com/Eric-Song-Nop/pi-acp/actions/runs/31371715892)
+passed 10/10 jobs. Full-test job `93402022300` ran 472 tests: 467 passed, zero
+failed, and five were expected dedicated-row skips. Patched-agent job
+`93402022420` passed its real schedules `2/2` with zero skips, then passed
+fresh-process stress `100/100`: 50 asynchronous-preflight and 50 provider-final
+schedules. It ran exact Node `22.19.0` on Linux/amd64 with network none, a
+read-only workspace, UID/GID `1001`, no effective capabilities, and
+`noNewPrivileges:true`. Required job `93403883152` passed with exact tested head
+`bfe2f0d3…` and base `ca2d093b…`. Current/exact focused-policy tests passed
+`93/93`; the canonical real schedules raise the combined proof to `95/95`, and
+exact local fresh-process stress also passed `100/100`. Permanent same-author
+`COMMENTED`
+[review `4895294936`](https://github.com/Eric-Song-Nop/pi-acp/pull/31#pullrequestreview-4895294936)
+is bound to exact `bfe2f0d3…`, records CLEAN `0 P1/P2/P3`, and leaves PR #31
+draft/open/unmerged. The original P1 thread is resolved; this review is not
+represented as `APPROVED`.
+
+`package.json`, `package-lock.json`, the Pi artifact/acquisition, C3.4 state
+preview, and complete C0.7 tree remain byte-identical. Rollback unsets/removes
+only `PI_ACP_EXPERIMENTAL_FIXTURE_AGENT` and reverts the fixture-agent path and
+dedicated gate. It preserves `/fixture-state`, the immutable Pi artifact, stock
+Pi `0.83.0`, and frozen C0.7 evidence; persisted fixture-agent turns are
+ordinary Pi messages and need no migration or deletion.
 
 ##### Immutable C3.2 patched-Pi artifact
 
@@ -1266,7 +1356,7 @@ review also records a reviewer-host concurrent full-suite timing signal limited
 to inherited real-Pi timeout/recovery cases; every affected group then passed
 isolated `4/4`, `2/2`, and `5/5`, while the exact-head CI full test stayed green.
 The accepted compatibility tuple and rollback are repeated in
-[`BASELINE.md`](BASELINE.md#c31c34-experimental-patched-pi-preview).
+[`BASELINE.md`](BASELINE.md#c31c35-experimental-patched-pi-previews).
 
 fork [issue #25](https://github.com/Eric-Song-Nop/pi-acp/issues/25) 是 canonical contract。
 controlled Pi patch surface 精确为九个文件：

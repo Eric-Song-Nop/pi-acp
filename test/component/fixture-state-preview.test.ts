@@ -2,7 +2,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { RequestError, type AgentSideConnection, type PromptRequest } from '@agentclientprotocol/sdk'
 import { PiAcpAgent } from '../../src/acp/agent.js'
-import { FIXTURE_STATE_COMMAND_NAME } from '../../src/acp/pi-commands.js'
+import { FIXTURE_AGENT_COMMAND_NAME, FIXTURE_STATE_COMMAND_NAME } from '../../src/acp/pi-commands.js'
 import { PiAcpSession, TERMINAL_UPDATE_FLUSH_TIMEOUT_MS } from '../../src/acp/session.js'
 import {
   PiRpcExecuteCommandProtocolError,
@@ -26,6 +26,17 @@ const COMMAND_CATALOG = {
         scope: 'project',
         origin: 'top-level'
       }
+    },
+    {
+      name: 'fixture-agent',
+      description: 'Fixture agent',
+      source: 'extension',
+      sourceInfo: {
+        path: '/private/project/.pi/extensions/fixture-agent.ts',
+        source: 'project-settings',
+        scope: 'project',
+        origin: 'top-level'
+      }
     }
   ]
 }
@@ -39,6 +50,7 @@ class PreviewPiProcess extends FakePiRpcProcess {
   getCommandsCount = 0
   getSessionStatsCount = 0
   notifyBeforeResponse = false
+  assistantDeltaBeforeResponse: string | null = null
   resultFactory: (requestId: string, name: string) => PiRpcExecuteCommandResult = (requestId, name) => ({
     success: true,
     data: {
@@ -82,6 +94,12 @@ class PreviewPiProcess extends FakePiRpcProcess {
         method: 'notify',
         message: 'Pi ACP fixture loaded',
         notifyType: 'info'
+      })
+    }
+    if (this.assistantDeltaBeforeResponse !== null) {
+      this.emit({
+        type: 'message_update',
+        assistantMessageEvent: { type: 'text_delta', delta: this.assistantDeltaBeforeResponse }
       })
     }
     return this.resultFactory(requestId, name)
@@ -191,6 +209,33 @@ class GatedNotifyConnection extends FakeAgentSideConnection {
   }
 }
 
+class GatedAssistantConnection extends FakeAgentSideConnection {
+  private releaseAssistant!: () => void
+  private resolveAssistantStarted!: () => void
+  readonly assistantDeliveryStarted = new Promise<void>(resolve => {
+    this.resolveAssistantStarted = resolve
+  })
+  private readonly assistantGate = new Promise<void>(resolve => {
+    this.releaseAssistant = resolve
+  })
+
+  override async sessionUpdate(message: Parameters<AgentSideConnection['sessionUpdate']>[0]): Promise<void> {
+    await super.sessionUpdate(message)
+    if (
+      message.update.sessionUpdate === 'agent_message_chunk' &&
+      message.update.content.type === 'text' &&
+      message.update.content.text === 'Pi ACP C3.5 fixture agent response'
+    ) {
+      this.resolveAssistantStarted()
+      await this.assistantGate
+    }
+  }
+
+  release(): void {
+    this.releaseAssistant()
+  }
+}
+
 class FailThenGateCatalogConnection extends FakeAgentSideConnection {
   private releasePublicationGate!: () => void
   private resolveRetryStarted!: () => void
@@ -221,13 +266,19 @@ class FailThenGateCatalogConnection extends FakeAgentSideConnection {
 
 function createHarness(options?: {
   enabled?: boolean
+  fixtureStateEnv?: string
+  fixtureAgentEnv?: string
   capability?: boolean
   proc?: PreviewPiProcess
   conn?: FakeAgentSideConnection
 }) {
-  const previous = process.env.PI_ACP_EXPERIMENTAL_FIXTURE_STATE
-  if (options?.enabled) process.env.PI_ACP_EXPERIMENTAL_FIXTURE_STATE = '1'
-  else delete process.env.PI_ACP_EXPERIMENTAL_FIXTURE_STATE
+  const previousState = process.env.PI_ACP_EXPERIMENTAL_FIXTURE_STATE
+  const previousAgent = process.env.PI_ACP_EXPERIMENTAL_FIXTURE_AGENT
+  const fixtureStateEnv = options?.fixtureStateEnv ?? (options?.enabled ? '1' : undefined)
+  if (fixtureStateEnv === undefined) delete process.env.PI_ACP_EXPERIMENTAL_FIXTURE_STATE
+  else process.env.PI_ACP_EXPERIMENTAL_FIXTURE_STATE = fixtureStateEnv
+  if (options?.fixtureAgentEnv === undefined) delete process.env.PI_ACP_EXPERIMENTAL_FIXTURE_AGENT
+  else process.env.PI_ACP_EXPERIMENTAL_FIXTURE_AGENT = options.fixtureAgentEnv
 
   const conn = options?.conn ?? new FakeAgentSideConnection()
   const proc = options?.proc ?? new PreviewPiProcess()
@@ -248,8 +299,10 @@ function createHarness(options?: {
     maybeGet: (sessionId: string) => (sessionId === SESSION_ID ? session : undefined)
   }
 
-  if (previous === undefined) delete process.env.PI_ACP_EXPERIMENTAL_FIXTURE_STATE
-  else process.env.PI_ACP_EXPERIMENTAL_FIXTURE_STATE = previous
+  if (previousState === undefined) delete process.env.PI_ACP_EXPERIMENTAL_FIXTURE_STATE
+  else process.env.PI_ACP_EXPERIMENTAL_FIXTURE_STATE = previousState
+  if (previousAgent === undefined) delete process.env.PI_ACP_EXPERIMENTAL_FIXTURE_AGENT
+  else process.env.PI_ACP_EXPERIMENTAL_FIXTURE_AGENT = previousAgent
 
   return { agent, session, proc, conn }
 }
@@ -261,6 +314,430 @@ function prompt(blocks: PromptRequest['prompt']): PromptRequest {
 function responseCode(response: any): unknown {
   return response?._meta?.piAcp?.executeCommand?.code
 }
+
+for (const fixtureAgentEnv of [undefined, '', '0', '01', 'true'] as const) {
+  test(`fixture-agent preview is request-bound and off for ${fixtureAgentEnv === undefined ? 'an absent flag' : `flag value ${JSON.stringify(fixtureAgentEnv)}`}`, async () => {
+    const proc = new PreviewPiProcess()
+    const { agent } = createHarness({ fixtureAgentEnv, proc })
+    const response = await agent.prompt(prompt([{ type: 'text', text: '/fixture-agent' }]))
+
+    assert.equal(response.stopReason, 'refusal')
+    assert.equal(responseCode(response), 'COMMAND_NOT_FOUND')
+    assert.equal(proc.executeCalls.length, 0)
+    assert.equal(proc.prompts.length, 0)
+  })
+}
+
+test('fixture-agent flag-off routing preserves generic roots but intercepts an exact extension root', async () => {
+  for (const source of ['prompt', 'skill'] as const) {
+    const proc = new PreviewPiProcess()
+    proc.commandCatalog = { commands: [{ name: FIXTURE_AGENT_COMMAND_NAME, source }] }
+    const { agent } = createHarness({ proc })
+    let responseSettled = false
+    const responsePromise = agent.prompt(prompt([{ type: 'text', text: '/fixture-agent anything' }])).then(response => {
+      responseSettled = true
+      return response
+    })
+
+    for (let attempt = 0; attempt < 100 && proc.prompts.length === 0 && !responseSettled; attempt += 1) {
+      await new Promise(resolve => setImmediate(resolve))
+    }
+    assert.equal(responseSettled, false)
+    assert.deepEqual(proc.prompts, [{ message: '/fixture-agent anything', attachments: [] }])
+    assert.equal(proc.executeCalls.length, 0)
+    assert.equal(proc.getCommandsCount, 1)
+
+    proc.emit({ type: 'agent_settled' })
+    assert.equal((await responsePromise).stopReason, 'end_turn')
+  }
+
+  const extensionProc = new PreviewPiProcess()
+  extensionProc.commandCatalog = {
+    commands: [{ name: FIXTURE_AGENT_COMMAND_NAME, source: 'extension' }]
+  }
+  const { agent: extensionAgent } = createHarness({ proc: extensionProc })
+  const extensionResponse = await extensionAgent.prompt(prompt([{ type: 'text', text: '/fixture-agent anything' }]))
+  assert.equal(extensionResponse.stopReason, 'refusal')
+  assert.equal(extensionProc.executeCalls.length, 0)
+  assert.equal(extensionProc.prompts.length, 0)
+  assert.equal(extensionProc.getCommandsCount, 1)
+})
+
+for (const [label, leadingWhitespace] of [
+  ['leading space', ' '],
+  ['leading newline', '\n']
+] as const) {
+  test(`fixture-agent flag-off exact extension intercepts ${label} before generic prompt handling`, async () => {
+    const proc = new PreviewPiProcess()
+    proc.commandCatalog = {
+      commands: [{ name: FIXTURE_AGENT_COMMAND_NAME, source: 'extension' }]
+    }
+    const { agent } = createHarness({ proc })
+    const response = await agent.prompt(prompt([{ type: 'text', text: `${leadingWhitespace}/fixture-agent` }]))
+
+    assert.equal(response.stopReason, 'refusal')
+    assert.equal(responseCode(response), 'COMMAND_INVALID_REQUEST')
+    assert.equal(proc.getCommandsCount, 1)
+    assert.equal(proc.executeCalls.length, 0)
+    assert.equal(proc.prompts.length, 0)
+  })
+}
+
+for (const source of ['prompt', 'skill'] as const) {
+  test(`fixture-agent flag-off exact ${source} alias preserves legacy queueing during an ordinary turn`, async () => {
+    const proc = new PreviewPiProcess()
+    proc.commandCatalog = { commands: [{ name: FIXTURE_AGENT_COMMAND_NAME, source }] }
+    const { agent, session, conn } = createHarness({ proc })
+    const running = session.prompt('ordinary prompt')
+    let queuedSettled = false
+    const queued = agent.prompt(prompt([{ type: 'text', text: '/fixture-agent' }])).then(response => {
+      queuedSettled = true
+      return response
+    })
+
+    for (let attempt = 0; attempt < 100 && proc.getCommandsCount === 0; attempt += 1) {
+      await new Promise(resolve => setImmediate(resolve))
+    }
+    assert.equal(proc.getCommandsCount, 1)
+    assert.equal(queuedSettled, false)
+    assert.equal(proc.executeCalls.length, 0)
+    assert.deepEqual(
+      proc.prompts.map(entry => entry.message),
+      ['ordinary prompt']
+    )
+    assert.deepEqual(
+      session.commandCatalogState.snapshot?.commands.map(command => command.name),
+      [FIXTURE_AGENT_COMMAND_NAME]
+    )
+    assert.equal(
+      conn.updates.some(
+        update =>
+          update.update.sessionUpdate === 'agent_message_chunk' &&
+          update.update.content.type === 'text' &&
+          update.update.content.text === 'Queued message (position 1).'
+      ),
+      true
+    )
+
+    proc.emit({ type: 'agent_settled' })
+    assert.equal(await running, 'end_turn')
+    for (let attempt = 0; attempt < 100 && proc.prompts.length < 2; attempt += 1) {
+      await new Promise(resolve => setImmediate(resolve))
+    }
+    assert.deepEqual(
+      proc.prompts.map(entry => entry.message),
+      ['ordinary prompt', '/fixture-agent']
+    )
+    assert.equal(queuedSettled, false)
+
+    proc.emit({ type: 'agent_start' })
+    proc.emit({ type: 'agent_settled' })
+    assert.equal((await queued).stopReason, 'end_turn')
+    assert.equal(proc.executeCalls.length, 0)
+  })
+}
+
+test('fixture-agent flag-off exact extension keeps its kill-switch reservation while an ordinary turn is active', async () => {
+  const { agent, session, proc } = createHarness()
+  const running = session.prompt('ordinary prompt')
+  const response = await agent.prompt(prompt([{ type: 'text', text: '/fixture-agent' }]))
+
+  assert.equal(response.stopReason, 'refusal')
+  assert.equal(responseCode(response), 'COMMAND_BUSY')
+  assert.equal(proc.getCommandsCount, 1)
+  assert.equal(proc.executeCalls.length, 0)
+  assert.deepEqual(
+    proc.prompts.map(entry => entry.message),
+    ['ordinary prompt']
+  )
+
+  proc.emit({ type: 'agent_settled' })
+  assert.equal(await running, 'end_turn')
+})
+
+test('fixture-agent exact-name fence leaves an unrelated longer slash command to generic Pi handling', async () => {
+  for (const message of ['/fixture-agentx', ' /fixture-agentx', '\n/fixture-agentx']) {
+    const { agent, proc } = createHarness({ fixtureAgentEnv: '1' })
+    const responsePromise = agent.prompt(prompt([{ type: 'text', text: message }]))
+
+    while (proc.prompts.length === 0) await new Promise(resolve => setImmediate(resolve))
+    assert.deepEqual(
+      proc.prompts.map(entry => entry.message),
+      [message]
+    )
+    assert.equal(proc.getCommandsCount, 0)
+    assert.equal(proc.executeCalls.length, 0)
+
+    proc.emit({ type: 'agent_settled' })
+    assert.equal((await responsePromise).stopReason, 'end_turn')
+  }
+})
+
+test('fixture-agent and fixture-state flags independently freeze and reuse one logical catalog', async () => {
+  for (const fixture of ['agent', 'state'] as const) {
+    const proc = new PreviewPiProcess()
+    proc.resultFactory = (requestId, name) => ({
+      success: true,
+      data: {
+        requestId,
+        name,
+        source: 'extension',
+        sourceInfo: {},
+        disposition: name === FIXTURE_AGENT_COMMAND_NAME ? 'agent_run' : 'handled'
+      }
+    })
+    const { agent, session } = createHarness({
+      fixtureAgentEnv: fixture === 'agent' ? '1' : undefined,
+      fixtureStateEnv: fixture === 'state' ? '1' : undefined,
+      proc
+    })
+    const disabledName = fixture === 'agent' ? FIXTURE_STATE_COMMAND_NAME : FIXTURE_AGENT_COMMAND_NAME
+    const enabledName = fixture === 'agent' ? FIXTURE_AGENT_COMMAND_NAME : FIXTURE_STATE_COMMAND_NAME
+
+    const disabled = await agent.prompt(prompt([{ type: 'text', text: `/${disabledName}` }]))
+    assert.equal(disabled.stopReason, 'refusal')
+    assert.equal(responseCode(disabled), 'COMMAND_NOT_FOUND')
+    assert.equal(proc.executeCalls.length, 0)
+    assert.equal(proc.prompts.length, 0)
+
+    const enabled = await agent.prompt(prompt([{ type: 'text', text: `/${enabledName}` }]))
+    assert.equal(enabled.stopReason, 'end_turn')
+    assert.deepEqual(proc.executeCalls, [{ requestId: proc.executeCalls[0]?.requestId, name: enabledName, args: '' }])
+    assert.equal(proc.prompts.length, 0)
+    assert.equal(proc.getCommandsCount, 1)
+    assert.deepEqual(
+      session.commandCatalogState.snapshot?.commands.map(command => command.name),
+      [enabledName]
+    )
+    assert.equal((enabled as any)._meta?.piAcp?.routing?.promptForwardedToPi, false)
+    assert.equal((enabled as any)._meta?.piAcp?.routing?.sentToModel, fixture === 'agent')
+    assert.equal(
+      (enabled as any)._meta?.piAcp?.executeCommand?.disposition,
+      fixture === 'agent' ? 'agent_run' : 'handled'
+    )
+  }
+})
+
+test('fixture-agent exact unambiguous extension executes beside fixture-state with empty args and agent_run routing', async () => {
+  const proc = new PreviewPiProcess()
+  proc.resultFactory = (requestId, name) => ({
+    success: true,
+    data: { requestId, name, source: 'extension', sourceInfo: {}, disposition: 'agent_run' }
+  })
+  const { agent, session } = createHarness({ fixtureAgentEnv: '1', fixtureStateEnv: '1', proc })
+  const response = await agent.prompt(prompt([{ type: 'text', text: '/fixture-agent' }]))
+
+  assert.equal(response.stopReason, 'end_turn')
+  assert.equal(proc.executeCalls.length, 1)
+  assert.equal(proc.executeCalls[0]?.name, FIXTURE_AGENT_COMMAND_NAME)
+  assert.equal(proc.executeCalls[0]?.args, '')
+  assert.equal(proc.prompts.length, 0)
+  assert.deepEqual(
+    session.commandCatalogState.snapshot?.commands.map(command => command.name),
+    [FIXTURE_STATE_COMMAND_NAME, FIXTURE_AGENT_COMMAND_NAME]
+  )
+  assert.deepEqual((response as any)._meta?.piAcp, {
+    executeCommand: {
+      requestId: proc.executeCalls[0]?.requestId,
+      name: FIXTURE_AGENT_COMMAND_NAME,
+      source: 'extension',
+      disposition: 'agent_run'
+    },
+    routing: {
+      promptForwardedToPi: false,
+      sentToModel: true
+    }
+  })
+})
+
+test('fixture-state fails closed when its exact wire response claims agent_run', async () => {
+  const proc = new PreviewPiProcess()
+  proc.resultFactory = (requestId, name) => ({
+    success: true,
+    data: { requestId, name, source: 'extension', sourceInfo: {}, disposition: 'agent_run' }
+  })
+  const { agent } = createHarness({ fixtureStateEnv: '1', proc })
+  const response = await agent.prompt(prompt([{ type: 'text', text: '/fixture-state' }]))
+
+  assert.equal(response.stopReason, 'refusal')
+  assert.equal(responseCode(response), 'COMMAND_HANDLER_FAILED')
+  assert.equal(proc.executeCalls.length, 1)
+  assert.equal(proc.prompts.length, 0)
+  assert.equal((response as any)._meta?.piAcp?.routing?.promptForwardedToPi, false)
+  assert.equal((response as any)._meta?.piAcp?.routing?.sentToModel, false)
+})
+
+test('fixture-agent fails closed when its exact wire response claims handled', async () => {
+  const proc = new PreviewPiProcess()
+  proc.resultFactory = (requestId, name) => ({
+    success: true,
+    data: { requestId, name, source: 'extension', sourceInfo: {}, disposition: 'handled' }
+  })
+  const { agent } = createHarness({ fixtureAgentEnv: '1', proc })
+  const response = await agent.prompt(prompt([{ type: 'text', text: '/fixture-agent' }]))
+
+  assert.equal(response.stopReason, 'refusal')
+  assert.equal(responseCode(response), 'COMMAND_HANDLER_FAILED')
+  assert.equal(proc.executeCalls.length, 1)
+  assert.equal(proc.prompts.length, 0)
+  assert.equal((response as any)._meta?.piAcp?.routing?.promptForwardedToPi, false)
+  assert.equal((response as any)._meta?.piAcp?.routing?.sentToModel, false)
+})
+
+test('fixture-agent preview refuses missing physical capability without exposure, prompt, or execute', async () => {
+  const { agent, proc, session } = createHarness({ fixtureAgentEnv: '1', capability: false })
+  const response = await agent.prompt(prompt([{ type: 'text', text: '/fixture-agent' }]))
+
+  assert.equal(response.stopReason, 'refusal')
+  assert.equal(responseCode(response), 'COMMAND_NOT_FOUND')
+  assert.equal(proc.executeCalls.length, 0)
+  assert.equal(proc.prompts.length, 0)
+  assert.equal(
+    session.commandCatalogState.snapshot?.commands.some(command => command.name === FIXTURE_AGENT_COMMAND_NAME) ??
+      false,
+    false
+  )
+})
+
+for (const { label, commands } of [
+  {
+    label: 'missing exact extension',
+    commands: []
+  },
+  {
+    label: 'duplicate exact extension',
+    commands: [
+      { name: FIXTURE_AGENT_COMMAND_NAME, source: 'extension' },
+      { name: FIXTURE_AGENT_COMMAND_NAME, source: 'extension' }
+    ]
+  },
+  {
+    label: 'trimmed extension',
+    commands: [
+      { name: FIXTURE_AGENT_COMMAND_NAME, source: 'extension' },
+      { name: ' fixture-agent ', source: 'extension' }
+    ]
+  },
+  {
+    label: 'exact prompt',
+    commands: [
+      { name: FIXTURE_AGENT_COMMAND_NAME, source: 'extension' },
+      { name: FIXTURE_AGENT_COMMAND_NAME, source: 'prompt' }
+    ]
+  },
+  {
+    label: 'trimmed skill',
+    commands: [
+      { name: FIXTURE_AGENT_COMMAND_NAME, source: 'extension' },
+      { name: ' fixture-agent ', source: 'skill' }
+    ]
+  }
+] as const) {
+  test(`fixture-agent preview refuses ${label}`, async () => {
+    const proc = new PreviewPiProcess()
+    proc.commandCatalog = { commands }
+    const { agent, session } = createHarness({ fixtureAgentEnv: '1', proc })
+    const response = await agent.prompt(prompt([{ type: 'text', text: '/fixture-agent' }]))
+
+    assert.equal(response.stopReason, 'refusal')
+    assert.equal(responseCode(response), 'COMMAND_NOT_FOUND')
+    assert.equal(proc.executeCalls.length, 0)
+    assert.equal(proc.prompts.length, 0)
+    assert.equal(
+      session.commandCatalogState.snapshot?.commands.some(command => command.name === FIXTURE_AGENT_COMMAND_NAME),
+      false
+    )
+  })
+}
+
+const invalidFixtureAgentPrompts: Array<readonly [string, PromptRequest['prompt']]> = [
+  ['leading space', [{ type: 'text', text: ' /fixture-agent' }]],
+  ['leading newline', [{ type: 'text', text: '\n/fixture-agent' }]],
+  ['trailing whitespace', [{ type: 'text', text: '/fixture-agent ' }]],
+  ['arguments', [{ type: 'text', text: '/fixture-agent anything' }]],
+  [
+    'multiple text blocks',
+    [
+      { type: 'text', text: '/fixture-agent' },
+      { type: 'text', text: '' }
+    ]
+  ],
+  [
+    'an attachment',
+    [
+      { type: 'text', text: '/fixture-agent' },
+      { type: 'image', mimeType: 'image/png', data: 'AA==' }
+    ]
+  ]
+]
+
+for (const [label, blocks] of invalidFixtureAgentPrompts) {
+  test(`fixture-agent preview refuses ${label} before execute or generic prompt handling`, async () => {
+    const { agent, proc } = createHarness({ fixtureAgentEnv: '1' })
+    const response = await agent.prompt(prompt(blocks))
+
+    assert.equal(response.stopReason, 'refusal')
+    assert.equal(responseCode(response), 'COMMAND_INVALID_REQUEST')
+    assert.equal(proc.executeCalls.length, 0)
+    assert.equal(proc.prompts.length, 0)
+  })
+}
+
+test('fixture-agent preview keeps assistant updates ahead of its request-bound ACP response', async () => {
+  const conn = new GatedAssistantConnection()
+  const proc = new PreviewPiProcess()
+  proc.assistantDeltaBeforeResponse = 'Pi ACP C3.5 fixture agent response'
+  proc.resultFactory = (requestId, name) => ({
+    success: true,
+    data: { requestId, name, source: 'extension', sourceInfo: {}, disposition: 'agent_run' }
+  })
+  const { agent } = createHarness({ fixtureAgentEnv: '1', proc, conn })
+  let responseSettled = false
+  const responsePromise = agent.prompt(prompt([{ type: 'text', text: '/fixture-agent' }])).then(response => {
+    responseSettled = true
+    return response
+  })
+
+  await conn.assistantDeliveryStarted
+  assert.equal(responseSettled, false)
+  assert.equal(proc.executeCalls.length, 1)
+  assert.equal(proc.prompts.length, 0)
+  assert.equal(
+    conn.updates.filter(
+      update =>
+        update.update.sessionUpdate === 'agent_message_chunk' &&
+        update.update.content.type === 'text' &&
+        update.update.content.text === 'Pi ACP C3.5 fixture agent response'
+    ).length,
+    1
+  )
+
+  conn.release()
+  const response = await responsePromise
+  assert.equal(response.stopReason, 'end_turn')
+  assert.equal((response as any)._meta?.piAcp?.executeCommand?.disposition, 'agent_run')
+  assert.deepEqual((response as any)._meta?.piAcp?.routing, {
+    promptForwardedToPi: false,
+    sentToModel: true
+  })
+})
+
+test('fixture-agent preview fails busy closed instead of queuing, executing, or prompting', async () => {
+  const { agent, session, proc } = createHarness({ fixtureAgentEnv: '1' })
+  const running = session.prompt('ordinary prompt')
+  const response = await agent.prompt(prompt([{ type: 'text', text: '/fixture-agent' }]))
+
+  assert.equal(response.stopReason, 'refusal')
+  assert.equal(responseCode(response), 'COMMAND_BUSY')
+  assert.equal(proc.executeCalls.length, 0)
+  assert.deepEqual(
+    proc.prompts.map(entry => entry.message),
+    ['ordinary prompt']
+  )
+
+  proc.emit({ type: 'agent_settled' })
+  assert.equal(await running, 'end_turn')
+})
 
 test('fixture-state preview is default-off and never falls through to generic prompt', async () => {
   const { agent, proc } = createHarness({ enabled: false })

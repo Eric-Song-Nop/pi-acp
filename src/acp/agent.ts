@@ -58,6 +58,7 @@ import { promptToPiMessage } from './translate/prompt.js'
 import { parseCommandArgs } from './slash-commands.js'
 import { getAgentDir, getEnableSkillCommands, getQuietStartup } from './pi-settings.js'
 import {
+  FIXTURE_AGENT_COMMAND_NAME,
   FIXTURE_STATE_COMMAND_NAME,
   freezePiCommandCatalog,
   type FrozenPiCommandCatalog,
@@ -98,12 +99,13 @@ const THOUGHT_LEVEL_CONFIG_ID = 'thought_level'
 export const PROJECT_TRUST_WARNING =
   "pi-acp automatically trusts this project. Project resources and extensions may load or execute with this process's local permissions; ACP permissions are not a sandbox."
 const SESSION_RECOVERY_UNAVAILABLE_CODE = 'PI_ACP_SESSION_RECOVERY_UNAVAILABLE'
+const FIXTURE_AGENT_PREVIEW_ENV = 'PI_ACP_EXPERIMENTAL_FIXTURE_AGENT'
 const FIXTURE_STATE_PREVIEW_ENV = 'PI_ACP_EXPERIMENTAL_FIXTURE_STATE'
 const FIXTURE_STATE_CATALOG_DISCOVERY_FAILED_CODE = 'PI_COMMAND_CATALOG_DISCOVERY_FAILED'
 /** Distinct from the sealed 500ms terminal-update cut in session.ts. */
 export const SESSION_RECOVERY_HANDSHAKE_TIMEOUT_MS = 2_000
 
-type FixtureStateRejectionCode =
+type FixtureCommandRejectionCode =
   | 'COMMAND_INVALID_REQUEST'
   | 'COMMAND_NOT_FOUND'
   | 'COMMAND_BUSY'
@@ -111,7 +113,9 @@ type FixtureStateRejectionCode =
   | 'COMMAND_HANDLER_FAILED'
 
 type FixtureStateInvocation = Readonly<{ args: string }>
-type FixtureStateRefusalReason = 'disabled' | 'capability' | 'collision' | 'attachments'
+type FixtureAgentInvocation = Readonly<{ valid: boolean }>
+type FixtureCommandName = typeof FIXTURE_STATE_COMMAND_NAME | typeof FIXTURE_AGENT_COMMAND_NAME
+type FixtureCommandRefusalReason = 'disabled' | 'capability' | 'collision' | 'attachments' | 'invocation'
 
 function parseFixtureStateInvocation(message: string): FixtureStateInvocation | null {
   const invocation = `/${FIXTURE_STATE_COMMAND_NAME}`
@@ -122,43 +126,70 @@ function parseFixtureStateInvocation(message: string): FixtureStateInvocation | 
   return Object.freeze({ args: message.slice(invocation.length + 1) })
 }
 
+function parseFixtureAgentInvocation(prompt: PromptRequest['prompt']): FixtureAgentInvocation | null {
+  const invocation = `/${FIXTURE_AGENT_COMMAND_NAME}`
+  const textBlocks = prompt.filter(
+    (block): block is Extract<(typeof prompt)[number], { type: 'text' }> => block.type === 'text'
+  )
+  const combinedText = textBlocks.map(block => block.text).join('')
+  const isInvocationPrefix = (value: string): boolean => {
+    if (!value.startsWith(invocation)) return false
+    const delimiter = value.charAt(invocation.length)
+    return delimiter === '' || /\s/u.test(delimiter)
+  }
+  const isCandidateInvocationPrefix = (value: string): boolean => isInvocationPrefix(value.trimStart())
+  const isCandidate =
+    isCandidateInvocationPrefix(combinedText) || textBlocks.some(block => isCandidateInvocationPrefix(block.text))
+  if (!isCandidate) return null
+
+  return Object.freeze({
+    valid: prompt.length === 1 && prompt[0]?.type === 'text' && prompt[0].text === invocation
+  })
+}
+
 function promptHasAttachments(prompt: PromptRequest['prompt']): boolean {
   return prompt.some(block => block.type !== 'text')
 }
 
-function fixtureStateSummary(code: FixtureStateRejectionCode, reason?: FixtureStateRefusalReason): string {
-  if (reason === 'disabled') return 'The experimental /fixture-state preview is disabled; nothing was sent to Pi.'
+function fixtureCommandSummary(
+  name: FixtureCommandName,
+  code: FixtureCommandRejectionCode,
+  reason?: FixtureCommandRefusalReason
+): string {
+  if (reason === 'disabled') return `The experimental /${name} preview is disabled; nothing was sent to Pi.`
   if (reason === 'capability') return 'This Pi process does not support execute_command; nothing was sent to Pi.'
-  if (reason === 'collision') return 'The /fixture-state command did not resolve to one exact extension command.'
-  if (reason === 'attachments') return '/fixture-state accepts text arguments only; attachments were not sent to Pi.'
+  if (reason === 'collision') return `The /${name} command did not resolve to one exact extension command.`
+  if (reason === 'attachments') return `/${name} accepts text arguments only; attachments were not sent to Pi.`
+  if (reason === 'invocation') return `/${name} is argument-free and accepts exactly one text block.`
 
   switch (code) {
     case 'COMMAND_INVALID_REQUEST':
-      return 'Pi rejected the /fixture-state command request as invalid.'
+      return `Pi rejected the /${name} command request as invalid.`
     case 'COMMAND_BUSY':
-      return 'The Pi session is busy; /fixture-state was not queued or sent.'
+      return `The Pi session is busy; /${name} was not queued or sent.`
     case 'COMMAND_REQUEST_CONFLICT':
       return 'Pi rejected a conflicting command request identity.'
     case 'COMMAND_HANDLER_FAILED':
-      return 'The /fixture-state extension handler failed.'
+      return `The /${name} extension handler failed.`
     case 'COMMAND_NOT_FOUND':
-      return 'The /fixture-state extension command is not available.'
+      return `The /${name} extension command is not available.`
   }
 }
 
-function fixtureStateRefusal(
+function fixtureCommandRefusal(
   requestId: string,
-  code: FixtureStateRejectionCode,
-  reason?: FixtureStateRefusalReason
+  name: FixtureCommandName,
+  code: FixtureCommandRejectionCode,
+  reason?: FixtureCommandRefusalReason
 ): PromptResponse {
-  const summary = fixtureStateSummary(code, reason)
+  const summary = fixtureCommandSummary(name, code, reason)
   return {
     stopReason: 'refusal',
     _meta: {
       piAcp: {
         executeCommand: {
           requestId,
-          name: FIXTURE_STATE_COMMAND_NAME,
+          name,
           disposition: 'rejected',
           code
         },
@@ -167,7 +198,7 @@ function fixtureStateRefusal(
           code,
           phase: 'execution',
           source: 'extension',
-          command: FIXTURE_STATE_COMMAND_NAME,
+          command: name,
           summary,
           truncated: false,
           redacted: false
@@ -181,34 +212,38 @@ function fixtureStateRefusal(
   }
 }
 
-function fixtureStateHandled(requestId: string): PromptResponse {
+function fixtureCommandCompleted(
+  requestId: string,
+  name: FixtureCommandName,
+  disposition: 'handled' | 'agent_run'
+): PromptResponse {
   return {
     stopReason: 'end_turn',
     _meta: {
       piAcp: {
         executeCommand: {
           requestId,
-          name: FIXTURE_STATE_COMMAND_NAME,
+          name,
           source: 'extension',
-          disposition: 'handled'
+          disposition
         },
         routing: {
           promptForwardedToPi: false,
-          sentToModel: false
+          sentToModel: disposition === 'agent_run'
         }
       }
     }
   }
 }
 
-function fixtureStateCancelled(requestId: string): PromptResponse {
+function fixtureCommandCancelled(requestId: string, name: FixtureCommandName): PromptResponse {
   return {
     stopReason: 'cancelled',
     _meta: {
       piAcp: {
         executeCommand: {
           requestId,
-          name: FIXTURE_STATE_COMMAND_NAME,
+          name,
           disposition: 'cancelled'
         },
         routing: { promptForwardedToPi: false, sentToModel: false }
@@ -366,6 +401,7 @@ export class PiAcpAgent implements ACPAgent {
   private explicitSessionTail: Promise<void> = Promise.resolve()
   private disposePromise: Promise<void> | null = null
   private disposed = false
+  private readonly fixtureAgentPreviewEnabled: boolean
   private readonly fixtureStatePreviewEnabled: boolean
 
   async dispose(): Promise<void> {
@@ -398,8 +434,21 @@ export class PiAcpAgent implements ACPAgent {
 
   constructor(conn: AgentSideConnection, _config?: unknown) {
     this.conn = conn
+    this.fixtureAgentPreviewEnabled = process.env[FIXTURE_AGENT_PREVIEW_ENV] === '1'
     this.fixtureStatePreviewEnabled = process.env[FIXTURE_STATE_PREVIEW_ENV] === '1'
     void _config
+  }
+
+  private commandCatalogOptions(session: PiAcpSession, enableSkillCommands: boolean): PiCommandCatalogOptions {
+    const supports = (session as PiAcpSession & { supportsExecuteCommand?: () => boolean }).supportsExecuteCommand
+    const supportsExecuteCommand = typeof supports === 'function' && supports.call(session)
+    return {
+      enableSkillCommands,
+      reserveFixtureStateName: this.fixtureStatePreviewEnabled,
+      enableFixtureStateCommand: this.fixtureStatePreviewEnabled && supportsExecuteCommand,
+      reserveFixtureAgentName: this.fixtureAgentPreviewEnabled,
+      enableFixtureAgentCommand: this.fixtureAgentPreviewEnabled && supportsExecuteCommand
+    }
   }
 
   private discoverCommandCatalog(
@@ -436,13 +485,7 @@ export class PiAcpAgent implements ACPAgent {
     // intentionally scheduled after the session/new or session/load response.
     setTimeout(() => {
       void (async () => {
-        const supports = (session as PiAcpSession & { supportsExecuteCommand?: () => boolean }).supportsExecuteCommand
-        const options = {
-          enableSkillCommands,
-          reserveFixtureStateName: this.fixtureStatePreviewEnabled,
-          enableFixtureStateCommand:
-            this.fixtureStatePreviewEnabled && typeof supports === 'function' && supports.call(session)
-        }
+        const options = this.commandCatalogOptions(session, enableSkillCommands)
         let catalog: FrozenPiCommandCatalog
         try {
           catalog = await this.discoverCommandCatalog(session, options)
@@ -527,7 +570,7 @@ export class PiAcpAgent implements ACPAgent {
           : Object.freeze({ requestId: crypto.randomUUID(), name: FIXTURE_STATE_COMMAND_NAME })
     } catch (error) {
       if (error instanceof PiAcpCommandBusyError) {
-        return fixtureStateRefusal(crypto.randomUUID(), 'COMMAND_BUSY')
+        return fixtureCommandRefusal(crypto.randomUUID(), FIXTURE_STATE_COMMAND_NAME, 'COMMAND_BUSY')
       }
       throw error
     }
@@ -540,19 +583,19 @@ export class PiAcpAgent implements ACPAgent {
     try {
       const supports = (session as PiAcpSession & { supportsExecuteCommand?: () => boolean }).supportsExecuteCommand
       const sessionCwd = (session as PiAcpSession & { cwd?: unknown }).cwd
-      const options = {
-        enableSkillCommands: typeof sessionCwd === 'string' ? getEnableSkillCommands(sessionCwd) : true,
-        reserveFixtureStateName: this.fixtureStatePreviewEnabled,
-        enableFixtureStateCommand:
-          this.fixtureStatePreviewEnabled && typeof supports === 'function' && supports.call(session)
-      }
+      const options = this.commandCatalogOptions(
+        session,
+        typeof sessionCwd === 'string' ? getEnableSkillCommands(sessionCwd) : true
+      )
 
       let catalog: FrozenPiCommandCatalog
       try {
         catalog = await this.discoverCommandCatalog(session, options)
       } catch (error) {
         const interrupted = this.commandReservationOutcome(session, reservation)
-        if (interrupted?.kind === 'cancelled') return fixtureStateCancelled(interrupted.requestId)
+        if (interrupted?.kind === 'cancelled') {
+          return fixtureCommandCancelled(interrupted.requestId, FIXTURE_STATE_COMMAND_NAME)
+        }
         if (
           error instanceof RequestError &&
           (error.data as { code?: unknown } | undefined)?.code === PI_RPC_PROCESS_TERMINATED_CODE
@@ -565,36 +608,62 @@ export class PiAcpAgent implements ACPAgent {
         )
       }
       const afterDiscovery = this.commandReservationOutcome(session, reservation)
-      if (afterDiscovery?.kind === 'cancelled') return fixtureStateCancelled(afterDiscovery.requestId)
+      if (afterDiscovery?.kind === 'cancelled') {
+        return fixtureCommandCancelled(afterDiscovery.requestId, FIXTURE_STATE_COMMAND_NAME)
+      }
 
       if (!this.fixtureStatePreviewEnabled && catalog.fixtureStateExtensionCount === 0) return null
       if (hasAttachments) {
-        return fixtureStateRefusal(reservation.requestId, 'COMMAND_INVALID_REQUEST', 'attachments')
+        return fixtureCommandRefusal(
+          reservation.requestId,
+          FIXTURE_STATE_COMMAND_NAME,
+          'COMMAND_INVALID_REQUEST',
+          'attachments'
+        )
       }
       if (!this.fixtureStatePreviewEnabled) {
-        return fixtureStateRefusal(reservation.requestId, 'COMMAND_NOT_FOUND', 'disabled')
+        return fixtureCommandRefusal(reservation.requestId, FIXTURE_STATE_COMMAND_NAME, 'COMMAND_NOT_FOUND', 'disabled')
       }
       if (!catalog.hasFixtureStateExtension) {
-        return fixtureStateRefusal(reservation.requestId, 'COMMAND_NOT_FOUND', 'collision')
+        return fixtureCommandRefusal(
+          reservation.requestId,
+          FIXTURE_STATE_COMMAND_NAME,
+          'COMMAND_NOT_FOUND',
+          'collision'
+        )
       }
       if (typeof supports !== 'function' || !supports.call(session)) {
-        return fixtureStateRefusal(reservation.requestId, 'COMMAND_NOT_FOUND', 'capability')
+        return fixtureCommandRefusal(
+          reservation.requestId,
+          FIXTURE_STATE_COMMAND_NAME,
+          'COMMAND_NOT_FOUND',
+          'capability'
+        )
       }
 
       const fixtureWasExposed = catalog.commands.some(command => command.name === FIXTURE_STATE_COMMAND_NAME)
       if (!fixtureWasExposed) {
-        return fixtureStateRefusal(reservation.requestId, 'COMMAND_NOT_FOUND', 'collision')
+        return fixtureCommandRefusal(
+          reservation.requestId,
+          FIXTURE_STATE_COMMAND_NAME,
+          'COMMAND_NOT_FOUND',
+          'collision'
+        )
       }
 
       try {
         await this.publishCommandCatalog(session, catalog)
       } catch (error) {
         const interrupted = this.commandReservationOutcome(session, reservation)
-        if (interrupted?.kind === 'cancelled') return fixtureStateCancelled(interrupted.requestId)
+        if (interrupted?.kind === 'cancelled') {
+          return fixtureCommandCancelled(interrupted.requestId, FIXTURE_STATE_COMMAND_NAME)
+        }
         throw error
       }
       const afterPublication = this.commandReservationOutcome(session, reservation)
-      if (afterPublication?.kind === 'cancelled') return fixtureStateCancelled(afterPublication.requestId)
+      if (afterPublication?.kind === 'cancelled') {
+        return fixtureCommandCancelled(afterPublication.requestId, FIXTURE_STATE_COMMAND_NAME)
+      }
 
       const executeReserved = (
         session as PiAcpSession & {
@@ -609,9 +678,170 @@ export class PiAcpAgent implements ACPAgent {
           ? await executeReserved.call(session, reservation, invocation.args)
           : await session.executeCommand(FIXTURE_STATE_COMMAND_NAME, invocation.args)
 
-      if (outcome.kind === 'cancelled') return fixtureStateCancelled(outcome.requestId)
-      if (outcome.response.success) return fixtureStateHandled(outcome.requestId)
-      return fixtureStateRefusal(outcome.requestId, outcome.response.data.code)
+      if (outcome.kind === 'cancelled') return fixtureCommandCancelled(outcome.requestId, FIXTURE_STATE_COMMAND_NAME)
+      if (outcome.response.success) {
+        if (outcome.response.data.disposition !== 'handled') {
+          return fixtureCommandRefusal(outcome.requestId, FIXTURE_STATE_COMMAND_NAME, 'COMMAND_HANDLER_FAILED')
+        }
+        return fixtureCommandCompleted(outcome.requestId, FIXTURE_STATE_COMMAND_NAME, outcome.response.data.disposition)
+      }
+      return fixtureCommandRefusal(outcome.requestId, FIXTURE_STATE_COMMAND_NAME, outcome.response.data.code)
+    } finally {
+      if (typeof release === 'function') release.call(session, reservation)
+    }
+  }
+
+  private async executeFixtureAgentPreview(
+    session: PiAcpSession,
+    invocation: FixtureAgentInvocation
+  ): Promise<PromptResponse | null> {
+    const supports = (session as PiAcpSession & { supportsExecuteCommand?: () => boolean }).supportsExecuteCommand
+    const sessionCwd = (session as PiAcpSession & { cwd?: unknown }).cwd
+    const options = this.commandCatalogOptions(
+      session,
+      typeof sessionCwd === 'string' ? getEnableSkillCommands(sessionCwd) : true
+    )
+    let catalogBeforeReservation: FrozenPiCommandCatalog | null = null
+    if (!this.fixtureAgentPreviewEnabled) {
+      try {
+        catalogBeforeReservation = await this.discoverCommandCatalog(session, options)
+      } catch (error) {
+        if (
+          error instanceof RequestError &&
+          (error.data as { code?: unknown } | undefined)?.code === PI_RPC_PROCESS_TERMINATED_CODE
+        ) {
+          throw error
+        }
+        throw RequestError.internalError(
+          { code: FIXTURE_STATE_CATALOG_DISCOVERY_FAILED_CODE },
+          'Pi command catalog discovery failed; /fixture-agent was not sent.'
+        )
+      }
+      if (catalogBeforeReservation.fixtureAgentExtensionCount === 0) return null
+    }
+
+    const reserve = (
+      session as PiAcpSession & {
+        reserveCommand?: (name: string) => SessionCommandReservation
+      }
+    ).reserveCommand
+    let reservation: SessionCommandReservation
+    try {
+      reservation =
+        typeof reserve === 'function'
+          ? reserve.call(session, FIXTURE_AGENT_COMMAND_NAME)
+          : Object.freeze({ requestId: crypto.randomUUID(), name: FIXTURE_AGENT_COMMAND_NAME })
+    } catch (error) {
+      if (error instanceof PiAcpCommandBusyError) {
+        return fixtureCommandRefusal(crypto.randomUUID(), FIXTURE_AGENT_COMMAND_NAME, 'COMMAND_BUSY')
+      }
+      throw error
+    }
+
+    const release = (
+      session as PiAcpSession & {
+        releaseCommand?: (reservation: SessionCommandReservation) => void
+      }
+    ).releaseCommand
+    try {
+      let catalog = catalogBeforeReservation
+      if (!catalog) {
+        try {
+          catalog = await this.discoverCommandCatalog(session, options)
+        } catch (error) {
+          const interrupted = this.commandReservationOutcome(session, reservation)
+          if (interrupted?.kind === 'cancelled') {
+            return fixtureCommandCancelled(interrupted.requestId, FIXTURE_AGENT_COMMAND_NAME)
+          }
+          if (
+            error instanceof RequestError &&
+            (error.data as { code?: unknown } | undefined)?.code === PI_RPC_PROCESS_TERMINATED_CODE
+          ) {
+            throw error
+          }
+          throw RequestError.internalError(
+            { code: FIXTURE_STATE_CATALOG_DISCOVERY_FAILED_CODE },
+            'Pi command catalog discovery failed; /fixture-agent was not sent.'
+          )
+        }
+        const afterDiscovery = this.commandReservationOutcome(session, reservation)
+        if (afterDiscovery?.kind === 'cancelled') {
+          return fixtureCommandCancelled(afterDiscovery.requestId, FIXTURE_AGENT_COMMAND_NAME)
+        }
+      }
+
+      if (!invocation.valid) {
+        return fixtureCommandRefusal(
+          reservation.requestId,
+          FIXTURE_AGENT_COMMAND_NAME,
+          'COMMAND_INVALID_REQUEST',
+          'invocation'
+        )
+      }
+      if (!this.fixtureAgentPreviewEnabled) {
+        return fixtureCommandRefusal(reservation.requestId, FIXTURE_AGENT_COMMAND_NAME, 'COMMAND_NOT_FOUND', 'disabled')
+      }
+      if (!catalog.hasFixtureAgentExtension) {
+        return fixtureCommandRefusal(
+          reservation.requestId,
+          FIXTURE_AGENT_COMMAND_NAME,
+          'COMMAND_NOT_FOUND',
+          'collision'
+        )
+      }
+      if (typeof supports !== 'function' || !supports.call(session)) {
+        return fixtureCommandRefusal(
+          reservation.requestId,
+          FIXTURE_AGENT_COMMAND_NAME,
+          'COMMAND_NOT_FOUND',
+          'capability'
+        )
+      }
+      const fixtureWasExposed = catalog.commands.some(command => command.name === FIXTURE_AGENT_COMMAND_NAME)
+      if (!fixtureWasExposed) {
+        return fixtureCommandRefusal(
+          reservation.requestId,
+          FIXTURE_AGENT_COMMAND_NAME,
+          'COMMAND_NOT_FOUND',
+          'collision'
+        )
+      }
+
+      try {
+        await this.publishCommandCatalog(session, catalog)
+      } catch (error) {
+        const interrupted = this.commandReservationOutcome(session, reservation)
+        if (interrupted?.kind === 'cancelled') {
+          return fixtureCommandCancelled(interrupted.requestId, FIXTURE_AGENT_COMMAND_NAME)
+        }
+        throw error
+      }
+      const afterPublication = this.commandReservationOutcome(session, reservation)
+      if (afterPublication?.kind === 'cancelled') {
+        return fixtureCommandCancelled(afterPublication.requestId, FIXTURE_AGENT_COMMAND_NAME)
+      }
+
+      const executeReserved = (
+        session as PiAcpSession & {
+          executeReservedCommand?: (
+            reservation: SessionCommandReservation,
+            args: string
+          ) => Promise<SessionExecuteCommandOutcome>
+        }
+      ).executeReservedCommand
+      const outcome =
+        typeof executeReserved === 'function'
+          ? await executeReserved.call(session, reservation, '')
+          : await session.executeCommand(FIXTURE_AGENT_COMMAND_NAME, '')
+
+      if (outcome.kind === 'cancelled') return fixtureCommandCancelled(outcome.requestId, FIXTURE_AGENT_COMMAND_NAME)
+      if (outcome.response.success) {
+        if (outcome.response.data.disposition !== 'agent_run') {
+          return fixtureCommandRefusal(outcome.requestId, FIXTURE_AGENT_COMMAND_NAME, 'COMMAND_HANDLER_FAILED')
+        }
+        return fixtureCommandCompleted(outcome.requestId, FIXTURE_AGENT_COMMAND_NAME, outcome.response.data.disposition)
+      }
+      return fixtureCommandRefusal(outcome.requestId, FIXTURE_AGENT_COMMAND_NAME, outcome.response.data.code)
     } finally {
       if (typeof release === 'function') release.call(session, reservation)
     }
@@ -1384,6 +1614,12 @@ export class PiAcpAgent implements ACPAgent {
     const session = await this.restoreSession(params.sessionId)
 
     const { message, images } = promptToPiMessage(params.prompt)
+    const fixtureAgentInvocation = parseFixtureAgentInvocation(params.prompt)
+    if (fixtureAgentInvocation) {
+      const preview = await this.executeFixtureAgentPreview(session, fixtureAgentInvocation)
+      if (preview) return preview
+    }
+
     const unsupportedPiBuiltin = findUnsupportedPiBuiltinCommand(message)
     if (unsupportedPiBuiltin) return unsupportedPiBuiltinPromptResponse(unsupportedPiBuiltin)
 

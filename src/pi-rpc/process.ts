@@ -153,7 +153,7 @@ export type PiRpcExecuteCommandSuccess = Readonly<{
     name: string
     source: 'extension'
     sourceInfo: Readonly<Record<string, unknown>>
-    disposition: 'handled'
+    disposition: 'handled' | 'agent_run'
   }>
 }>
 
@@ -217,7 +217,7 @@ export function validatePiRpcExecuteCommandResponse(
       !hasExactKeys(data, ['requestId', 'name', 'source', 'sourceInfo', 'disposition']) ||
       response.error !== undefined ||
       data.source !== 'extension' ||
-      data.disposition !== 'handled' ||
+      (data.disposition !== 'handled' && data.disposition !== 'agent_run') ||
       !isRecord(data.sourceInfo) ||
       Object.keys(data.sourceInfo).length !== 0
     ) {
@@ -230,7 +230,7 @@ export function validatePiRpcExecuteCommandResponse(
         name,
         source: 'extension',
         sourceInfo: Object.freeze({}),
-        disposition: 'handled'
+        disposition: data.disposition
       })
     })
   }

@@ -28,7 +28,7 @@ function successResponse(overrides: Record<string, unknown> = {}): Record<string
   }
 }
 
-test('validatePiRpcExecuteCommandResponse accepts exact handled and rejected identities', () => {
+test('validatePiRpcExecuteCommandResponse accepts exact handled, agent_run, and rejected identities', () => {
   assert.deepEqual(validatePiRpcExecuteCommandResponse(successResponse(), 'request-1', 'fixture-state'), {
     success: true,
     data: {
@@ -39,6 +39,32 @@ test('validatePiRpcExecuteCommandResponse accepts exact handled and rejected ide
       disposition: 'handled'
     }
   })
+
+  assert.deepEqual(
+    validatePiRpcExecuteCommandResponse(
+      successResponse({
+        data: {
+          requestId: 'request-1',
+          name: 'fixture-agent',
+          source: 'extension',
+          sourceInfo: {},
+          disposition: 'agent_run'
+        }
+      }),
+      'request-1',
+      'fixture-agent'
+    ),
+    {
+      success: true,
+      data: {
+        requestId: 'request-1',
+        name: 'fixture-agent',
+        source: 'extension',
+        sourceInfo: {},
+        disposition: 'agent_run'
+      }
+    }
+  )
 
   assert.deepEqual(
     validatePiRpcExecuteCommandResponse(
@@ -131,7 +157,7 @@ test('validatePiRpcExecuteCommandResponse rejects identity, disposition, sourceI
           name: 'fixture-state',
           source: 'extension',
           sourceInfo: {},
-          disposition: 'agent_run'
+          disposition: 'queued'
         }
       })
     ],
@@ -255,7 +281,7 @@ test('PiRpcProcess.executeCommand writes exact request identity/name/args and va
   ])
 })
 
-test('PiRpcProcess keeps a live execute_command request pending until an exact response is accepted', async () => {
+test('PiRpcProcess quarantines malformed same-ID frames until exact agent_run settlement and later duplicates', async () => {
   const { proc, requests, writeStdoutRecord } = createWireProcess(() => undefined)
   const events: unknown[] = []
   proc.onEvent(event => events.push(event))
@@ -267,14 +293,14 @@ test('PiRpcProcess keeps a live execute_command request pending until an exact r
     success: true,
     data: {
       requestId: 'live-request',
-      name: 'fixture-state',
+      name: 'fixture-agent',
       source: 'extension',
       sourceInfo: {},
-      disposition: 'handled'
+      disposition: 'agent_run'
     }
   }
   let settlementCount = 0
-  const resultPromise = proc.executeCommand('live-request', 'fixture-state', '').then(result => {
+  const resultPromise = proc.executeCommand('live-request', 'fixture-agent', '').then(result => {
     settlementCount += 1
     return result
   })
@@ -284,7 +310,7 @@ test('PiRpcProcess keeps a live execute_command request pending until an exact r
     {
       id: 'live-request',
       type: 'execute_command',
-      name: 'fixture-state',
+      name: 'fixture-agent',
       args: ''
     }
   ])
@@ -294,9 +320,20 @@ test('PiRpcProcess keeps a live execute_command request pending until an exact r
     ...validResponse,
     data: {
       requestId: 'other-request',
-      name: 'fixture-state',
+      name: 'fixture-agent',
       source: 'extension',
-      disposition: 'handled'
+      sourceInfo: {},
+      disposition: 'agent_run'
+    }
+  })
+  writeStdoutRecord({
+    ...validResponse,
+    data: {
+      requestId: 'live-request',
+      name: 'fixture-agent',
+      source: 'extension',
+      sourceInfo: {},
+      disposition: 'queued'
     }
   })
   await new Promise(resolve => setImmediate(resolve))
@@ -307,10 +344,10 @@ test('PiRpcProcess keeps a live execute_command request pending until an exact r
     success: true,
     data: {
       requestId: 'live-request',
-      name: 'fixture-state',
+      name: 'fixture-agent',
       source: 'extension',
       sourceInfo: {},
-      disposition: 'handled'
+      disposition: 'agent_run'
     }
   })
   assert.equal(settlementCount, 1)
