@@ -143,6 +143,111 @@ teardown without a real model account. The load-only case and sole live C0.7
 The immutable `C0.7-XF02` and `C0.7-XF03` artifacts are historical-only and do
 not execute a current-runtime replay.
 
+## C3.1–C3.4 experimental patched-Pi preview
+
+The verified default-off preview tuple is:
+
+```text
+pi-acp 0.0.33 promotion head @ e198fa37e1fee793a0af0728a1e570d1d0a69b9f
+  product implementation @ 28d7aeedb0d6d3b4ad119a40d0f449d667ce6421
+× C3.3 adapter bridge @ df92ac575ba44fa92ffd3a8b6b56efc7a449e152
+× patched Pi 0.83.0 @ ec55c97d680f8f38359f7b6717c72b83c5e4d29a
+  (upstream base 845d6ff1f6643aba440341cce877ce1c43ebbc39)
+× ACP protocol 1 / TypeScript SDK 0.26.0
+× Node 22.19.0 / npm 10.9.3 in CI; Node 26.5.0 additionally verified locally
+× raw ACP client / Linux amd64 / network-none execution boundary
+× PI_ACP_EXPERIMENTAL_FIXTURE_STATE=1
+```
+
+This tuple certifies only the exact `/fixture-state` extension-command preview.
+The flag is off unless its value is exactly `1`; all broader extension-command,
+agent-triggering, dialog, dynamic-catalog, and manual-client claims remain in
+their later checkpoints. It does not replace the stock Pi `0.83.0` C0.2
+baseline or constitute Zed/non-Zed manual certification.
+
+### Immutable patched-Pi artifact record
+
+- Release/tag:
+  [`pi-acp-execute-command-v0.83.0.1`](https://github.com/Eric-Song-Nop/pi-mono/releases/tag/pi-acp-execute-command-v0.83.0.1);
+  release ID `363749124`, `isImmutable:true`.
+- Annotated tag object:
+  `a885d9f1a99a17258812cf9cdca4b64174efad1b`, peeling to patched source
+  `ec55c97d680f8f38359f7b6717c72b83c5e4d29a`.
+- Exact upstream base:
+  `845d6ff1f6643aba440341cce877ce1c43ebbc39`; patched source tree:
+  `204651bccc3c4141a8e697dee2e8f02eda6e0089`.
+- Sole asset ID `498771039`:
+  `pi-coding-agent-v0.83.0-pi-acp-execute-command-ec55c97d680f8f38359f7b6717c72b83c5e4d29a.tgz`,
+  exactly `5,014,998` bytes.
+- Public-asset SHA-256:
+  `8f646580e36a9d2fa2cef4c36f0000f0f7cfcfda310bbe6e7f3bc07d4b22bdf1`.
+- SHA-512 hex:
+  `03588cc7a07bedff0dd96f3d20b0b89281ddcb78fe507dd24947cdf8e6e5ad53c4e4738c6ad79e3b300cbec32c66414899b8f8ca7ffd3e5726c17ff79a8f612c`.
+- SHA-512 SRI:
+  `sha512-A1iMx6B77f8N2W89ILC4koHdy3j+UH3SSUfN+OblrVPE5HOMateeOzAMvsMsZkFImbj4yn/9PlcmwX/3mo9hLA==`.
+- Build/package toolchain: Node `22.19.0`, npm `10.9.3`; after the
+  coding-agent build the canonical command was
+  `npm pack --ignore-scripts --json ./packages/coding-agent`.
+
+The existing immutable release notes were completed in place with this full
+record. Durable read-back preserved the same release/tag/asset identities and
+`gh release verify` continued to accept the GitHub attestation; no replacement
+tag or asset was created.
+
+Exact patched source-leaf SHA-256 values:
+
+| Source leaf                                                     | SHA-256                                                            |
+| --------------------------------------------------------------- | ------------------------------------------------------------------ |
+| `packages/coding-agent/docs/rpc.md`                             | `66077ccb2c3722cd9a03c76990b303051b45a8c7a498cfa63840b57d19d7de93` |
+| `packages/coding-agent/src/core/agent-session.ts`               | `caaf20097f4ac48e28d427a0cd87af3c12e387ed5c59337bd1dfcee6bbdce875` |
+| `packages/coding-agent/src/index.ts`                            | `fe14614e756d2b91b8ea1ab5ee8a16edbf6f96db060fdd0d0b0c51616dd1c585` |
+| `packages/coding-agent/src/modes/index.ts`                      | `31870014d1d74c29312e8248873be45e91784bb6fbcaa617c8865c3c3e34df51` |
+| `packages/coding-agent/src/modes/rpc/rpc-client.ts`             | `fc26b96cded2c396f7431e628c5173fcef7fb9608b8a4a5330ef52b4ab357a71` |
+| `packages/coding-agent/src/modes/rpc/rpc-mode.ts`               | `51936d1df34e54d118c360fb406107dbfbd7ae7d6c5a3637c3f5945a853e742b` |
+| `packages/coding-agent/src/modes/rpc/rpc-types.ts`              | `708f62e0ee79e6ff13b13002b7ac1b1d41e85661ce9d32e887f31b38b7ec0065` |
+| `packages/coding-agent/test/rpc-client-execute-command.test.ts` | `907a9a10973eec9d7581b16d469129189b70a576d429204a1338ccbbf040649c` |
+| `packages/coding-agent/test/rpc-execute-command.test.ts`        | `5a46f2e9c09d18c3a3a0764dfa32e1b4789f41c5fc04bee377220a8778739fdc` |
+
+### C3.4 execution and retention evidence
+
+The C3.4 product implementation is PR #29 commit
+[`28d7aeedb0d6d3b4ad119a40d0f449d667ce6421`](https://github.com/Eric-Song-Nop/pi-acp/commit/28d7aeedb0d6d3b4ad119a40d0f449d667ce6421),
+with sole parent the accepted C3.3 bridge, tree
+`820eb1d1ee73ab63f1f600719d6e9c8b41372049`, and exact 12-path scope. Its
+original exact-head [run `30742869970`](https://github.com/Eric-Song-Nop/pi-acp/actions/runs/30742869970)
+passed all nine jobs.
+
+Two non-product descendants preserve that implementation identity. Commit
+`bd3a873b13b8d652dff3e15660a1d98d7e01f0a6`, tree
+`1b0512e5d991750f06fde456a7277ea72fb32033`, changes only
+`test/unit/immutable-transcript.test.ts` to inject the immutable transcript's
+historical `2026-07-31` recording date. Commit
+`e198fa37e1fee793a0af0728a1e570d1d0a69b9f`, tree
+`92d7cd7ffba313f5efeb3da1c94502308d078c66`, changes only
+`test/e2e/compatibility-matrix.json` and
+`test/unit/compatibility-matrix.test.ts` to refresh the live dependency-audit
+policy snapshot. The PR-wide promotion scope is therefore 15 distinct paths:
+the frozen 12-path implementation plus one historical-test stabilization and
+two audit-policy paths.
+
+Final exact-head [run `31361247166`](https://github.com/Eric-Song-Nop/pi-acp/actions/runs/31361247166)
+passed all nine jobs at `e198fa37…`. Its patched-preview job `93370478555`
+acquired the public artifact before entering the read-only, unprivileged,
+kernel-network-denied Node `22.19.0` Linux/amd64 boundary, passed the dedicated
+real-Pi cases `3/3` with zero failures or skips, then passed `100/100` fresh
+processes and `200/200` selected normal/cancel-recovery schedules. Same-author
+COMMENT [review `4894184272`](https://github.com/Eric-Song-Nop/pi-acp/pull/29#pullrequestreview-4894184272)
+is bound to exact `e198fa37…` and records a CLEAN `0 P1/P2/P3` audit; it is not
+represented as an `APPROVED` review.
+
+Retain the immutable tag, release, attestation, and asset permanently as
+provenance. The active patch/acquisition may be deleted only after an equivalent
+tagged upstream release passes the same fixture, dual-runtime, public-package,
+and network-denied matrix and pi-acp pins it. Rollback disables/removes
+`PI_ACP_EXPERIMENTAL_FIXTURE_STATE`, restores stock Pi `0.83.0`, and requires no
+session or transcript migration; it never deletes, rewrites, or substitutes the
+provenance artifact.
+
 ## C0.7 immutable failure baseline
 
 The machine-readable source is
@@ -217,11 +322,40 @@ separate `aborted` and `error` cases.
 
 ## Dependency audit snapshot
 
-On 2026-07-31, the locked production dependency graph reported zero findings at
-every npm audit severity (`total: 0`). After the C0.6 Pi `0.83.0` pin, the
-complete graph, including development tooling, reported zero info/low/moderate,
-six high, and zero critical findings (`total: 6`). The compatibility matrix also
-pins the exact sorted GHSA identity set observed by npm `10.9.3`.
+On 2026-08-10, the unchanged locked production dependency graph reported zero
+findings at every npm audit severity (`total: 0`). The complete graph, including
+development tooling, reported zero info, zero low, one moderate, eight high, and
+zero critical findings (`total: 9`). Under npm `10.9.3`, the 21 distinct sorted
+GHSA identities were:
+
+```text
+GHSA-23c5-xmqv-rm74
+GHSA-25h7-pfq9-p65f
+GHSA-3jxr-9vmj-r5cp
+GHSA-3ppc-4f35-3m26
+GHSA-3v7f-55p6-f55p
+GHSA-4cwx-7wf7-3272
+GHSA-52cp-r559-cp3m
+GHSA-5p4m-2wfm-xmqj
+GHSA-7p8r-x3mc-p8w7
+GHSA-7r86-cg39-jmmj
+GHSA-8xcm-r25x-g524
+GHSA-c2c7-rcm5-vvqj
+GHSA-f886-m6hf-6m8v
+GHSA-h67p-54hq-rp68
+GHSA-jr45-8vmc-qm54
+GHSA-m8rv-5g2x-5cg5
+GHSA-mh99-v99m-4gvg
+GHSA-mw96-cpmx-2vgc
+GHSA-rf6f-7fwh-wjgh
+GHSA-rgw5-rvv9-x895
+GHSA-v3r7-h72x-cjcm
+```
+
+The earlier 2026-07-31 six-high snapshot was superseded by live advisory-data
+drift without any package or lockfile change. Commit `e198fa37…` refreshes the
+machine-readable matrix and its exact regression test; 21 is an identity count,
+not the npm vulnerability total.
 
 C0.3 re-runs both audits as a networked live policy check and hard-fails on count,
 advisory, tool-version, or availability drift. The recorded values are neither a
